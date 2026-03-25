@@ -43,7 +43,6 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
 
         # 初始化设置
         self._setup_view()
-        self._setup_signals()
 
     def _setup_view(self) -> None:
         """设置视图基本参数"""
@@ -51,10 +50,6 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
         self.setBackground('w')
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
-
-    def _setup_signals(self) -> None:
-        """连接信号"""
-        self.getViewBox().sigRangeChanged.connect(self._on_view_range_changed)
 
     # 数据管理相关函数
     def set_data(self, x_data: np.ndarray, y_data: np.ndarray) -> None:
@@ -65,7 +60,6 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
 
         self._clear_all()
         self.plot(self.x_data, self.y_data, pen='b')
-        self._update_selection_mode_based_on_data()
 
     def _clear_all(self) -> None:
         """清除所有状态"""
@@ -81,7 +75,6 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             self.deletion_history.clear()
             self._clear_all()
             self.plot(self.x_data, self.y_data, pen='b')
-            self._update_selection_mode_based_on_data()
             self._on_region_changed()
             print("已还原到原始数据")
 
@@ -92,27 +85,13 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             return self.y_data
         return np.array([])
 
-    # 选择模式管理
-    def _update_selection_mode_based_on_data(self) -> None:
-        """根据当前可见数据点数更新选择模式"""
-        self.visible_points = self._get_visible_point_count()
-
-        if self.visible_points > 50000:
-            self.set_selection_mode('zoom', force=True)
-        else:
-            self.set_selection_mode(self.selection_mode)
-
     def set_selection_mode(self, mode: str, force: bool = False) -> None:
         """设置选择模式"""
-        if self.x_data is not None and self.visible_points > 50000 and not force:
-            self.selection_mode = 'zoom'
+        self.selection_mode = mode
+        if mode == 'zoom':
             self.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         else:
-            self.selection_mode = mode
-            if mode == 'zoom':
-                self.getViewBox().setMouseMode(pg.ViewBox.RectMode)
-            else:
-                self.getViewBox().setMouseMode(pg.ViewBox.PanMode)
+            self.getViewBox().setMouseMode(pg.ViewBox.PanMode)
 
         self._clear_selection_rect()
         self._highlight_selected_points()
@@ -521,7 +500,6 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             self.plot(self.x_data, self.y_data, pen='b')
             self.regions.clear()
             self.selected_points.clear()
-            self._update_selection_mode_based_on_data()
             self._on_region_changed()
             print(f"已将 {len(selected_indices)} 个数据点设置为 NaN")
 
@@ -542,12 +520,6 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
         self.selected_points.clear()
         self._on_region_changed()
         print(f"已撤销上一次删除操作，恢复了 {len(last_deletion)} 个点")
-
-    # 视图更新函数
-    def _on_view_range_changed(self) -> None:
-        """当视图范围变化时调用"""
-        self._update_selection_mode_based_on_data()
-
 
 class RemoveSpike(QtWidgets.QWidget):
     result_signal = QtCore.Signal(str, np.ndarray)

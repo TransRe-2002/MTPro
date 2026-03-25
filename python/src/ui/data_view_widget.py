@@ -4,7 +4,7 @@ import pandas as pd
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QSplitter,
     QSizePolicy, QSlider, QDateTimeEdit, QScrollBar,
-    QToolBar, QLabel, QPushButton
+    QToolBar, QLabel, QPushButton, QMessageBox
 )
 from PySide6.QtCore import Qt, QThread
 
@@ -94,6 +94,16 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
     def init_data(self, data: EMData):
         self.em_data = data
+        if self.em_data is None:
+            for row in self.widget_data.index:
+                widget: Optional[BriefPlot] = self.widget_data.loc[row, 'widget']
+                if widget is None:
+                    continue
+                widget.clear_curves()
+                if widget.isVisible():
+                    widget.hide()
+            return
+
         self.duration = self.em_data.end_time - self.em_data.start_time
 
         self.set_time_range(                                                 # Mixin
@@ -189,8 +199,6 @@ class DataViewWidget(TimeViewportMixin, QWidget):
                 # 如果该行没有数据，确保其控件在splitter中被隐藏
                 if widget.isVisible():
                     widget.hide()
-
-
 
     # -------------------------------------------------------------------------
     # 视口更新（实现 Mixin 钩子）

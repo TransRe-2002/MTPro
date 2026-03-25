@@ -2,7 +2,7 @@ from PySide6.QtGui import QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
     QTreeView, QVBoxLayout, QWidget,
     QMenu, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton
+    QPushButton, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal, QModelIndex
 from typing import Dict, Optional, List
@@ -167,6 +167,9 @@ class DataTreeViewer(QWidget):
                 self.activate_changed.emit(self.activate_id)
             elif action == action_del:
                 data_id = index.data(Qt.ItemDataRole.UserRole)
+                if data_id == self.activate_id:
+                    self.activate_id = 0
+                    self.activate_changed.emit(self.activate_id)
                 self.model.removeRow(index.row())
                 self.em_datas.updated_removed.emit(data_id)
 

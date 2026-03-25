@@ -1,5 +1,5 @@
 from core.em_data import EMData
-from typing import Dict
+from typing import Dict, Optional
 from PySide6.QtCore import Signal, QObject
 
 class DataManager(QObject):
@@ -22,7 +22,9 @@ class DataManager(QObject):
         if key in self.em_datas:
             del self.em_datas[key]
 
-    def get(self, key: int) -> EMData:
+    def get(self, key: int) -> Optional[EMData]:
+        if key == 0:
+            return None
         return self.em_datas[key]
 
 

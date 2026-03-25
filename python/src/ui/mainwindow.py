@@ -90,6 +90,9 @@ class MainWindow(QMainWindow):
             return
 
     def save_file(self):
+        if self.activate_id == 0:
+            QMessageBox.warning(self, "错误", "请设置激活数据")
+            return
         data = self.data_manager.get(self.activate_id)
         if data is not None and isinstance(data, MatEMData):
             MatSaver.save(data, data.path)
@@ -97,13 +100,18 @@ class MainWindow(QMainWindow):
             return
 
     def save_file_as(self):
+        if self.activate_id == 0:
+            QMessageBox.warning(self, "错误", "请设置激活数据")
+            return
+
         filters = ';;'.join(FILTER_TYPE)
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             filter=filters,
         )
+        data = self.data_manager.get(self.activate_id)
         if filename and selected_filter == FILTER_TYPE[0]:
-            MatSaver.save(self.data_manager.get(self.activate_id), filename)
+            MatSaver.save(data, filename)
         else:
             return
 

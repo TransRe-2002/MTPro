@@ -10,7 +10,7 @@ from scipy import fft, signal
 from scipy.linalg import lstsq, inv
 import warnings
 
-from em_data import Channel
+from core.em_data import Channel
 
 default_option = {
     "window": 2000,

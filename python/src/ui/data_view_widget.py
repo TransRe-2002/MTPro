@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QToolBar, QLabel, QPushButton
 )
 from PySide6.QtCore import Qt, QThread
-from altair import layer
 
 from ui.brief_plot import BriefPlot, BriefWorker
 from utils.time_convert import pts_to_qdt, qdt_to_pts
@@ -113,8 +112,85 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         self.scroll_x.setPageStep(int(self.x_view_size.total_seconds()))
         self.scroll_x.setEnabled(True)
 
+        self._init_widget()
         self._refresh_plots()
         self._on_viewport_changed()
+
+    def _init_widget(self):
+        """初始化所有子图。"""
+        for row in self.widget_data.index:
+            label = row
+            if row == 'E' and self.em_data.e_units is not None:
+                label = row + f' / {self.em_data.e_units}'
+            if row == 'B' and self.em_data.m_units is not None:
+                label = row + f' / {self.em_data.m_units}'
+
+            widget: Optional[BriefPlot] = self.widget_data.loc[row, 'widget']
+            if widget is None:
+                widget = BriefPlot(label=label)
+                thread = QThread()
+                worker = BriefWorker(label=row)
+                worker.moveToThread(thread)
+                worker.update.connect(widget.update_plot)
+                thread.start()
+                self.widget_data.loc[row, 'widget'] = widget
+                self.widget_data.loc[row, 'worker'] = worker
+                self.widget_data.loc[row, 'thread'] = thread
+                self.splitter.addWidget(widget)
+            else:
+                widget.set_label(label)
+
+    def _refresh_plots(self):
+        """根据当前 data 更新各子图。"""
+        if self.em_data is None:
+            return
+
+        for widget in self.widget_data['widget'].values:
+            if widget is not None:
+                widget.clear_curves()
+
+        x_data = self.em_data.datetime_index
+
+        # 2.1 处理 E, B(H) 通道
+        for key, ch in self.em_data.data.items():
+            if ch is not None and key.startswith('E'):
+                y_data = ch.cts - ch.cts.mean()
+                widget: BriefPlot = self.widget_data.loc['E', 'widget']
+                widget.add_curve(
+                    x_data=x_data,
+                    y_data=y_data,
+                    label=key,
+                    graph_type='plot'
+                )
+            if ch is not None and (key.startswith('B') or key.startswith('H')):
+                y_data = ch.cts - ch.cts.mean()
+                b_widget: BriefPlot = self.widget_data.loc['B', 'widget']
+                b_widget.add_curve(
+                    x_data=x_data,
+                    y_data=y_data,
+                    label=key,
+                    graph_type='plot'
+                )
+        # 2.2 处理 Kp 数据
+        if self.em_data.kp_data is not None:
+            kp_widget: BriefPlot = self.widget_data.loc['Kp', 'widget']
+            kp_widget.add_curve(
+                x_data=self.em_data.kp_data['Kp_datetime'],
+                y_data=self.em_data.kp_data['Kp'],
+                label='Kp',
+                graph_type='bar'
+            )
+
+        # 按顺序添加并设置拉伸因子
+        for row_key, widget in self.widget_data['widget'].items():
+            if widget is not None and len(widget.curves) > 0:
+                widget.show()
+            else:
+                # 如果该行没有数据，确保其控件在splitter中被隐藏
+                if widget.isVisible():
+                    widget.hide()
+
+
 
     # -------------------------------------------------------------------------
     # 视口更新（实现 Mixin 钩子）
@@ -146,99 +222,6 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             tz=self.em_data.start_time.tz,
         )
         self._apply_jump(start_duration, end_duration)                      # Mixin
-
-    # -------------------------------------------------------------------------
-    # 子图管理
-    # -------------------------------------------------------------------------
-
-    def _refresh_plots(self):
-        """根据当前 data 创建或更新各子图。"""
-        if self.em_data is None:
-            return
-
-        for widget in self.widget_data['widget'].values:
-            if widget is not None:
-                widget.clear_curves()
-
-        x_data = self.em_data.datetime_index
-
-        # 2.1 处理 E 通道
-        e_widget = None
-        for key, ch in self.em_data.data.items():
-            if ch is not None and key.startswith('E'):
-                e_widget = self._get_or_create_widget('E', f'E / {self.em_data.e_units}')
-                y_data = ch.cts - ch.cts.mean()
-                e_widget.add_curve(x_data=x_data, y_data=y_data, label=key, graph_type='plot')
-                break  # 假设第一个E通道代表E图表
-
-        # 2.2 处理 B/H 通道
-        b_widget = None
-        for key, ch in self.em_data.data.items():
-            if ch is not None and (key.startswith('B') or key.startswith('H')):
-                b_widget = self._get_or_create_widget('B', f'B / {self.em_data.m_units}')
-                y_data = ch.cts - ch.cts.mean()
-                b_widget.add_curve(x_data=x_data, y_data=y_data, label=key, graph_type='plot')
-                break
-
-        # 2.3 处理 Kp 数据
-        kp_widget = None
-        if self.em_data.kp_data is not None:
-            kp_widget = self._get_or_create_widget('Kp', 'Kp')
-            kp_widget.add_curve(
-                x_data=self.em_data.kp_data['Kp_datetime'],
-                y_data=self.em_data.kp_data['Kp'],
-                label='Kp',
-                graph_type='bar'
-            )
-
-        # 先清空 splitter（但注意要妥善处理已有控件）
-        while self.splitter.count():
-            self.splitter.widget(0).hide()  # 先隐藏
-            # 注意：不能直接在这里deleteLater，因为可能只是暂时隐藏。控件生命期仍由widget_data管理。
-
-        # 按顺序添加并设置拉伸因子
-        target_widgets = [('E', e_widget), ('B', b_widget), ('Kp', kp_widget)]
-        for row_key, widget in target_widgets:
-            if widget is not None and len(widget.curves) != 0:
-                # 设置大小策略的拉伸因子
-                stretch = 3 if row_key in ('E', 'B') else 1
-                policy = widget.sizePolicy()
-                policy.setVerticalStretch(stretch)  # 这个因子对QSplitter的初始大小有影响
-                widget.setSizePolicy(policy)
-                self.splitter.addWidget(widget)
-                widget.show()
-            else:
-                # 如果该行没有数据，确保其控件不在splitter中且被隐藏
-                no_data_widget = self.widget_data.loc[row_key, 'widget']
-                if no_data_widget and no_data_widget.isVisible():
-                    no_data_widget.hide()
-
-        # 4. 可选：设置初始大小比例，例如 E:B:Kp = 3:3:1
-        # 可以在所有控件添加后，根据visible widget的数量动态计算
-        total_stretch = sum([3 for w in [e_widget, b_widget] if w and len(w.curves) != 0]) + (
-            1 if kp_widget and len(kp_widget.curves) != 0 else 0)
-        index = 0
-        for row_key, widget in target_widgets:
-            if widget is not None and len(widget.curves) != 0:
-                stretch = 3 if row_key in ('E', 'B') else 1
-                # 这里设置的是大小因子，并非直接像素值
-                self.splitter.setStretchFactor(index, stretch)
-                index += 1
-
-    def _get_or_create_widget(self, row: str, label: str) -> BriefPlot:
-        """若指定 row 的子图不存在则创建，否则直接返回已有实例。"""
-        widget = self.widget_data.loc[row, 'widget']
-        if widget is None:
-            widget = BriefPlot(label=label)
-            thread = QThread()
-            worker = BriefWorker(label=row)
-            worker.moveToThread(thread)
-            worker.update.connect(widget.update_plot)
-            thread.start()
-            self.widget_data.loc[row, 'widget'] = widget
-            self.widget_data.loc[row, 'worker'] = worker
-            self.widget_data.loc[row, 'thread'] = thread
-        return widget
 
     def on_change_data_finished(self, channel: str) -> None:
         """外部通知某通道数据已更新，刷新对应子图曲线。"""

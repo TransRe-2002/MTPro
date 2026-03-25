@@ -197,6 +197,10 @@ class BriefPlot(PlotWidget):
     def hide_curve(self, label: str):
         self.curves[label].setVisible(False)
 
+    def set_label(self, label: str):
+        self.label = label
+        self.plot_item.setLabel('bottom', self.label)
+
     def clear_curves(self):
         self.clear()
         self.curves.clear()

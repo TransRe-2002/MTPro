@@ -126,11 +126,6 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
 
     # 区域选择相关函数
     def add_region(self, start_x: Optional[float] = None) -> None:
-        """添加新的选择区域"""
-        if self.x_data is not None and self.visible_points > 50000:
-            print("数据点超过50000，禁止添加区域")
-            return
-
         if self.x_data is None or len(self.x_data) == 0:
             return
 
@@ -368,11 +363,6 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             return
 
         if ev.button() == QtCore.Qt.MouseButton.LeftButton:
-            if self.x_data is not None and self.visible_points > 50000:
-                print("数据点超过50000，禁止创建区域")
-                ev.accept()
-                return
-
             scene_pos = ev.scenePosition()
             view_box = self.getViewBox()
 

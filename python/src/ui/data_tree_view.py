@@ -194,5 +194,8 @@ class DataTreeViewer(QWidget):
         if len(list_ch) == 0:
             return
         compare_widget = CompareWidget(list_ch, parent=self)
+        compare_widget.setWindowFlags(Qt.WindowType.Window)
+        compare_widget.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        compare_widget.setWindowTitle(f"Series Compare Widget")
         compare_widget.show()
         compare_widget.raise_()

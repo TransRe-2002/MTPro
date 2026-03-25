@@ -1,0 +1,7 @@
+# 忽略文件夹
+data/
+notebooks/
+scripts/
+tests/
+old/
+pytest_cache/

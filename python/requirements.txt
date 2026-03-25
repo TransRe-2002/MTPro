@@ -1,0 +1,6 @@
+matplotlib
+PySide6
+pandas
+scipy
+numpy
+zstandard

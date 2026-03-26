@@ -6,3 +6,11 @@ tests/
 old/
 pytest_cache/
 .gitignore
+__pycache__/
+.gitignore
+base/__pycache__/
+core/__pycache__/
+io_utils/__pycache__/
+utils/__pycache__/
+ui/__pycache__/
+processor/__pycache__/

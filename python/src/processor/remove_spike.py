@@ -1,4 +1,7 @@
 import os
+
+from utils.series import dti_to_numpy
+
 os.environ['PYQTGRAPH_QT_LIB'] = 'PySide6'
 
 import numpy as np
@@ -535,7 +538,7 @@ class RemoveSpike(QtWidgets.QWidget):
             self.setWindowFlag(QtCore.Qt.WindowType.Window)
 
         x = channel.datetime_index()
-        self.x_data = np.array([x[i].timestamp() for i in range(len(x))])
+        self.x_data = dti_to_numpy(x)
         self.y_data = channel.cts.to_numpy()
         self.duration: int = len(self.x_data) if self.x_data is not None else 0
         self.channel = channel.name
@@ -575,7 +578,7 @@ class RemoveSpike(QtWidgets.QWidget):
         toolbar1.addWidget(QtWidgets.QLabel("绘制时间长度："))
 
         self.slide_region = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.slide_region.setFixedWidth(200)
+        self.slide_region.setFixedWidth(400)
         self.slide_region.setEnabled(False)
         toolbar1.addWidget(self.slide_region)
 
@@ -657,17 +660,7 @@ class RemoveSpike(QtWidgets.QWidget):
             self._add_text_placeholder("请先加载数据")
             return
 
-        if isinstance(self.x_data, pd.Series):
-            x_values = self.x_data.to_numpy()
-        else:
-            x_values = np.array(self.x_data)
-
-        if isinstance(self.y_data, pd.Series):
-            y_values = self.y_data.to_numpy()
-        else:
-            y_values = np.array(self.y_data)
-
-        self.plot_widget.set_data(x_values, y_values)
+        self.plot_widget.set_data(self.x_data, self.y_data)
 
         grid_pen = pg.mkPen(
             color=pg.mkColor(100, 100, 100),
@@ -877,3 +870,13 @@ class RemoveSpike(QtWidgets.QWidget):
             self.close()
             if self.parent() is not None:
                 self.parent().close()
+
+if __name__ == "__main__":
+    from PySide6.QtWidgets import QApplication
+    from io_utils.mat_io import MatLoader
+    em_data = MatLoader().load("/home/transen5/Project/atm_rpc/039BE-20240501-20240515-dt5_struct.mat")
+    app = QApplication([])
+    window = RemoveSpike(channel=em_data.data['Ex1'])
+    window.show()
+    app.exec()
+

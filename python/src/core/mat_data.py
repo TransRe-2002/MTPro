@@ -91,3 +91,6 @@ class MatEMData(EMData):
         tsStruct['dt'][0, 0] = np.array([self.dt.total_seconds()])
         tsStruct['npts'][0, 0] = np.array([[self.npts]])
         tsStruct['NCh'][0, 0] = np.array([[self.NCh]])
+
+    def restore_data(self, ch: str):
+        pass

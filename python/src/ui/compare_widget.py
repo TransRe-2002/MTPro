@@ -130,7 +130,6 @@ class CompareWidget(TimeViewportMixin, QWidget):
                 self.widget_data.loc[row, 'widget'] = widget
                 self.widget_data.loc[row, 'thread'] = thread
                 self.widget_data.loc[row, 'worker'] = worker
-                self.splitter.addWidget(widget)
             else:
                 widget.set_label(row)
 
@@ -162,11 +161,8 @@ class CompareWidget(TimeViewportMixin, QWidget):
             )
 
         for key, widget in self.widget_data['widget'].items():
-            if widget is not None and len(widget.curves) > 0:
-                widget.show()
-            else:
-                if widget.isVisible():
-                    widget.hide()
+            if len(widget.curves) > 0:
+                self.splitter.addWidget(widget)
 
     def _on_viewport_changed(self) -> None:
         """实现 Mixin 钩子：视口变化时通知所有子图 worker 更新范围。"""

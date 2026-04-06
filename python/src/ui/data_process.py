@@ -18,6 +18,7 @@ from PySide6.QtCore import Qt, QMimeData, QByteArray
 
 from core.em_data import EMData, Channel
 from processor.remove_spike import RemoveSpike
+from processor.remove_step import RemoveStep
 
 class DraggableTreeView(QTreeView):
     """支持拖拽的自定义树视图"""
@@ -99,6 +100,9 @@ class CustomMdiArea(QMdiArea):
         if widget_type == "remove spike":
             content_widget = RemoveSpike(channel)
             content_widget.result_signal.connect(self.parent_widget.on_change_data_finished)
+        elif widget_type == "remove step":
+            content_widget = RemoveStep(channel)
+            content_widget.result_signal.connect(self.parent_widget.on_change_data_finished)
         else:
             content_widget = QTextEdit()
             content_widget.setPlainText(f"未知工具类型: {widget_type}")
@@ -177,6 +181,10 @@ class DataProcessWidget(QWidget):
         remove_spike_item = QStandardItem("手动框选去噪")
         remove_spike_item.setData("remove spike", Qt.UserRole + 1)
         cat_manual_process.appendRow(remove_spike_item)
+
+        remove_step_item = QStandardItem("手动去除阶跃")
+        remove_step_item.setData("remove step", Qt.UserRole + 1)
+        cat_manual_process.appendRow(remove_step_item)
 
         root = self.tree_model.invisibleRootItem()
         root.appendRow(cat_manual_process)

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread
 
 from ui.brief_plot import BriefPlot, BriefWorker
+from ui.time_slider import TimeRangeSlider
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from core.em_data import EMData
 from base.time_viewport_mixin import TimeViewportMixin
@@ -191,9 +192,9 @@ class DataViewWidget(TimeViewportMixin, QWidget):
                 graph_type='bar'
             )
 
-        # 按顺序添加并设置拉伸因子
+        # 3. 显示所有有数据的 widget
         for row_key, widget in self.widget_data['widget'].items():
-            if widget is not None and len(widget.curves) > 0:
+            if len(widget.curves) > 0:
                 widget.show()
             else:
                 # 如果该行没有数据，确保其控件在splitter中被隐藏

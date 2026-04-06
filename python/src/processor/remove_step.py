@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 from PySide6.QtGui import QIntValidator, QAction, QIcon, QRegularExpressionValidator
 from PySide6.QtWidgets import (
@@ -9,11 +9,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QRegularExpression
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
 
 from core.em_data import Channel
 from utils.series import dti_to_numpy
 
+pg.setConfigOptions(antialias=True)
+pg.setConfigOption('background', 'w')
+pg.setConfigOption('foreground', 'k')
 
 class RemoveStep(QWidget):
     result_signal = Signal(str, np.ndarray)
@@ -27,16 +31,17 @@ class RemoveStep(QWidget):
         self.plot_item = None
 
         self.ch: Channel = channel
+        self.ch_name = channel.name
         x = channel.datetime_index()
         self.x_data = dti_to_numpy(x)
         y = channel.cts
         self.nan_index = y[y.isna()].index.tolist()
-        print("nan index:", self.nan_index)
         y = y.interpolate(method='linear')
-        self.y_data = y
-        self.diff_y_data = self.y_data.diff()
-        print("diff y:", self.diff_y_data)
-        self.duration = len(self.x_data)
+        self.y_data = y.to_numpy(dtype=np.float64)
+        self.origin_y_data = self.y_data.copy()
+        self.diff_y_data = np.diff(self.y_data)
+
+        self.history: List[np.ndarray] = []
 
         self.de_step_btn = QPushButton("阈值差分去除")
         self.de_step_threshold = QLineEdit()
@@ -48,39 +53,19 @@ class RemoveStep(QWidget):
         self.one_step_btn = QPushButton("多步差分去除")
         self.one_step_times = QLineEdit()
         self.one_step_times.setValidator(int_validator)
+        self.undo_btn = QPushButton("撤销")
+        self.revert_btn = QPushButton("还原原始数据")
         self.confirm_btn = QPushButton("确认")
 
-        self.x_viewport_start: Optional[int] = None
-        self.x_viewport_size: Optional[int] = None
-        self.y_viewport_start: Optional[int] = None
-        self.y_viewport_size: Optional[int] = None
-
-        self.zoom_ratio = 1.0
+        self.one_step_times.setText("5")
+        max_abs_diff = np.max(np.abs(self.diff_y_data))
+        self.de_step_threshold.setText(f"{max_abs_diff:.4f}")
 
         self._init_ui()
         self._connect_signal()
         self._init_plot()
 
     def _init_ui(self):
-        toolbar1 = QToolBar()
-        self.zoom_in_action = QAction("放大", self)
-        self.zoom_in_action.setIcon(QIcon.fromTheme("zoom-in"))
-        self.zoom_in_action.setIconText("放大")
-        toolbar1.addAction(self.zoom_in_action)
-
-        self.zoom_out_action = QAction("缩小", self)
-        self.zoom_out_action.setIcon(QIcon.fromTheme("zoom-out"))
-        self.zoom_out_action.setIconText("缩小")
-        toolbar1.addAction(self.zoom_out_action)
-
-        toolbar1.addSeparator()
-        toolbar1.addWidget(QLabel("绘制时间长度："))
-
-        self.slide_region = QSlider(Qt.Orientation.Horizontal)
-        self.slide_region.setFixedWidth(400)
-        self.slide_region.setEnabled(False)
-        toolbar1.addWidget(self.slide_region)
-
         self.instruction_label = QLabel(
             "操作说明: 首先计算差分，然后根据差值选择去除方式，最后点击确认"
         )
@@ -97,13 +82,6 @@ class RemoveStep(QWidget):
             QSizePolicy.Policy.Expanding,
         )
         self.plot_item = self.plot_widget.getPlotItem()
-
-        self.scroll_x = QScrollBar(Qt.Orientation.Horizontal)
-        self.scroll_x.setEnabled(False)
-        self.scroll_y = QScrollBar(Qt.Orientation.Vertical)
-        self.scroll_y.setEnabled(False)
-        self.scroll_y.setInvertedControls(True)
-        self.scroll_y.setInvertedAppearance(True)
 
         self.plain_text = QTextEdit()
         self.plain_text.setReadOnly(True)
@@ -122,42 +100,40 @@ class RemoveStep(QWidget):
         button_layout.addWidget(self.one_step_times)
         button_layout.addWidget(self.one_step_btn)
         button_layout.addStretch(1)
+        button_layout.addWidget(self.undo_btn)
+        button_layout.addWidget(self.revert_btn)
+        button_layout.addStretch(1)
         button_layout.addWidget(self.confirm_btn)
         button_layout.addStretch(1)
 
         glay = QGridLayout()
-        glay.addWidget(toolbar1, 0, 0, 1, 5)
-        glay.addWidget(self.instruction_label, 1, 0, 1, 5)
-        glay.addWidget(self.plain_text, 2, 0, 2, 1)
-        glay.addWidget(self.plot_widget, 2, 1, 2, 4)
-        glay.addWidget(self.scroll_x, 4, 1, 1, 4)
-        glay.addWidget(self.scroll_y, 2, 5, 2, 1)
-        glay.addLayout(button_layout, 5, 0, 1, 5)
+        glay.addWidget(self.instruction_label, 0, 0, 1, 2)
+        glay.addWidget(self.plain_text, 1, 0)
+        glay.addWidget(self.plot_widget, 1, 1)
+        glay.addLayout(button_layout, 2, 0, 1, 2)
         self.setLayout(glay)
 
     def _connect_signal(self):
-        self.scroll_x.valueChanged.connect(self._on_scroll_x_changed)
-        self.scroll_y.valueChanged.connect(self._on_scroll_y_changed)
-        self.slide_region.valueChanged.connect(self._on_slide_region_changed)
-
-        self.zoom_in_action.triggered.connect(self._on_zoom_in_triggered)
-        self.zoom_out_action.triggered.connect(self._on_zoom_out_triggered)
+        self.de_step_btn.clicked.connect(self._de_step_by_threshold)
+        self.one_step_btn.clicked.connect(self._de_step_multi)
+        self.undo_btn.clicked.connect(self._undo)
+        self.revert_btn.clicked.connect(self._revert)
+        self.confirm_btn.clicked.connect(self._confirm_and_close)
 
     def _init_plot(self):
-        if self.x_data is None and self.y_data is None:
+        if self.x_data is None or self.y_data is None:
             return
 
-        y_values = (self.y_data - self.y_data.mean()).to_numpy()
-        y_diff_values = self.diff_y_data.to_numpy()
-        y_line = pg.PlotCurveItem(
+        y_centered = self.y_data - np.nanmean(self.y_data)
+        self.y_line = pg.PlotCurveItem(
             self.x_data,
-            y_values,
+            y_centered,
             pen=pg.mkPen(255, 0, 0, width=1),
             name="序列数值",
         )
-        dy_line = pg.PlotCurveItem(
-            self.x_data,
-            y_diff_values,
+        self.dy_line = pg.PlotCurveItem(
+            self.x_data[1:],
+            self.diff_y_data,
             pen=pg.mkPen(0, 0, 255, width=1),
             name="序列一阶差分",
         )
@@ -177,158 +153,132 @@ class RemoveStep(QWidget):
         self.plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.plot_item.getAxis('bottom').setPen(grid_pen)
         self.plot_item.getAxis('left').setPen(grid_pen)
-        self.plot_item.addItem(y_line)
-        self.plot_item.addItem(dy_line)
+        self.plot_item.addItem(self.y_line)
+        self.plot_item.addItem(self.dy_line)
 
-        self._setup_viewport_parameters()
+        self._show_top_diffs()
 
-    def _setup_viewport_parameters(self):
-        """设置视口参数"""
-        self.x_viewport_size = self.duration
-        self.x_viewport_start = 0
+    def _show_top_diffs(self):
+        """在文本框中显示一阶差分绝对值前10大的位置和数值"""
+        abs_diff = np.abs(self.diff_y_data)
+        top_n = min(10, len(abs_diff))
+        top_indices = np.argpartition(abs_diff, -top_n)[-top_n:]
+        top_indices = top_indices[np.argsort(abs_diff[top_indices])[::-1]]
 
-        self.scroll_x.setEnabled(True)
-        self.scroll_x.setMinimum(0)
-        self.scroll_x.setMaximum(max(0, self.duration - self.x_viewport_size))
-        self.scroll_x.setPageStep(self.x_viewport_size)
-        self.scroll_x.setValue(self.x_viewport_start)
+        self._log(f"===== 一阶差分(绝对值) Top {top_n} =====")
+        for rank, idx in enumerate(top_indices, 1):
+            ts = pd.Timestamp(self.x_data[idx], unit='s')
+            self._log(f"  {rank}. 位置={idx}, 时间={ts}, |差分|={abs_diff[idx]:.4f}")
+        self._log("")
 
-        y_min = self.y_data.min()
-        y_max = self.y_data.max()
-        y_diff = (y_max - y_min) / 2
+    def _log(self, msg: str):
+        """输出日志到文本框"""
+        self.plain_text.append(msg)
 
-        ymin =  -y_diff * 1.05
-        ymax =  y_diff * 1.05
-        yrange = ymax - ymin
-        self.y_viewport_start = ymin
-        self.y_viewport_size = yrange * self.zoom_ratio
+    def _save_history(self):
+        """保存当前 y_data 快照"""
+        self.history.append(self.y_data.copy())
 
-        self.scroll_y.setEnabled(True)
-        self.scroll_y.setMinimum(int(ymin * 10000))
-        self.scroll_y.setMaximum(max(int(ymin * 10000), int((ymax - self.y_viewport_size) * 10000)))
-        self.scroll_y.setPageStep(int(self.y_viewport_size * 10000))
-        self.scroll_y.setValue(int(self.y_viewport_start * 10000))
+    def _update_plot(self):
+        """更新数据曲线和差分曲线"""
+        y_centered = self.y_data - np.nanmean(self.y_data)
+        self.y_line.setData(self.x_data, y_centered)
+        self.dy_line.setData(self.x_data[1:], self.diff_y_data)
 
-        self.slide_region.setEnabled(True)
-        self.slide_region.blockSignals(True)
-        self.slide_region.setMinimum(min(2000, self.duration))
-        self.slide_region.setMaximum(max(1, self.duration))
-        self.slide_region.setValue(self.x_viewport_size)
-        self.slide_region.blockSignals(False)
-
-        self._update_display()
-
-    # 视图控制函数
-    def _on_scroll_x_changed(self):
-        """滚动条值改变时更新绘图"""
-        self._update_x_viewport()
-
-    def _on_scroll_y_changed(self):
-        """滚动条值改变时更新绘图"""
-        self._update_y_viewport()
-
-    def _on_slide_region_changed(self):
-        """滑动条时间长度改变时更新绘图"""
-        self._update_x_viewport_size()
-
-    def _on_zoom_in_triggered(self):
-        """放大信号"""
-        if 1 / 64.0 < self.zoom_ratio <= 64.0:
-            self.zoom_out_action.setEnabled(True)
-            self.zoom_ratio /= 2.0
-        self._update_y_viewport_size()
-        if self.zoom_ratio <= 1 / 64.0:
-            self.zoom_in_action.setDisabled(True)
-
-    def _on_zoom_out_triggered(self):
-        """缩小信号"""
-        if 1 / 64.0 <= self.zoom_ratio < 64.0:
-            self.zoom_in_action.setEnabled(True)
-            self.zoom_ratio *= 2.0
-        self._update_y_viewport_size()
-        if self.zoom_ratio >= 64.0:
-            self.zoom_out_action.setDisabled(True)
-
-    def _update_x_viewport(self):
-        """更新横坐标视口"""
-        if self.x_data is None:
-            return
-        self.x_viewport_start = self.scroll_x.value()
-        self._update_display()
-
-    def _update_y_viewport(self):
-        """更新纵坐标视口"""
-        self.y_viewport_start = self.scroll_y.value() / 10000.0
-        self._update_display()
-
-    def _update_x_viewport_size(self):
-        """更新横坐标视口大小"""
-        if self.x_data is None:
+    def _de_step_by_threshold(self):
+        """根据阈值去除台阶：|diff| > threshold 的位置视为台阶"""
+        text = self.de_step_threshold.text().strip()
+        if not text:
+            self._log("请输入差分阈值")
             return
 
-        self.x_viewport_size = self.slide_region.value()
-        max_start = self.duration - self.x_viewport_size
-
-        self.scroll_x.setMaximum(max(0, max_start))
-        self.scroll_x.setPageStep(self.x_viewport_size)
-
-        if self.x_viewport_start > max_start:
-            self.x_viewport_start = max_start
-            self.scroll_x.setValue(self.x_viewport_start)
-
-        self._update_display()
-
-    def _update_y_viewport_size(self):
-        """更新纵坐标视口大小"""
-        if self.x_data is None:
+        threshold = float(text)
+        if threshold <= 0:
+            self._log("阈值必须大于 0")
             return
 
-        y_min = self.y_data.min()
-        y_max = self.y_data.max()
+        self._save_history()
 
-        if self.zoom_ratio < 1.0:
-            yrange = y_max - y_min
-            self.y_viewport_size = yrange * self.zoom_ratio
-            max_start = y_max - self.y_viewport_size
-            self.y_viewport_start =  -self.y_viewport_size / 2
+        diff = self.diff_y_data.copy()
+        step_mask = np.abs(diff) > threshold
+        step_indices = np.where(step_mask)[0]
 
-            self.scroll_y.setMinimum(int(y_min * 10000))
-            self.scroll_y.setMaximum(int(max_start * 10000))
-            self.scroll_y.setPageStep(int(self.y_viewport_size * 10000))
-            self.scroll_y.setValue(int(self.y_viewport_start * 10000))
-            self.scroll_y.setEnabled(True)
-        elif self.zoom_ratio == 1.0:
-            self.y_viewport_size = y_max - y_min
-            self.y_viewport_start = y_min
-            self.scroll_y.setMinimum(int(y_min * 10000))
-            self.scroll_y.setMaximum(int((y_max - self.y_viewport_size) * 10000))
-            self.scroll_y.setValue(int(self.y_viewport_start * 10000))
-            self.scroll_y.setPageStep(int(self.y_viewport_size * 10000))
-            self.scroll_y.setEnabled(False)
-        else:
-            self.scroll_y.setEnabled(False)
-
-        self._update_display()
-
-    def _update_display(self):
-        """更新显示"""
-        if self.x_data is None or self.y_data is None:
+        if len(step_indices) == 0:
+            self.history.pop()
+            self._log(f"阈值 {threshold:.4f} 未找到台阶")
             return
 
-        x_start = max(0, self.x_viewport_start)
-        x_end = min(x_start + self.x_viewport_size, len(self.x_data) - 1)
+        diff[step_mask] = 0
+        self.diff_y_data = diff.copy()
+        diff = np.insert(diff, 0, self.y_data[0])
+        self.y_data = np.cumsum(diff)
 
-        y_min = self.y_viewport_start
-        y_max = y_min + self.y_viewport_size
+        self._update_plot()
+        self._log(f"阈值 {threshold:.4f} 去除了 {len(step_indices)} 个台阶\n")
+        self._show_top_diffs()
 
-        if self.zoom_ratio > 1.0:
-            y_center = (y_min + y_max) / 2
-            y_diff = (y_max - y_min) / 2
-            y_min = y_center - y_diff * self.zoom_ratio
-            y_max = y_center + y_diff * self.zoom_ratio
+    def _de_step_multi(self):
+        """多步差分去除：每次找最大的台阶去除，重复 N 次"""
+        text = self.one_step_times.text().strip()
+        if not text:
+            self._log("请输入去除次数")
+            return
 
-        self.plot_item.setXRange(self.x_data[x_start], self.x_data[x_end], padding=0)
-        self.plot_item.setYRange(y_min, y_max, padding=0)
+        times = int(text)
+        if times <= 0:
+            self._log("次数必须大于 0")
+            return
+
+        self._save_history()
+
+        diff = self.diff_y_data.copy()
+        removed = 0
+        for _ in range(times):
+            idx = np.argmax(np.abs(diff))
+            step_val = diff[idx]
+            if step_val == 0:
+                break
+            diff[idx] = 0
+            removed += 1
+            self._log(f"  去除第 {removed} 个台阶: 位置={idx}, 幅度={step_val:.4f}")
+
+        self.diff_y_data = diff.copy()
+        diff = np.insert(diff, 0, self.y_data[0])
+        self.y_data = np.cumsum(diff)
+        self._update_plot()
+        self._log(f"多步去除完成，共去除 {removed} 个台阶\n")
+        self._show_top_diffs()
+
+    def _undo(self):
+        """撤销上一步操作"""
+        if not self.history:
+            self._log("没有可撤销的操作")
+            return
+
+        self.y_data = self.history.pop()
+        self._update_plot()
+        self._log("已撤销上一步操作")
+
+    def _revert(self):
+        """还原到原始数据"""
+        self._save_history()
+        self.y_data = self.origin_y_data.copy()
+        self._update_plot()
+        self._log("已还原到原始数据")
+
+    def _confirm_and_close(self):
+        """确认修改并发送结果信号"""
+        result = self.y_data.copy()
+        for idx in self.nan_index:
+            if 0 <= idx < len(result):
+                result[idx] = np.nan
+
+        self._log(f"确认修改，返回 {len(result)} 个数据点")
+        self.result_signal.emit(self.ch_name, result)
+        self.hide()
+        self.close()
+        if self.parent() is not None:
+            self.parent().close()
 
 
 if __name__ == "__main__":

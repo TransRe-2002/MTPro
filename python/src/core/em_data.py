@@ -12,6 +12,7 @@ from typing import List
 class Channel:
     name: str
     cts: pd.Series
+    cts_changed: pd.Series[bool]
     npts: int
     start: weakref.ref[pd.Timestamp]
     end: weakref.ref[pd.Timestamp]
@@ -26,6 +27,7 @@ class Channel:
     ):
         self.name = name
         self.cts = cts
+        self.cts_changed = pd.Series([False] * self.cts.shape[0])
         self.parent = weakref.ref(parent)
 
         self.npts = parent.npts
@@ -58,3 +60,7 @@ class EMData(ABC):
         self.path = path
         self.data: Dict[str, Channel] = {}
         self.chid: List[str] = []
+
+    @abstractmethod
+    def restore_data(self, ch: str):
+        pass

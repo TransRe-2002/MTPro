@@ -221,15 +221,20 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
         except Exception:
             return False
 
+    def _to_scene(self, ev: QtGui.QMouseEvent) -> QtCore.QPointF:
+        """将鼠标事件的 widget 局部坐标转换为 QGraphicsScene 坐标"""
+        p = ev.position()
+        return self.mapToScene(int(p.x()), int(p.y()))
+
     def mousePressEvent(self, ev: QtGui.QMouseEvent) -> None:
         if self._is_mouse_over_auto_scale_button(ev.position()):
             super().mousePressEvent(ev)
             return
 
-        self.is_over_region = self._is_mouse_over_region(ev.scenePosition())
+        scene_pos = self._to_scene(ev)
+        self.is_over_region = self._is_mouse_over_region(scene_pos)
 
         if ev.button() == QtCore.Qt.MouseButton.RightButton:
-            scene_pos = ev.scenePosition()
             view = self.getViewBox()
 
             if view is not None and self.x_data is not None:
@@ -253,7 +258,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
 
                     if self.selection_mode == 'select' and not self.is_over_region:
                         self._rect_color = QtGui.QColor(255, 60, 60, 180)  # 红色
-                        self.start_point = ev.position()
+                        self.start_point = scene_pos
                         self.is_selecting = True
                         ev.accept()
                         return
@@ -268,12 +273,12 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
                 super().mousePressEvent(ev)
                 return
             if self.selection_mode in ('select', 'zoom'):  # 两个模式都自己画框
-                # 新增：按模式和按键设置颜色
+                # 按模式设置颜色
                 if self.selection_mode == 'zoom':
                     self._rect_color = QtGui.QColor(255, 200, 0, 200)  # 黄色
                 else:
                     self._rect_color = QtGui.QColor(30, 144, 255, 180)  # 蓝色
-                self.start_point = ev.position()
+                self.start_point = scene_pos
                 self.is_selecting = True
                 ev.accept()
                 return
@@ -283,7 +288,8 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev: QtGui.QMouseEvent) -> None:
-        self.is_over_region = self._is_mouse_over_region(ev.scenePosition())
+        scene_pos = self._to_scene(ev)
+        self.is_over_region = self._is_mouse_over_region(scene_pos)
 
         new_cursor = QtCore.Qt.CursorShape.SizeHorCursor if self.is_over_region else QtCore.Qt.CursorShape.ArrowCursor
         if new_cursor != self._current_cursor_shape:
@@ -291,7 +297,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             self._current_cursor_shape = new_cursor
 
         if self.is_selecting and self.start_point is not None and not self.is_over_region:
-            self.end_point = ev.position()
+            self.end_point = scene_pos
             self._update_selection_rect()
             ev.accept()
             return
@@ -304,7 +310,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             return
 
         if self.is_selecting and self.start_point is not None and not self.is_over_region:
-            self.end_point = ev.position()
+            self.end_point = self._to_scene(ev)
             self.is_selecting = False
 
             if self.selection_mode == 'zoom':
@@ -326,7 +332,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             return
 
         if ev.button() == QtCore.Qt.MouseButton.LeftButton:
-            scene_pos = ev.scenePosition()
+            scene_pos = self._to_scene(ev)
             view_box = self.getViewBox()
 
             if view_box is not None and self.x_data is not None:

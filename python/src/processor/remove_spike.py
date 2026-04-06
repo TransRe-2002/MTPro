@@ -226,6 +226,30 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
         p = ev.position()
         return self.mapToScene(int(p.x()), int(p.y()))
 
+    def _apply_modifier_axis_constraint(self, modifiers) -> None:
+        """根据当前修饰键实时设置轴向约束"""
+        vb = self.getViewBox()
+        if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            vb.setMouseEnabled(x=True, y=False)
+        elif modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
+            vb.setMouseEnabled(x=False, y=True)
+        else:
+            vb.setMouseEnabled(x=True, y=True)
+
+    def wheelEvent(self, ev: QtGui.QWheelEvent) -> None:
+        """滚轮事件：根据实时修饰键约束轴向"""
+        modifiers = ev.modifiers()
+        vb = self.getViewBox()
+        if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            vb.setMouseEnabled(x=True, y=False)
+        elif modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
+            vb.setMouseEnabled(x=False, y=True)
+        else:
+            vb.setMouseEnabled(x=True, y=True)
+        super().wheelEvent(ev)
+        # 滚轮结束后恢复两轴（避免状态残留）
+        vb.setMouseEnabled(x=True, y=True)
+
     def mousePressEvent(self, ev: QtGui.QMouseEvent) -> None:
         if self._is_mouse_over_auto_scale_button(ev.position()):
             super().mousePressEvent(ev)
@@ -233,6 +257,10 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
 
         scene_pos = self._to_scene(ev)
         self.is_over_region = self._is_mouse_over_region(scene_pos)
+
+        # 中键按下时立即根据当前modifier约束轴向
+        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+            self._apply_modifier_axis_constraint(ev.modifiers())
 
         if ev.button() == QtCore.Qt.MouseButton.RightButton:
             view = self.getViewBox()
@@ -302,6 +330,10 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             ev.accept()
             return
 
+        # 中键拖动时，根据当前实时modifier限制轴向
+        if ev.buttons() & QtCore.Qt.MouseButton.MiddleButton:
+            self._apply_modifier_axis_constraint(ev.modifiers())
+
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev: QtGui.QMouseEvent) -> None:
@@ -323,6 +355,10 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             self._clear_selection_rect()
             ev.accept()
             return
+
+        # 中键松开时恢复两轴约束
+        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
+            self.getViewBox().setMouseEnabled(x=True, y=True)
 
         super().mouseReleaseEvent(ev)
 
@@ -667,23 +703,6 @@ class RemoveSpike(QtWidgets.QWidget):
         super().showEvent(ev)
         self.activateWindow()
         self.plot_widget.setFocus()
-
-    # 键盘响应
-
-    def keyPressEvent(self, ev: QtGui.QKeyEvent) -> None:
-        vb = self.plot_widget.getViewBox()
-        if ev.key() == QtCore.Qt.Key.Key_Shift:
-            vb.setMouseEnabled(x=True, y=False)  # 只动X轴
-        elif ev.key() == QtCore.Qt.Key.Key_Alt:
-            vb.setMouseEnabled(x=False, y=True)  # 只动Y轴
-        super().keyPressEvent(ev)
-
-    def keyReleaseEvent(self, ev: QtGui.QKeyEvent) -> None:
-        vb = self.plot_widget.getViewBox()
-        if ev.key() in (QtCore.Qt.Key.Key_Shift, QtCore.Qt.Key.Key_Alt):
-            vb.setMouseEnabled(x=True, y=True)  # 恢复两轴
-        super().keyReleaseEvent(ev)
-
 
     # 选择模式管理
     def _toggle_selection_mode(self):

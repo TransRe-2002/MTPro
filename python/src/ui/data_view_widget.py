@@ -1,18 +1,25 @@
-from typing import Optional
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 import pandas as pd
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QSplitter,
     QSizePolicy, QSlider, QDateTimeEdit, QScrollBar,
-    QToolBar, QLabel, QPushButton, QMessageBox
+    QToolBar, QLabel, QPushButton
 )
 from PySide6.QtCore import Qt, QThread
 
 from ui.brief_plot import BriefPlot, BriefWorker
-from ui.time_slider import TimeRangeSlider
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from core.em_data import EMData
 from base.time_viewport_mixin import TimeViewportMixin
+
+
+@dataclass
+class PlotResources:
+    widget: Optional[BriefPlot] = None
+    thread: Optional[QThread] = None
+    worker: Optional[BriefWorker] = None
 
 class DataViewWidget(TimeViewportMixin, QWidget):
 
@@ -28,15 +35,12 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         self.x_view_size: pd.Timedelta = pd.Timedelta(hours=1)
         self.duration: pd.Timedelta = pd.Timedelta(hours=0)
 
-        # 子面板及其相关组件
-        self.widget_data = pd.DataFrame(
-            data={
-                'widget': [None] * 3,
-                'thread': [None] * 3,
-                'worker': [None] * 3,
-            },
-            index=['E', 'B', 'Kp']
-        )
+        # 子面板及其相关组件，按需创建
+        self.plot_rows: Dict[str, PlotResources] = {
+            'E': PlotResources(),
+            'B': PlotResources(),
+            'Kp': PlotResources(),
+        }
 
         self.splitter = QSplitter(Qt.Orientation.Vertical)  # 创建纵向分割器
         self.splitter.setChildrenCollapsible(False)  # 重要：防止图表被拖拽到完全消失
@@ -57,6 +61,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         self.init_ui()
         self.connect_signals()
+        self._shutdown_done = False
 
     def init_ui(self):
         plot_panel = QWidget()
@@ -96,13 +101,10 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     def init_data(self, data: EMData):
         self.em_data = data
         if self.em_data is None:
-            for row in self.widget_data.index:
-                widget: Optional[BriefPlot] = self.widget_data.loc[row, 'widget']
-                if widget is None:
-                    continue
-                widget.clear_curves()
-                if widget.isVisible():
-                    widget.hide()
+            for resources in self.plot_rows.values():
+                if resources.widget is not None:
+                    resources.widget.clear_curves()
+                    resources.widget.hide()
             return
 
         self.duration = self.em_data.end_time - self.em_data.start_time
@@ -123,42 +125,88 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         self.scroll_x.setPageStep(int(self.x_view_size.total_seconds()))
         self.scroll_x.setEnabled(True)
 
-        self._init_widget()
+        self._sync_plot_rows()
         self._refresh_plots()
         self._on_viewport_changed()
 
-    def _init_widget(self):
-        """初始化所有子图。"""
-        for row in self.widget_data.index:
-            label = row
-            if row == 'E' and self.em_data.e_units is not None:
-                label = row + f' / {self.em_data.e_units}'
-            if row == 'B' and self.em_data.m_units is not None:
-                label = row + f' / {self.em_data.m_units}'
+    def _required_rows(self) -> set[str]:
+        if self.em_data is None:
+            return set()
 
-            widget: Optional[BriefPlot] = self.widget_data.loc[row, 'widget']
-            if widget is None:
-                widget = BriefPlot(label=label)
-                thread = QThread()
-                worker = BriefWorker(label=row)
-                worker.moveToThread(thread)
-                worker.update.connect(widget.update_plot)
-                thread.start()
-                self.widget_data.loc[row, 'widget'] = widget
-                self.widget_data.loc[row, 'worker'] = worker
-                self.widget_data.loc[row, 'thread'] = thread
-                self.splitter.addWidget(widget)
-            else:
-                widget.set_label(label)
+        required: set[str] = set()
+        has_e = any(key.startswith('E') for key in self.em_data.data)
+        has_b = any(key.startswith('B') or key.startswith('H') for key in self.em_data.data)
+
+        if has_e:
+            required.add('E')
+        if has_b:
+            required.add('B')
+        if self.em_data.kp_data is not None:
+            required.add('Kp')
+        return required
+
+    def _label_for_row(self, row: str) -> str:
+        if self.em_data is None:
+            return row
+        if row == 'E' and self.em_data.e_units is not None:
+            return row + f' / {self.em_data.e_units}'
+        if row == 'B' and self.em_data.m_units is not None:
+            return row + f' / {self.em_data.m_units}'
+        return row
+
+    def _ensure_plot_row(self, row: str):
+        resources = self.plot_rows[row]
+        label = self._label_for_row(row)
+
+        if resources.widget is None:
+            widget = BriefPlot(label=label)
+            thread = QThread(self)
+            worker = BriefWorker(label=row)
+            worker.moveToThread(thread)
+            worker.update.connect(widget.update_plot)
+            thread.start()
+
+            resources.widget = widget
+            resources.worker = worker
+            resources.thread = thread
+            self.splitter.addWidget(widget)
+        else:
+            resources.widget.set_label(label)
+
+    def _teardown_plot_row(self, row: str):
+        resources = self.plot_rows[row]
+
+        if resources.thread is not None:
+            resources.thread.quit()
+            resources.thread.wait()
+            resources.thread.deleteLater()
+
+        if resources.worker is not None:
+            resources.worker.deleteLater()
+
+        if resources.widget is not None:
+            resources.widget.hide()
+            resources.widget.setParent(None)
+            resources.widget.deleteLater()
+
+        self.plot_rows[row] = PlotResources()
+
+    def _sync_plot_rows(self):
+        required_rows = self._required_rows()
+        for row in self.plot_rows:
+            if row in required_rows:
+                self._ensure_plot_row(row)
+            elif self.plot_rows[row].widget is not None:
+                self._teardown_plot_row(row)
 
     def _refresh_plots(self):
         """根据当前 data 更新各子图。"""
         if self.em_data is None:
             return
 
-        for widget in self.widget_data['widget'].values:
-            if widget is not None:
-                widget.clear_curves()
+        for resources in self.plot_rows.values():
+            if resources.widget is not None:
+                resources.widget.clear_curves()
 
         x_data = self.em_data.datetime_index
 
@@ -166,7 +214,9 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         for key, ch in self.em_data.data.items():
             if ch is not None and key.startswith('E'):
                 y_data = ch.cts - ch.cts.mean()
-                widget: BriefPlot = self.widget_data.loc['E', 'widget']
+                widget = self.plot_rows['E'].widget
+                if widget is None:
+                    continue
                 widget.add_curve(
                     x_data=x_data,
                     y_data=y_data,
@@ -175,7 +225,9 @@ class DataViewWidget(TimeViewportMixin, QWidget):
                 )
             if ch is not None and (key.startswith('B') or key.startswith('H')):
                 y_data = ch.cts - ch.cts.mean()
-                b_widget: BriefPlot = self.widget_data.loc['B', 'widget']
+                b_widget = self.plot_rows['B'].widget
+                if b_widget is None:
+                    continue
                 b_widget.add_curve(
                     x_data=x_data,
                     y_data=y_data,
@@ -184,22 +236,19 @@ class DataViewWidget(TimeViewportMixin, QWidget):
                 )
         # 2.2 处理 Kp 数据
         if self.em_data.kp_data is not None:
-            kp_widget: BriefPlot = self.widget_data.loc['Kp', 'widget']
-            kp_widget.add_curve(
-                x_data=self.em_data.kp_data['Kp_datetime'],
-                y_data=self.em_data.kp_data['Kp'],
-                label='Kp',
-                graph_type='bar'
-            )
+            kp_widget = self.plot_rows['Kp'].widget
+            if kp_widget is not None:
+                kp_widget.add_curve(
+                    x_data=self.em_data.kp_data['Kp_datetime'],
+                    y_data=self.em_data.kp_data['Kp'],
+                    label='Kp',
+                    graph_type='bar'
+                )
 
         # 3. 显示所有有数据的 widget
-        for row_key, widget in self.widget_data['widget'].items():
-            if len(widget.curves) > 0:
-                widget.show()
-            else:
-                # 如果该行没有数据，确保其控件在splitter中被隐藏
-                if widget.isVisible():
-                    widget.hide()
+        for resources in self.plot_rows.values():
+            if resources.widget is not None:
+                resources.widget.setVisible(len(resources.widget.curves) > 0)
 
     # -------------------------------------------------------------------------
     # 视口更新（实现 Mixin 钩子）
@@ -211,9 +260,9 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             return
         start = self.em_data.start_time + self.x_view_start
         end = start + self.x_view_size
-        for worker in self.widget_data['worker'].values:
-            if worker is not None:
-                worker.range_change(start, end)
+        for resources in self.plot_rows.values():
+            if resources.worker is not None:
+                resources.worker.range_change(start, end)
         self.set_time(pts_to_qdt(start), pts_to_qdt(end))
 
     # -------------------------------------------------------------------------
@@ -244,16 +293,31 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         else:
             return
 
+        self._sync_plot_rows()
         ch = self.em_data.data[channel]
-        widget = self.widget_data.loc[row, 'widget']
+        widget = self.plot_rows[row].widget
         y_data = ch.cts - ch.cts.mean()
         if widget is not None:
-            widget.update_curve(channel, x_data, y_data)
+            if channel in widget.curves:
+                widget.update_curve(channel, x_data, y_data)
+            else:
+                widget.add_curve(x_data, y_data, channel, graph_type='plot')
+            widget.show()
         self._on_viewport_changed()
 
-    def close(self):
-        for thread in self.widget_data['thread']:
-            if thread is not None:
-                thread.quit()
-                thread.wait()
-                thread.deleteLater()
+    def shutdown(self):
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
+        for row in list(self.plot_rows.keys()):
+            if (
+                self.plot_rows[row].widget is not None
+                or self.plot_rows[row].thread is not None
+                or self.plot_rows[row].worker is not None
+            ):
+                self._teardown_plot_row(row)
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)

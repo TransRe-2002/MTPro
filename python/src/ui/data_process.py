@@ -5,17 +5,15 @@ from typing import Optional, Dict
 
 import pandas as pd
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QMimeData, QByteArray
 from PySide6.QtWidgets import (
     QWidget, QSplitter, QApplication, QMdiSubWindow,
     QMdiArea, QHBoxLayout, QGroupBox, QTextEdit,
-    QRadioButton, QGridLayout, QSizePolicy, QToolBar,
-    QDockWidget, QTreeView, QVBoxLayout, QLabel,
-    QPushButton, QComboBox
+    QRadioButton, QSizePolicy, QTreeView, QVBoxLayout
 )
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QAction, QDrag
-from PySide6.QtCore import Qt, QMimeData, QByteArray
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QDrag
 
+from base.data_manager import DataManager
 from core.em_data import EMData, Channel
 from processor.remove_spike import RemoveSpike
 from processor.remove_step import RemoveStep
@@ -76,11 +74,9 @@ class CustomMdiArea(QMdiArea):
 
             # 根据类型创建不同的子窗口
             sub_window:Optional[QWidget] = None
-            for key in self.parent_widget.data_group.keys():
-                if self.parent_widget.data_group[key].isChecked():
-                    ch = self.parent_widget.em_data.data[key]
-                    sub_window = self.create_subwindow(widget_type, position, ch)
-                    break
+            channel = self.parent_widget.current_channel()
+            if channel is not None:
+                sub_window = self.create_subwindow(widget_type, position, channel)
 
             if sub_window:
                 self.addSubWindow(sub_window)
@@ -99,10 +95,16 @@ class CustomMdiArea(QMdiArea):
         content_widget = None
         if widget_type == "remove spike":
             content_widget = RemoveSpike(channel)
-            content_widget.result_signal.connect(self.parent_widget.on_change_data_finished)
+            content_widget.result_signal.connect(
+                lambda ch, result, data_id=self.parent_widget.data_id:
+                self.parent_widget.on_change_data_finished_for(data_id, ch, result)
+            )
         elif widget_type == "remove step":
             content_widget = RemoveStep(channel)
-            content_widget.result_signal.connect(self.parent_widget.on_change_data_finished)
+            content_widget.result_signal.connect(
+                lambda ch, result, data_id=self.parent_widget.data_id:
+                self.parent_widget.on_change_data_finished_for(data_id, ch, result)
+            )
         else:
             content_widget = QTextEdit()
             content_widget.setPlainText(f"未知工具类型: {widget_type}")
@@ -113,16 +115,20 @@ class CustomMdiArea(QMdiArea):
         return None
 
 class DataProcessWidget(QWidget):
-    change_finished_signal = Signal(str)
+    change_finished_signal = Signal(int, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
         super().__init__(parent)
+        self.data_manager = data_manager
         self.tree_view = None
+        self.mdi_area = None
+        self.data_id: int = 0
         self.em_data: Optional[EMData] = None
         self.init_ui()
         self.init_tree_view()
 
-    def init_data(self, data):
+    def init_data(self, data, data_id: int = 0):
+        self.data_id = data_id
         self.em_data = data
         self.enable_fields()
 
@@ -152,16 +158,13 @@ class DataProcessWidget(QWidget):
         left_layout.addWidget(radio_button_group)
         left_layout.addWidget(self.tree_view)
 
-        right_widget = CustomMdiArea(self)
-        right_widget.setSizePolicy(
+        self.mdi_area = CustomMdiArea(self)
+        self.mdi_area.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
         splitter.addWidget(left_widget)
-        splitter.addWidget(right_widget)
-
-        splitter.addWidget(left_widget)
-        splitter.addWidget(right_widget)
+        splitter.addWidget(self.mdi_area)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 4)
 
@@ -198,6 +201,13 @@ class DataProcessWidget(QWidget):
 
     def enable_fields(self):
         if self.em_data is None:
+            layout = self.radio_button_group_layout
+            self.data_group.clear()
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
             return
         self.data_group.clear()
         layout = self.radio_button_group_layout
@@ -210,18 +220,35 @@ class DataProcessWidget(QWidget):
         for key in self.em_data.data.keys():
             self.data_group[key] = QRadioButton(f"{key}")
             self.radio_button_group_layout.addWidget(self.data_group[key])
-            continue
-        self.data_group[list(self.data_group.keys())[0]].setChecked(True)
+        first_button = next(iter(self.data_group.values()), None)
+        if first_button is not None:
+            first_button.setChecked(True)
 
-    def on_change_data_finished(self, channel, result):
-        self.em_data.data[channel].cts = pd.Series(result)
-        self.change_finished_signal.emit(channel)
+    def on_change_data_finished_for(self, data_id: int, channel: str, result):
+        if data_id == 0:
+            return
 
-    def on_radio_button_clicked(self):
+        data = self.data_manager.get(data_id) if self.data_manager is not None else None
+        if data is None:
+            return
+
+        data.data[channel].cts = pd.Series(result)
+        self.change_finished_signal.emit(data_id, channel)
+
+    def current_channel(self) -> Optional[Channel]:
+        if self.em_data is None:
+            return None
+
         for key, radio_button in self.data_group.items():
             if radio_button.isChecked():
-                self.current_data = self.em_data[key]
-                break
+                return self.em_data.data.get(key)
+        return None
+
+    def closeEvent(self, event):
+        if self.mdi_area is not None:
+            for sub_window in self.mdi_area.subWindowList():
+                sub_window.close()
+        super().closeEvent(event)
 
 if __name__ == '__main__':
     from io_utils.mat_io import MatLoader

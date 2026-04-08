@@ -1,6 +1,8 @@
+import logging
+
 from PySide6.QtWidgets import (
     QTreeView, QVBoxLayout, QWidget, QSplitter,
-    QMenu, QPlainTextEdit
+    QMenu, QPlainTextEdit, QLabel, QFrame
 )
 from PySide6.QtCore import Qt, QModelIndex
 from typing import Dict, List
@@ -15,6 +17,7 @@ from base.data_manager import DataManager
 class DataTreeViewer(QWidget):
     def __init__(self, data_manager: DataManager, parent=None):
         super().__init__(parent)
+        self.logger = logging.getLogger(__name__)
         self.model = None
         self.tree_view = None
         self.status_text = None
@@ -27,17 +30,41 @@ class DataTreeViewer(QWidget):
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(4)
+
+        browser_frame = QFrame(self)
+        browser_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        browser_layout = QVBoxLayout(browser_frame)
+        browser_layout.setContentsMargins(6, 6, 6, 6)
+        browser_layout.setSpacing(4)
+
+        info_frame = QFrame(self)
+        info_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setContentsMargins(6, 6, 6, 6)
+        info_layout.setSpacing(4)
+
         spliter = QSplitter(Qt.Orientation.Vertical)
+        spliter.setChildrenCollapsible(False)
         self.tree_view = QTreeView()
         self.model = DataTreeModel(self.data_manager, self)
         self.tree_view.setModel(self.model)
         self.tree_view.setUniformRowHeights(True)
-        spliter.addWidget(self.tree_view)
+        self.tree_view.setHeaderHidden(False)
+        browser_layout.addWidget(QLabel("数据浏览 / Data Browser", browser_frame))
+        browser_layout.addWidget(self.tree_view, 1)
 
         self.status_text = QPlainTextEdit()
         self.status_text.setReadOnly(True)
-        self.status_text.setPlainText('此处显示当前激活数据的详细信息。')
-        spliter.addWidget(self.status_text)
+        self.status_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.status_text.setPlainText('此处显示当前激活数据的摘要信息与台站属性。')
+        info_layout.addWidget(QLabel("台站摘要 / Station Summary", info_frame))
+        info_layout.addWidget(self.status_text, 1)
+
+        spliter.addWidget(browser_frame)
+        spliter.addWidget(info_frame)
+        spliter.setSizes([430, 220])
         main_layout.addWidget(spliter)
         self.setLayout(main_layout)
         self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -113,6 +140,7 @@ class DataTreeViewer(QWidget):
             plot_panel.show()
             plot_panel.activateWindow()
             plot_panel.raise_()
+            self.logger.info("Reused plot panel for dataset #%s channel %s", key, ch_name)
             return
 
         em_data = self.data_manager.get(key)
@@ -150,6 +178,7 @@ class DataTreeViewer(QWidget):
         )
         plot_panel.show()
         self._plot_panels[plot_key] = plot_panel
+        self.logger.info("Opened plot panel for dataset #%s channel %s", key, ch_name)
 
     def on_context_menu(self, pos):
         index = self.tree_view.indexAt(pos)
@@ -207,6 +236,7 @@ class DataTreeViewer(QWidget):
         compare_widget.setWindowTitle(f"Series Compare Widget")
         compare_widget.show()
         compare_widget.raise_()
+        self.logger.info("Opened compare widget for %s channels", len(channels))
 
 
 if __name__ == '__main__':

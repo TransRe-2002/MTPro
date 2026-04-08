@@ -5,7 +5,7 @@ import pandas as pd
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QSplitter,
     QSizePolicy, QSlider, QDateTimeEdit, QScrollBar,
-    QToolBar, QLabel, QPushButton
+    QToolBar, QLabel, QPushButton, QFrame, QHBoxLayout
 )
 from PySide6.QtCore import Qt, QThread
 
@@ -44,6 +44,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         self.splitter = QSplitter(Qt.Orientation.Vertical)  # 创建纵向分割器
         self.splitter.setChildrenCollapsible(False)  # 重要：防止图表被拖拽到完全消失
+        self.splitter.setOpaqueResize(False)
 
         self.slide_time = QSlider(Qt.Orientation.Horizontal)
         self.slide_time.setFixedWidth(300)
@@ -67,23 +68,44 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         plot_panel = QWidget()
         plot_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         plot_layout = QVBoxLayout(plot_panel)
-        plot_layout.setSpacing(1)
-        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.setSpacing(4)
+        plot_layout.setContentsMargins(4, 4, 4, 4)
+
+        control_frame = QFrame(plot_panel)
+        control_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        control_layout = QVBoxLayout(control_frame)
+        control_layout.setContentsMargins(6, 6, 6, 6)
+        control_layout.setSpacing(4)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addWidget(QLabel("波形导航 / Time Window"))
+        header_row.addStretch(1)
 
         toolbar = QToolBar()
-        toolbar.addWidget(QLabel("绘制时间长度："))
+        toolbar.addWidget(QLabel("窗口长度"))
         toolbar.addWidget(self.slide_time)
         toolbar.addSeparator()
-        toolbar.addWidget(QLabel("绘制时间范围: \t"))
+        toolbar.addWidget(QLabel("起始"))
         toolbar.addWidget(self.start_time)
-        toolbar.addWidget(QLabel("  ~  "))
+        toolbar.addWidget(QLabel("结束"))
         toolbar.addWidget(self.end_time)
         toolbar.addSeparator()
         toolbar.addWidget(self.btn_plot)
 
-        plot_layout.addWidget(toolbar)
-        plot_layout.addWidget(self.splitter)
-        plot_layout.addWidget(self.scroll_x)
+        plot_frame = QFrame(plot_panel)
+        plot_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        plot_frame_layout = QVBoxLayout(plot_frame)
+        plot_frame_layout.setContentsMargins(2, 2, 2, 2)
+        plot_frame_layout.setSpacing(2)
+        plot_frame_layout.addWidget(self.splitter, 1)
+        plot_frame_layout.addWidget(self.scroll_x)
+
+        control_layout.addLayout(header_row)
+        control_layout.addWidget(toolbar)
+
+        plot_layout.addWidget(control_frame)
+        plot_layout.addWidget(plot_frame, 1)
 
         self.setLayout(plot_layout)
 

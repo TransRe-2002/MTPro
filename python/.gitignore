@@ -1,16 +1,24 @@
-# 忽略文件夹
+# Python package local-only directories
 data/
 notebooks/
-scripts/
-tests/
 old/
-pytest_cache/
-.gitignore
+
+# Python caches and test artifacts
 __pycache__/
-.gitignore
-base/__pycache__/
-core/__pycache__/
-io_utils/__pycache__/
-utils/__pycache__/
-ui/__pycache__/
-processor/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/

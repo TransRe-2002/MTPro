@@ -1,4 +1,5 @@
 import os
+import logging
 
 from utils.series import dti_to_numpy
 
@@ -14,6 +15,8 @@ from core.em_data import Channel
 pg.setConfigOptions(antialias=True)
 pg.setConfigOption('background', 'w')
 pg.setConfigOption('foreground', 'k')
+
+logger = logging.getLogger(__name__)
 
 
 class RegionSelectionPlotWidget(pg.PlotWidget):
@@ -176,7 +179,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
                 indices = np.where(mask)[0]
                 all_indices_set.update(indices)
             except Exception as e:
-                print(f"计算区域索引时出错: {e}")
+                logger.warning("计算区域索引时出错: %s", e)
                 continue
 
         all_indices_set.update(self.selected_points)
@@ -292,7 +295,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
                         return
 
                 except Exception as e:
-                    print(f"右键处理错误: {e}")
+                    logger.warning("右键处理错误: %s", e)
 
             ev.accept()
             return
@@ -382,7 +385,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
                         return
 
                 except Exception as e:
-                    print(f"双击创建区域错误: {e}")
+                    logger.warning("双击创建区域错误: %s", e)
 
         super().mouseDoubleClickEvent(ev)
 
@@ -439,7 +442,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
                 self.selection_rect_item.setRect(QtCore.QRectF(x_min, y_min, width, height))
 
         except Exception as e:
-            print(f"更新选择矩形错误: {e}")
+            logger.warning("更新选择矩形错误: %s", e)
 
     def _process_rectangle_selection(self, is_right_click: bool = False) -> None:
         """处理矩形选择逻辑"""
@@ -475,7 +478,7 @@ class RegionSelectionPlotWidget(pg.PlotWidget):
             self._on_region_changed()
 
         except Exception as e:
-            print(f"框选计算错误: {e}")
+            logger.warning("框选计算错误: %s", e)
 
     def _process_zoom_rect(self) -> None:
         """zoom 模式：松手后将视图缩放到框选范围"""
@@ -743,7 +746,7 @@ class RemoveSpike(QtWidgets.QWidget):
         """确认修改并关闭窗口"""
         result = self.plot_widget.confirm_and_exit()
         if result.size > 0:
-            print(f"确认修改，返回 {len(result)} 个数据点")
+            logger.info("RemoveSpike confirmed, returning %s points", len(result))
             self.result_signal.emit(self.ch_name, result)
             self.hide()
             self.close()

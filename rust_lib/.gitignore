@@ -1,9 +1,14 @@
-/target
+/target/
 
-# Byte-compiled / optimized / DLL files
+# Python caches and test artifacts
 __pycache__/
 .pytest_cache/
 *.py[cod]
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # C extensions
 *.so
@@ -11,62 +16,18 @@ __pycache__/
 # Distribution / packaging
 .Python
 .venv/
-env/
-bin/
-build/
-develop-eggs/
-dist/
-eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-include/
-man/
 venv/
+env/
+build/
+dist/
 *.egg-info/
-.installed.cfg
-*.egg
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-pip-selfcheck.json
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.coverage
-.cache
-nosetests.xml
-coverage.xml
-
-# Translations
-*.mo
-
-# Mr Developer
-.mr.developer.cfg
-.project
-.pydevproject
-
-# Rope
-.ropeproject
-
-# Django stuff:
+# Logs
 *.log
-*.pot
 
-.DS_Store
-
-# Sphinx documentation
-docs/_build/
-
-# PyCharm
+# Editors and local tooling
 .idea/
-
-# VSCode
 .vscode/
-
-# Pyenv
+.DS_Store
 .python-version
+.maturin/

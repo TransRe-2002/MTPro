@@ -1,5 +1,26 @@
+.codex
+
+# Editors and OS files
 .idea/
-.github/
+.vscode/
+.DS_Store
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments and local Python tooling
+.venv/
+venv/
+env/
+.python-version
+
+# Local data and logs
+*.log
 *.mat
-.gitignore

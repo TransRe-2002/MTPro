@@ -198,7 +198,8 @@ class BriefPlot(PlotWidget):
             self.curves[label] = bar
             self.plot_item.addItem(bar)
             # 柱状图模式下隐藏图例，避免颜色映射误导
-            self.plot_item.legend.hide()
+            if self.plot_item.legend is not None:
+                self.plot_item.legend.hide()
         else:
             if pen is None:
                 if color is None:

@@ -1,13 +1,20 @@
+mod decimate;
+mod mat_loader;
+
 use pyo3::prelude::*;
 
-/// A Python module implemented in Rust.
+/// MTPro Rust extensions — high-performance signal processing.
 #[pymodule]
 mod rust_lib {
-    use pyo3::prelude::*;
+    #[pymodule_export]
+    use super::decimate::minmax_decimate_rs;
 
-    /// Formats the sum of two numbers as string.
-    #[pyfunction]
-    fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-        Ok((a + b).to_string())
-    }
+    #[pymodule_export]
+    use super::decimate::build_lod_pyramid_rs;
+
+    #[pymodule_export]
+    use super::decimate::apply_nan_intervals_rs;
+
+    #[pymodule_export]
+    use super::mat_loader::probe_mat_v73;
 }

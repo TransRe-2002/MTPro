@@ -1,7 +1,11 @@
-matplotlib
-PySide6
-pandas
-scipy
-numpy
-zstandard
-pytz
+matplotlib>=3.10
+PySide6>=6.11
+pandas>=2.3
+scipy>=1.17
+PyWavelets>=1.9
+numpy>=2.4
+h5py>=3.13
+pytz>=2026.1
+xarray>=2026.4
+pyqtgraph>=0.14
+# rust_lib (optional, local Rust extension — built via: cd rust_lib && maturin build --release && pip install target/wheels/*.whl)

@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-from typing import Optional
+"""窗口均值去阶跃工具窗口。
+
+该工具适合这类情况：
+- 一阶差分中能看到明显峰值
+- 台阶前后大体比较平稳
+- 可以用局部窗口均值差近似台阶高度
+
+本文件主要负责界面交互，真正的台阶估计算法在 step_algorithms 中。
+"""
+
+import os
+
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 import numpy as np
 import pandas as pd
-import pyqtgraph as pg
-from PySide6 import QtCore, QtGui
-from PySide6.QtCore import QRegularExpression, Qt, Signal
+from PySide6.QtCore import QRegularExpression
 from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QFrame,
@@ -18,34 +28,31 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
-    QWidget,
 )
+import pyqtgraph as pg
 
-from core.em_data import Channel
-from processor.step_algorithms import DEFAULT_AVG_WINDOW, DEFAULT_MAX_STEPS, windowed_mean_destep
+
+from processor._base_processor import BaseProcessorWidget
+from processor.step_algorithms import (
+    DEFAULT_AVG_WINDOW,
+    DEFAULT_MAX_STEPS,
+    WindowedStepCandidate,
+    windowed_mean_destep_with_diagnostics,
+)
 from processor.step_plot_widget import StepPlotWidget
-from utils.series import dti_to_numpy
+from utils.validators import read_positive_int
 
 
-class RemoveStepByWindow(QWidget):
-    result_signal = Signal(str, np.ndarray)
+class RemoveStepByWindow(BaseProcessorWidget):
+    """基于"前后窗口均值差"的自动去阶跃窗口。"""
+    DEFAULT_MIN_OFFSET = 100.0
     DEFAULT_AVG_WINDOW = DEFAULT_AVG_WINDOW
     DEFAULT_MAX_STEPS = DEFAULT_MAX_STEPS
 
-    def __init__(self, channel: Channel, parent=None):
-        super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    def __init__(self, data_id: int, channel_name: str, parent=None):
+        super().__init__(data_id, channel_name, parent)
 
-        self.ch = channel
-        self.ch_name = channel.name
-        self.x_data = dti_to_numpy(channel.datetime_index())
-        y = channel.cts
-        self.nan_index = y[y.isna()].index.tolist()
-        interpolated = y.interpolate(method="linear")
-        self.y_data = interpolated.to_numpy(dtype=np.float64)
-        self.origin_y_data = self.y_data.copy()
-        self.diff_y_data = np.diff(self.y_data)
-        self.history: list[np.ndarray] = []
+        self.diff_y_data: Optional[np.ndarray] = None
 
         self.plot_widget = StepPlotWidget()
         self.plot_item = self.plot_widget.getPlotItem()
@@ -55,23 +62,36 @@ class RemoveStepByWindow(QWidget):
         self.de_step_btn = QPushButton("窗口均值去阶跃")
         self.de_step_threshold = QLineEdit()
         self.avg_window_edit = QLineEdit()
+        self.max_steps_edit = QLineEdit()
         float_validator = QRegularExpressionValidator(QRegularExpression(r"^\d*\.?\d+$"))
         int_validator = QRegularExpressionValidator(QRegularExpression(r"^\d+$"))
         self.de_step_threshold.setValidator(float_validator)
         self.avg_window_edit.setValidator(int_validator)
+        self.max_steps_edit.setValidator(int_validator)
         self.undo_btn = QPushButton("撤销")
         self.revert_btn = QPushButton("还原原始数据")
         self.confirm_btn = QPushButton("确认")
 
+        self.plain_text = QTextEdit()
+        self.plain_text.setReadOnly(True)
+        self.plain_text.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.plain_text.setMinimumWidth(260)
+        self.plain_text.setMaximumWidth(320)
+
         self.avg_window_edit.setText(str(self.DEFAULT_AVG_WINDOW))
-        max_abs_diff = np.max(np.abs(self.diff_y_data)) if self.diff_y_data.size else 0.0
-        self.de_step_threshold.setText(f"{max_abs_diff:.4f}")
+        self.max_steps_edit.setText(str(self.DEFAULT_MAX_STEPS))
+        self.de_step_threshold.setText(f"{self.DEFAULT_MIN_OFFSET:.4f}")
 
         self._init_ui()
         self._connect_signal()
+
+
+    def _on_data_loaded(self):
+        self.diff_y_data = np.diff(self.y_data)
         self._init_plot()
 
     def _init_ui(self):
+        """构建日志区、主图和参数按钮区。"""
         instruction_label = QLabel(
             "窗口均值去阶跃: 先用阈值定位一阶差分峰值，再用局部窗口均值估计台阶幅度。\n"
             "Shift+鼠标滚轮/中键拖动仅操作 X 轴，Alt+鼠标滚轮/中键拖动仅操作 Y 轴。"
@@ -79,12 +99,6 @@ class RemoveStepByWindow(QWidget):
 
         self.plot_widget.getAxis("left").setStyle(tickLength=0)
         self.plot_widget.getAxis("bottom").setStyle(tickLength=0)
-
-        self.plain_text = QTextEdit()
-        self.plain_text.setReadOnly(True)
-        self.plain_text.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.plain_text.setMinimumWidth(260)
-        self.plain_text.setMaximumWidth(320)
 
         self.threshold_frame = QFrame(self)
         self.threshold_frame.setFrameShape(QFrame.Shape.StyledPanel)
@@ -96,6 +110,8 @@ class RemoveStepByWindow(QWidget):
         threshold_layout.addWidget(self.de_step_threshold)
         threshold_layout.addWidget(QLabel("平均窗口："))
         threshold_layout.addWidget(self.avg_window_edit)
+        threshold_layout.addWidget(QLabel("最多台阶："))
+        threshold_layout.addWidget(self.max_steps_edit)
         threshold_layout.addWidget(self.de_step_btn)
 
         self.action_frame = QFrame(self)
@@ -120,15 +136,27 @@ class RemoveStepByWindow(QWidget):
         layout.addLayout(control_layout, 2, 0, 1, 2)
 
     def _connect_signal(self):
+        """连接按钮行为。"""
         self.de_step_btn.clicked.connect(self._de_step_by_threshold)
         self.undo_btn.clicked.connect(self._undo)
         self.revert_btn.clicked.connect(self._revert)
         self.confirm_btn.clicked.connect(self._confirm_and_close)
 
     def _init_plot(self):
+        """初始化主图中的原始序列和一阶差分曲线。"""
         y_centered = self.y_data - np.nanmean(self.y_data)
-        self.y_line = pg.PlotCurveItem(self.x_data, y_centered, pen=pg.mkPen(255, 0, 0, width=1), name="序列数值")
-        self.dy_line = pg.PlotCurveItem(self.x_data[1:], self.diff_y_data, pen=pg.mkPen(0, 0, 255, width=1), name="序列一阶差分")
+        self.y_line = pg.PlotCurveItem(
+            self.x_data, y_centered,
+            pen=pg.mkPen(255, 0, 0, width=1), name="序列数值",
+            autoDownsample=True, downsampleMethod='peak',
+            clipToView=True, useOpenGL=True, connect='finite',
+        )
+        self.dy_line = pg.PlotCurveItem(
+            self.x_data[1:], self.diff_y_data,
+            pen=pg.mkPen(0, 0, 255, width=1), name="序列一阶差分",
+            autoDownsample=True, downsampleMethod='peak',
+            clipToView=True, useOpenGL=True, connect='finite',
+        )
         legend = self.plot_item.addLegend()
         legend.anchor((1, 0), (1, 0))
         legend.setBrush(pg.mkBrush(255, 255, 255, 255))
@@ -138,15 +166,24 @@ class RemoveStepByWindow(QWidget):
         self.plot_item.addItem(self.dy_line)
         self._show_top_diffs()
 
-    def showEvent(self, ev: QtGui.QShowEvent) -> None:
-        super().showEvent(ev)
-        self.activateWindow()
-        self.plot_widget.setFocus(QtCore.Qt.FocusReason.ActiveWindowFocusReason)
+    # ------------------------------------------------------------------
+    # BaseProcessorWidget 接口
+    # ------------------------------------------------------------------
 
     def _log(self, msg: str):
         self.plain_text.append(msg)
 
+    def _update_derived_data(self):
+        self.diff_y_data = np.diff(self.y_data)
+
+    def _update_plot(self):
+        """数据更新后，刷新主图与差分图。"""
+        y_centered = self.y_data - np.nanmean(self.y_data)
+        self.y_line.setData(self.x_data, y_centered)
+        self.dy_line.setData(self.x_data[1:], self.diff_y_data)
+
     def _show_top_diffs(self):
+        """把一阶差分中最大的若干个位置打印到日志，便于快速判断阈值。"""
         abs_diff = np.abs(self.diff_y_data)
         top_n = min(10, len(abs_diff))
         if top_n <= 0:
@@ -162,35 +199,44 @@ class RemoveStepByWindow(QWidget):
             self._log(f"  {rank}. 位置={idx}, 时间={ts}, |差分|={abs_diff[idx]:.4f}")
         self._log("")
 
-    def _save_history(self):
-        self.history.append(self.y_data.copy())
+    # ------------------------------------------------------------------
+    # 去阶跃操作
+    # ------------------------------------------------------------------
 
-    def _update_plot(self):
-        y_centered = self.y_data - np.nanmean(self.y_data)
-        self.y_line.setData(self.x_data, y_centered)
-        self.dy_line.setData(self.x_data[1:], self.diff_y_data)
-
-    def _read_positive_int(self, edit: QLineEdit, label: str) -> Optional[int]:
-        text = edit.text().strip()
-        if not text:
-            self._log(f"{label} 不能为空")
-            return None
-        value = int(text)
-        if value <= 0:
-            self._log(f"{label} 必须大于 0")
-            return None
-        return value
-
-    def _windowed_mean_destep(
+    def _log_rejected_step_candidates(
         self,
-        samples: np.ndarray,
-        min_offset: float,
-        avg_window: int | None = None,
-        max_steps: int | None = None,
-    ) -> tuple[np.ndarray, list[tuple[int, float]]]:
-        return windowed_mean_destep(samples, min_offset, avg_window, max_steps)
+        threshold: float,
+        avg_window: int,
+        max_steps: int,
+        candidates: list[WindowedStepCandidate],
+    ):
+        """当找到候选点但最终没有应用时，把拒绝原因写到日志里。"""
+        if not candidates:
+            self._log(f"阈值 {threshold:.4f} 未找到差分候选")
+            return
+
+        self._log(
+            f"找到 {len(candidates)} 个差分候选，但窗口均值确认后未应用台阶"
+            f" | 阈值={threshold:.4f} | 平均窗口={avg_window} | 最多台阶={max_steps}"
+        )
+        for candidate in candidates[:10]:
+            if candidate.step_value is None:
+                step_text = "窗口样本不足"
+                reason = "拒绝: 台阶前/后窗口为空"
+            else:
+                step_text = f"{candidate.step_value:.4f}"
+                reason = f"拒绝: |窗口均值台阶|={abs(candidate.step_value):.4f} < 阈值"
+            self._log(
+                f"  候选位置={candidate.index}, |原始差分|={candidate.raw_diff:.4f}, "
+                f"窗口均值台阶={step_text}, 前窗点数={candidate.before_count}, "
+                f"后窗点数={candidate.after_count}, {reason}"
+            )
+        if len(candidates) > 10:
+            self._log(f"  ... 其余 {len(candidates) - 10} 个候选省略")
+        self._log("")
 
     def _de_step_by_threshold(self):
+        """按阈值执行一次窗口均值去阶跃。"""
         text = self.de_step_threshold.text().strip()
         if not text:
             self._log("请输入差分阈值")
@@ -201,20 +247,23 @@ class RemoveStepByWindow(QWidget):
             self._log("阈值必须大于 0")
             return
 
-        avg_window = self._read_positive_int(self.avg_window_edit, "平均窗口")
+        avg_window = read_positive_int(self.avg_window_edit, "平均窗口", self._log)
         if avg_window is None:
+            return
+        max_steps = read_positive_int(self.max_steps_edit, "最多台阶", self._log)
+        if max_steps is None:
             return
 
         self._save_history()
-        corrected, applied_steps = self._windowed_mean_destep(
+        corrected, applied_steps, candidates = windowed_mean_destep_with_diagnostics(
             self.y_data,
             threshold,
             avg_window=avg_window,
-            max_steps=self.DEFAULT_MAX_STEPS,
+            max_steps=max_steps,
         )
         if not applied_steps:
             self.history.pop()
-            self._log(f"阈值 {threshold:.4f} 未找到台阶")
+            self._log_rejected_step_candidates(threshold, avg_window, max_steps, candidates)
             return
 
         self.y_data = corrected
@@ -222,37 +271,9 @@ class RemoveStepByWindow(QWidget):
         self._update_plot()
         self._log(
             f"窗口均值去阶跃完成，去除了 {len(applied_steps)} 个台阶"
-            f" | 阈值={threshold:.4f} | 平均窗口={avg_window} | 最多台阶={self.DEFAULT_MAX_STEPS}"
+            f" | 阈值={threshold:.4f} | 平均窗口={avg_window} | 最多台阶={max_steps}"
         )
         for step_index, step_value in applied_steps:
             self._log(f"  阶跃位置={step_index}, 修正幅度={step_value:.4f}")
         self._log("")
         self._show_top_diffs()
-
-    def _undo(self):
-        if not self.history:
-            self._log("没有可撤销的操作")
-            return
-        self.y_data = self.history.pop()
-        self.diff_y_data = np.diff(self.y_data)
-        self._update_plot()
-        self._log("已撤销上一步操作")
-
-    def _revert(self):
-        self._save_history()
-        self.y_data = self.origin_y_data.copy()
-        self.diff_y_data = np.diff(self.y_data)
-        self._update_plot()
-        self._log("已还原到原始数据")
-
-    def _confirm_and_close(self):
-        result = self.y_data.copy()
-        for idx in self.nan_index:
-            if 0 <= idx < len(result):
-                result[idx] = np.nan
-        self._log(f"确认修改，返回 {len(result)} 个数据点")
-        self.result_signal.emit(self.ch_name, result)
-        self.hide()
-        self.close()
-        if self.parent() is not None:
-            self.parent().close()

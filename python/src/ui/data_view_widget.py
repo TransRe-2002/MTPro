@@ -1,25 +1,165 @@
-from dataclasses import dataclass
-from typing import Dict, Optional
+from __future__ import annotations
 
+from dataclasses import dataclass
+from collections.abc import Callable
+from typing import Dict, Optional, List
+
+import numpy as np
 import pandas as pd
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QSplitter,
     QSizePolicy, QSlider, QDateTimeEdit, QScrollBar,
-    QToolBar, QLabel, QPushButton, QFrame, QHBoxLayout
+    QLabel, QPushButton, QFrame, QHBoxLayout, QGridLayout, QGroupBox,
+    QCheckBox, QApplication,
 )
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, Signal, QPoint, QMimeData
+from PySide6.QtGui import QFont, QMouseEvent, QDrag, QPixmap, QPainter, QColor
 
 from ui.brief_plot import BriefPlot, BriefWorker
 from utils.time_convert import pts_to_qdt, qdt_to_pts
+from utils.series import dti_to_numpy
 from core.em_data import EMData
 from base.time_viewport_mixin import TimeViewportMixin
+
+# 自定义 MIME 类型用于通道拖拽排序
+_CHANNEL_DRAG_MIME = "application/x-channel-reorder"
 
 
 @dataclass
 class PlotResources:
     widget: Optional[BriefPlot] = None
+    row_container: Optional[QWidget] = None
     thread: Optional[QThread] = None
     worker: Optional[BriefWorker] = None
+
+
+class PlotRowContainer(QFrame):
+    """通道行容器：整体可拖拽重排序，同时接受其他行的 QDrag 释放。"""
+
+    drop_reorder = Signal(str, int)  # channel_name, target_index
+
+    def __init__(self, channel: str, brief_plot: BriefPlot, parent=None):
+        super().__init__(parent)
+        self._channel = channel
+        self.setAcceptDrops(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+        # 左侧拖拽把手 + 右侧 BriefPlot
+        row_layout = QHBoxLayout(self)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(0)
+
+        # 拖拽把手（左侧竖条）
+        handle = QFrame(self)
+        handle.setFixedWidth(13)
+        handle.setStyleSheet("QFrame { background: #e8e8e8; border-right: 1px solid #c0c0c0; }")
+        handle_layout = QVBoxLayout(handle)
+        handle_layout.setContentsMargins(0, 0, 0, 0)
+        handle_layout.setSpacing(0)
+        handle_label = QLabel(">>")
+        handle_label.setFont(QFont("Arial", 9))
+        handle_label.setStyleSheet("color: #999;")
+        handle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        handle_layout.addWidget(handle_label)
+        row_layout.addWidget(handle)
+
+        row_layout.addWidget(brief_plot, 1)
+
+        self._press_pos: Optional[QPoint] = None
+
+    # ── 作为拖拽源：整行可拖 ────────────────────────────────
+
+    def mousePressEvent(self, ev: QMouseEvent) -> None:
+        """记录左键按下位置，用于后续拖拽检测。"""
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = ev.position().toPoint()
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev: QMouseEvent) -> None:
+        """鼠标移动超过 10px 曼哈顿距离后启动 QDrag 拖拽重排序。"""
+        if self._press_pos is None:
+            super().mouseMoveEvent(ev)
+            return
+        # 防止轻微抖动误触发拖拽
+        if (ev.position().toPoint() - self._press_pos).manhattanLength() < 10:
+            ev.accept()
+            return
+
+        # 构建 QDrag：MIME 数据携带通道名
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_CHANNEL_DRAG_MIME, self._channel.encode())
+        drag.setMimeData(mime)
+
+        # 拖拽预览：整行缩略图
+        pixmap = self.grab().scaled(
+            self.width() // 2, self.height() // 2,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+        drag.exec(Qt.DropAction.MoveAction)
+
+        self._press_pos = None
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev: QMouseEvent) -> None:
+        self._press_pos = None
+        super().mouseReleaseEvent(ev)
+
+    # ── 作为释放目标 ────────────────────────────────────────
+
+    def _index_in_splitter(self) -> int:
+        splitter = self.parent()
+        if isinstance(splitter, QSplitter):
+            return splitter.indexOf(self)
+        return -1
+
+    def dragEnterEvent(self, ev) -> None:
+        """拖拽进入时显示蓝色顶部边框作为放置位置指示。"""
+        if ev.mimeData().hasFormat(_CHANNEL_DRAG_MIME):
+            ev.acceptProposedAction()
+            # 蓝色顶部边框指示插入位置
+            self.setStyleSheet(
+                "PlotRowContainer { border-top: 3px solid #4080c0; }"
+                "PlotRowContainer QFrame { border-bottom: 1px solid #c0c0c0; }"
+            )
+        else:
+            super().dragEnterEvent(ev)
+
+    def dragMoveEvent(self, ev) -> None:
+        if ev.mimeData().hasFormat(_CHANNEL_DRAG_MIME):
+            ev.acceptProposedAction()
+        else:
+            super().dragMoveEvent(ev)
+
+    def dragLeaveEvent(self, ev) -> None:
+        self.setStyleSheet("")
+        super().dragLeaveEvent(ev)
+
+    def dropEvent(self, ev) -> None:
+        """拖拽释放：解码被拖通道名，查找目标索引，发出重排序信号。"""
+        self.setStyleSheet("")
+        if not ev.mimeData().hasFormat(_CHANNEL_DRAG_MIME):
+            super().dropEvent(ev)
+            return
+
+        # 从 MIME 数据中解码出被拖拽的通道名
+        dragged_ch = bytes(ev.mimeData().data(_CHANNEL_DRAG_MIME)).decode()
+        if dragged_ch == self._channel:
+            ev.ignore()
+            return
+
+        target_idx = self._index_in_splitter()
+        if target_idx >= 0:
+            ev.acceptProposedAction()
+            self.drop_reorder.emit(dragged_ch, target_idx)
+        else:
+            ev.ignore()
+
 
 class DataViewWidget(TimeViewportMixin, QWidget):
 
@@ -30,20 +170,20 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        self._viewport_debounce_init()  # Mixin: 初始化视口更新防抖
+
         self.em_data: Optional[EMData] = None
         self.x_view_start: pd.Timedelta = pd.Timedelta(seconds=0)
         self.x_view_size: pd.Timedelta = pd.Timedelta(hours=1)
         self.duration: pd.Timedelta = pd.Timedelta(hours=0)
 
-        # 子面板及其相关组件，按需创建
-        self.plot_rows: Dict[str, PlotResources] = {
-            'E': PlotResources(),
-            'B': PlotResources(),
-            'Kp': PlotResources(),
-        }
+        # 每个通道一个独立的 BriefPlot（按通道名索引）
+        self.plot_rows: Dict[str, PlotResources] = {}
+        # 有序通道列表（控制显示顺序）
+        self._channel_order: List[str] = []
 
-        self.splitter = QSplitter(Qt.Orientation.Vertical)  # 创建纵向分割器
-        self.splitter.setChildrenCollapsible(False)  # 重要：防止图表被拖拽到完全消失
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter.setChildrenCollapsible(False)
         self.splitter.setOpaqueResize(False)
 
         self.slide_time = QSlider(Qt.Orientation.Horizontal)
@@ -52,13 +192,25 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         self.start_time = QDateTimeEdit()
         self.start_time.setDisplayFormat("yyyy-MM-dd hh:mm:ss")
         self.start_time.setCalendarPopup(True)
+        self.start_time.setTimeSpec(Qt.TimeSpec.UTC)
         self.end_time = QDateTimeEdit()
         self.end_time.setDisplayFormat("yyyy-MM-dd hh:mm:ss")
         self.end_time.setCalendarPopup(True)
+        self.end_time.setTimeSpec(Qt.TimeSpec.UTC)
         self.btn_plot = QPushButton("时间序列跳转")
         self.btn_plot.setDisabled(True)
         self.scroll_x = QScrollBar(Qt.Orientation.Horizontal)
         self.scroll_x.setDisabled(True)
+
+        # ── 通道可见性 CheckBox 组 ──
+        self.checkbox_group = QGroupBox("通道显示 / Channel Visibility")
+        self.checkbox_group.setFont(QFont("Arial", 9))
+        # 使用网格布局，每行最多 5 个 CheckBox，自动换行
+        self.checkbox_layout = QGridLayout(self.checkbox_group)
+        self.checkbox_layout.setContentsMargins(8, 4, 8, 4)
+        self.checkbox_layout.setSpacing(6)
+        self._checkbox_columns = 9  # 一行最多9个，紧凑排列
+        self._checkboxes: Dict[str, QCheckBox] = {}
 
         self.init_ui()
         self.connect_signals()
@@ -68,50 +220,73 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         plot_panel = QWidget()
         plot_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         plot_layout = QVBoxLayout(plot_panel)
-        plot_layout.setSpacing(4)
+        plot_layout.setSpacing(2)
         plot_layout.setContentsMargins(4, 4, 4, 4)
 
-        control_frame = QFrame(plot_panel)
-        control_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        control_layout = QVBoxLayout(control_frame)
-        control_layout.setContentsMargins(6, 6, 6, 6)
+        # ── 时间导航控制组 ─────────────────────────────────────
+        control_group = QGroupBox("时间窗口导航 / Time Window Navigation", plot_panel)
+        control_group.setFont(QFont("Arial", 9))
+        control_layout = QVBoxLayout(control_group)
+        control_layout.setContentsMargins(8, 6, 8, 6)
         control_layout.setSpacing(4)
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.addWidget(QLabel("波形导航 / Time Window"))
-        header_row.addStretch(1)
+        # 第一行：窗口长度滑块
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        lbl_win = QLabel("窗口长度:", control_group)
+        lbl_win.setFont(QFont("Arial", 9))
+        lbl_win.setFixedWidth(64)
+        row1.addWidget(lbl_win)
+        row1.addWidget(self.slide_time)
+        row1.addStretch(1)
+        control_layout.addLayout(row1)
 
-        toolbar = QToolBar()
-        toolbar.addWidget(QLabel("窗口长度"))
-        toolbar.addWidget(self.slide_time)
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("起始"))
-        toolbar.addWidget(self.start_time)
-        toolbar.addWidget(QLabel("结束"))
-        toolbar.addWidget(self.end_time)
-        toolbar.addSeparator()
-        toolbar.addWidget(self.btn_plot)
+        # 第二行：起始/结束时间 + 跳转按钮
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        lbl_start = QLabel("起始:", control_group)
+        lbl_start.setFont(QFont("Arial", 9))
+        lbl_start.setFixedWidth(36)
+        lbl_end = QLabel("结束:", control_group)
+        lbl_end.setFont(QFont("Arial", 9))
+        lbl_end.setFixedWidth(36)
+        row2.addWidget(lbl_start)
+        row2.addWidget(self.start_time)
+        row2.addSpacing(8)
+        row2.addWidget(lbl_end)
+        row2.addWidget(self.end_time)
+        row2.addSpacing(12)
+        row2.addWidget(self.btn_plot)
+        row2.addStretch(1)
+        control_layout.addLayout(row2)
 
+        # ── 波形图区 ──────────────────────────────────────────
         plot_frame = QFrame(plot_panel)
         plot_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        plot_frame.setFrameShadow(QFrame.Shadow.Sunken)
         plot_frame_layout = QVBoxLayout(plot_frame)
         plot_frame_layout.setContentsMargins(2, 2, 2, 2)
         plot_frame_layout.setSpacing(2)
         plot_frame_layout.addWidget(self.splitter, 1)
         plot_frame_layout.addWidget(self.scroll_x)
 
-        control_layout.addLayout(header_row)
-        control_layout.addWidget(toolbar)
-
-        plot_layout.addWidget(control_frame)
+        # 导航栏和通道显示并排
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        top_row.addWidget(control_group)
+        top_row.addWidget(self.checkbox_group, 1)
+        plot_layout.addLayout(top_row)
         plot_layout.addWidget(plot_frame, 1)
 
         self.setLayout(plot_layout)
 
     def connect_signals(self):
         self.slide_time.valueChanged.connect(self.on_x_view_size_changed)   # Mixin
+        self.slide_time.sliderPressed.connect(self._on_scroll_drag_start)
+        self.slide_time.sliderReleased.connect(self._on_scroll_drag_end)
         self.scroll_x.valueChanged.connect(self.on_x_view_start_changed)   # Mixin
+        self.scroll_x.sliderPressed.connect(self._on_scroll_drag_start)
+        self.scroll_x.sliderReleased.connect(self._on_scroll_drag_end)
         self.btn_plot.clicked.connect(self.on_btn_plot_clicked)
         self.start_time.dateTimeChanged.connect(self.on_time_changed)       # Mixin
         self.end_time.dateTimeChanged.connect(self.on_time_changed)         # Mixin
@@ -120,7 +295,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     # 数据加载
     # -------------------------------------------------------------------------
 
-    def init_data(self, data: EMData):
+    def init_data(self, data: EMData, progress_callback: Callable[[str], None] | None = None):
         self.em_data = data
         if self.em_data is None:
             for resources in self.plot_rows.values():
@@ -147,57 +322,202 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         self.scroll_x.setPageStep(int(self.x_view_size.total_seconds()))
         self.scroll_x.setEnabled(True)
 
+        self._build_channel_order()
         self._sync_plot_rows()
-        self._refresh_plots()
+        self._refresh_plots(progress_callback)
+        self._rebuild_checkboxes()
         self._on_viewport_changed()
 
-    def _required_rows(self) -> set[str]:
+    def _build_channel_order(self) -> None:
+        """构建有序通道列表：E 通道 → B/H 通道 → Kp（最后）。"""
+        if self.em_data is None:
+            self._channel_order = []
+            return
+        e_channels: List[str] = []
+        b_channels: List[str] = []
+        # 按首字母分类：E 通道在上，B/H 通道居中
+        for ch in self.em_data.channel_names():
+            if ch.startswith('E'):
+                e_channels.append(ch)
+            elif ch.startswith('B') or ch.startswith('H'):
+                b_channels.append(ch)
+        e_channels.sort()
+        b_channels.sort()
+        self._channel_order = e_channels + b_channels
+        # Kp 数据始终排在最后
+        if self.em_data.kp_data is not None:
+            self._channel_order.append('Kp')
+
+    def _widget_index_in_splitter(self, ch: str) -> int:
+        """返回某通道的 row_container 在 splitter 中的索引。"""
+        resources = self.plot_rows.get(ch)
+        if resources is None or resources.row_container is None:
+            return -1
+        return self.splitter.indexOf(resources.row_container)
+
+    def _move_channel(self, ch: str, direction: int) -> None:
+        """将通道在 splitter 中上移(-1)或下移(+1)。"""
+        idx = self._widget_index_in_splitter(ch)
+        if idx < 0:
+            return
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= self.splitter.count():
+            return
+        resources = self.plot_rows[ch]
+        container = resources.row_container
+        container.hide()
+        self.splitter.insertWidget(new_idx, container)
+        container.show()
+        # 同步 _channel_order
+        if ch in self._channel_order:
+            old = self._channel_order.index(ch)
+            self._channel_order.pop(old)
+            insert_at = old + direction
+            # 计算新位置在 channel_order 中的正确位置
+            other_ch = None
+            for c, res in self.plot_rows.items():
+                if res.row_container is not None and self._widget_index_in_splitter(c) == idx:
+                    other_ch = c
+                    break
+            # 简化：直接根据 splitter 重建 channel_order
+            self._channel_order = self._splitter_channel_order()
+
+    def _splitter_channel_order(self) -> List[str]:
+        """从 splitter 中读取当前 widget 排列顺序。"""
+        order: List[str] = []
+        for i in range(self.splitter.count()):
+            widget = self.splitter.widget(i)
+            for ch, resources in self.plot_rows.items():
+                if resources.row_container is widget:
+                    order.append(ch)
+                    break
+        return order
+
+    def _on_drop_reorder(self, dragged_ch: str, target_idx: int) -> None:
+        """QDrag 释放 → 将被拖通道移动到目标位置。
+
+        使用 splitter.insertWidget() 完成 widget 重排，然后从 splitter
+        同步 _channel_order 以保持一致性。
+        """
+        res = self.plot_rows.get(dragged_ch)
+        if res is None or res.row_container is None:
+            return
+        container = res.row_container
+        old_idx = self.splitter.indexOf(container)
+        if old_idx < 0 or old_idx == target_idx:
+            return
+        # 在 splitter 中移动到新位置
+        container.hide()
+        self.splitter.insertWidget(target_idx, container)
+        container.show()
+        # 从 splitter 重建 channel_order，与 widget 顺序保持一致
+        self._channel_order = self._splitter_channel_order()
+
+    # -------------------------------------------------------------------------
+    # CheckBox 组
+    # -------------------------------------------------------------------------
+
+    def _rebuild_checkboxes(self) -> None:
+        """重建通道可见性 CheckBox 组。
+
+        使用 lambda 闭包捕获通道名 c=ch，避免循环变量延迟绑定导致所有
+        checkbox 都关联到最后一个通道名。
+        """
+        # 清除旧的
+        for cb in self._checkboxes.values():
+            cb.deleteLater()
+        self._checkboxes.clear()
+        # 清除 layout 中所有 widget
+        while self.checkbox_layout.count():
+            item = self.checkbox_layout.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+
+        if not self._channel_order:
+            self.checkbox_group.setVisible(False)
+            return
+
+        cols = self._checkbox_columns
+        # 默认勾选：Kp始终勾选 + 其余通道取前7个；总数≤8则全勾
+        total = len(self._channel_order)
+        if total <= 8:
+            default_checked = {ch for ch in self._channel_order}
+        else:
+            non_kp = [ch for ch in self._channel_order if ch != 'Kp'][:7]
+            default_checked = set(non_kp)
+            if 'Kp' in self._channel_order:
+                default_checked.add('Kp')
+
+        for i, ch in enumerate(self._channel_order):
+            cb = QCheckBox(ch)
+            cb.setChecked(ch in default_checked)
+            # lambda 默认参数 c=ch 捕获当前循环值，避免闭包延迟绑定
+            cb.stateChanged.connect(lambda state, c=ch: self._on_channel_toggled(c, state))
+            self._checkboxes[ch] = cb
+            # 网格布局：行列自动换行
+            self.checkbox_layout.addWidget(cb, i // cols, i % cols)
+            # 同步初始可见性：未勾选的通道对应 BriefPlot 需要隐藏
+            if not cb.isChecked():
+                resources = self.plot_rows.get(ch)
+                if resources is not None and resources.row_container is not None:
+                    resources.row_container.setVisible(False)
+        self.checkbox_group.setVisible(True)
+
+    def _on_channel_toggled(self, ch: str, state: int) -> None:
+        """CheckBox 切换 → 显示/隐藏对应 BriefPlot。"""
+        resources = self.plot_rows.get(ch)
+        if resources is None or resources.row_container is None:
+            return
+        visible = state == Qt.CheckState.Checked.value
+        resources.row_container.setVisible(visible)
+
+    # -------------------------------------------------------------------------
+    # 通道 / Plot 管理
+    # -------------------------------------------------------------------------
+
+    def _required_channels(self) -> set[str]:
+        """返回所有需要显示的通道名。"""
         if self.em_data is None:
             return set()
-
-        required: set[str] = set()
-        has_e = any(key.startswith('E') for key in self.em_data.data)
-        has_b = any(key.startswith('B') or key.startswith('H') for key in self.em_data.data)
-
-        if has_e:
-            required.add('E')
-        if has_b:
-            required.add('B')
+        required: set[str] = set(self.em_data.channel_names())
         if self.em_data.kp_data is not None:
             required.add('Kp')
         return required
 
-    def _label_for_row(self, row: str) -> str:
-        if self.em_data is None:
-            return row
-        if row == 'E' and self.em_data.e_units is not None:
-            return row + f' / {self.em_data.e_units}'
-        if row == 'B' and self.em_data.m_units is not None:
-            return row + f' / {self.em_data.m_units}'
-        return row
+    def _ensure_plot_row(self, ch: str):
+        """为通道创建 BriefPlot、工作线程和容器（若尚不存在）。"""
+        if ch not in self.plot_rows:
+            self.plot_rows[ch] = PlotResources()
 
-    def _ensure_plot_row(self, row: str):
-        resources = self.plot_rows[row]
-        label = self._label_for_row(row)
+        resources = self.plot_rows[ch]
 
         if resources.widget is None:
-            widget = BriefPlot(label=label)
+            widget = BriefPlot(label=ch)
             thread = QThread(self)
-            worker = BriefWorker(label=row)
+            worker = BriefWorker(label=ch)
+            # 将 worker 移到子线程，update 信号跨线程排队调用 widget.update_plot
             worker.moveToThread(thread)
             worker.update.connect(widget.update_plot)
             thread.start()
 
+            container = PlotRowContainer(ch, widget)
+            container.drop_reorder.connect(self._on_drop_reorder)
+
             resources.widget = widget
+            resources.row_container = container
             resources.worker = worker
             resources.thread = thread
-            self.splitter.addWidget(widget)
+            self.splitter.addWidget(container)
         else:
-            resources.widget.set_label(label)
+            resources.widget.set_label(ch)
 
-    def _teardown_plot_row(self, row: str):
-        resources = self.plot_rows[row]
+    def _teardown_plot_row(self, ch: str):
+        """安全销毁通道的工作线程、容器和绘图控件。"""
+        resources = self.plot_rows.pop(ch, None)
+        if resources is None:
+            return
 
+        # 先退出工作线程，再清理 UI 控件
         if resources.thread is not None:
             resources.thread.quit()
             resources.thread.wait()
@@ -206,71 +526,124 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         if resources.worker is not None:
             resources.worker.deleteLater()
 
+        if resources.row_container is not None:
+            resources.row_container.hide()
+            resources.row_container.setParent(None)
+            resources.row_container.deleteLater()
+
         if resources.widget is not None:
-            resources.widget.hide()
-            resources.widget.setParent(None)
             resources.widget.deleteLater()
 
-        self.plot_rows[row] = PlotResources()
-
     def _sync_plot_rows(self):
-        required_rows = self._required_rows()
-        for row in self.plot_rows:
-            if row in required_rows:
-                self._ensure_plot_row(row)
-            elif self.plot_rows[row].widget is not None:
-                self._teardown_plot_row(row)
+        """增量同步：为新增通道创建控件，移除已删除通道，并重排序。"""
+        required = self._required_channels()
+        current = set(self.plot_rows.keys())
 
-    def _refresh_plots(self):
-        """根据当前 data 更新各子图。"""
+        # 集合差集：需要创建的通道
+        for ch in required - current:
+            self._ensure_plot_row(ch)
+        # 集合差集：需要销毁的通道
+        for ch in current - required:
+            self._teardown_plot_row(ch)
+
+        # 按 channel_order 排好 splitter 中的顺序
+        self._reorder_splitter()
+
+    def _reorder_splitter(self) -> None:
+        """确保 splitter 中 widget 的排列顺序与 _channel_order 一致。
+
+        实现方式：先全部取出（保存各容器原尺寸），按 channel_order 顺序重新插入，恢复尺寸。
+        """
+        if len(self._channel_order) <= 1:
+            return
+        # 先全部取出，再按顺序插入
+        containers: List[tuple[str, QWidget]] = []
+        for ch in self._channel_order:
+            res = self.plot_rows.get(ch)
+            if res is not None and res.row_container is not None:
+                containers.append((ch, res.row_container))
+
+        if len(containers) <= 1:
+            return
+
+        # 记录当前 sizes，便于恢复各通道之前的高度比例
+        old_sizes = self.splitter.sizes()
+        ch_to_size: Dict[str, int] = {}
+        for ch, container in containers:
+            idx = self.splitter.indexOf(container)
+            if 0 <= idx < len(old_sizes):
+                ch_to_size[ch] = old_sizes[idx]
+
+        # 全部取出（不显示）
+        for _, container in containers:
+            container.hide()
+            container.setParent(None)
+
+        # 按顺序重新插入
+        for ch, container in containers:
+            self.splitter.addWidget(container)
+            container.show()
+
+        # 恢复 sizes，保持用户手动调整的各通道高度
+        # 若旧尺寸全为零（初始化阶段 splitter 尚未布局），则跳过恢复，
+        # 交由 Qt 自动均分，避免所有行被设为零高度而不可见。
+        if sum(old_sizes) > 0:
+            sizes = self.splitter.sizes()
+            for i, (ch, _) in enumerate(containers):
+                if ch in ch_to_size and i < len(sizes):
+                    sizes[i] = ch_to_size[ch]
+            if len(sizes) == len(containers):
+                self.splitter.setSizes(sizes)
+
+    def _refresh_plots(self, progress_callback: Callable[[str], None] | None = None):
+        """每个通道一个 BriefPlot，每个 BriefPlot 只画一条曲线。
+
+        E/B/H 通道绘制为去均值折线图，Kp 绘制为三色柱状图。
+        """
         if self.em_data is None:
             return
 
-        for resources in self.plot_rows.values():
-            if resources.widget is not None:
-                resources.widget.clear_curves()
+        x_vals = dti_to_numpy(self.em_data.datetime_index)
+        channel_count = self.em_data.NCh
 
-        x_data = self.em_data.datetime_index
+        for idx, (key, y_data) in enumerate(self.em_data.iter_channels()):
+            if key not in self.plot_rows:
+                continue
+            widget = self.plot_rows[key].widget
+            if widget is None:
+                continue
+            widget.clear_curves()
+            y_vals = np.asarray(y_data.values - np.nanmean(y_data.values), dtype=np.float64)
+            widget.add_curve(
+                x_data=x_vals,
+                y_data=y_vals,
+                label=key,
+                graph_type='plot',
+            )
+            if progress_callback is not None:
+                progress_callback(f"正在初始化通道 {key} ({idx+1}/{channel_count})")
 
-        # 2.1 处理 E, B(H) 通道
-        for key, ch in self.em_data.data.items():
-            if ch is not None and key.startswith('E'):
-                y_data = ch.cts - ch.cts.mean()
-                widget = self.plot_rows['E'].widget
-                if widget is None:
-                    continue
-                widget.add_curve(
-                    x_data=x_data,
-                    y_data=y_data,
-                    label=key,
-                    graph_type='plot'
-                )
-            if ch is not None and (key.startswith('B') or key.startswith('H')):
-                y_data = ch.cts - ch.cts.mean()
-                b_widget = self.plot_rows['B'].widget
-                if b_widget is None:
-                    continue
-                b_widget.add_curve(
-                    x_data=x_data,
-                    y_data=y_data,
-                    label=key,
-                    graph_type='plot'
-                )
-        # 2.2 处理 Kp 数据
-        if self.em_data.kp_data is not None:
+        # Kp 数据使用柱状图（三色方案：蓝/黄/红）
+        if self.em_data.kp_data is not None and 'Kp' in self.plot_rows:
+            if progress_callback is not None:
+                progress_callback("正在初始化 Kp 指数")
             kp_widget = self.plot_rows['Kp'].widget
             if kp_widget is not None:
+                kp_widget.clear_curves()
                 kp_widget.add_curve(
                     x_data=self.em_data.kp_data['Kp_datetime'],
                     y_data=self.em_data.kp_data['Kp'],
                     label='Kp',
-                    graph_type='bar'
+                    graph_type='bar',
                 )
 
-        # 3. 显示所有有数据的 widget
+        # 初始加载后直接设置 X 轴范围，使曲线立即可见，
+        # 避免等待跨线程 worker 信号排队延迟。
+        view_start = self.em_data.start_time + self.x_view_start
+        view_end = view_start + self.x_view_size
         for resources in self.plot_rows.values():
             if resources.widget is not None:
-                resources.widget.setVisible(len(resources.widget.curves) > 0)
+                resources.widget.update_plot(view_start, view_end)
 
     # -------------------------------------------------------------------------
     # 视口更新（实现 Mixin 钩子）
@@ -291,6 +664,18 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     # 槽函数
     # -------------------------------------------------------------------------
 
+    def _on_scroll_drag_start(self) -> None:
+        """滚动条开始拖动：切换到更宽松的去抖间隔以降低渲染负载。"""
+        if self._viewport_debounce is not None:
+            self._viewport_debounce.setInterval(50)
+
+    def _on_scroll_drag_end(self) -> None:
+        """滚动条拖动结束：恢复短间隔去抖并立即刷新。"""
+        if self._viewport_debounce is not None:
+            self._viewport_debounce.setInterval(16)
+            self._viewport_debounce.stop()
+        self._on_viewport_changed()
+
     def on_btn_plot_clicked(self):
         """跳转到指定时间范围。"""
         start = qdt_to_pts(self.start_time.dateTime())
@@ -304,42 +689,36 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         self._apply_jump(start_duration, end_duration)                      # Mixin
 
     def on_change_data_finished(self, channel: str) -> None:
-        """外部通知某通道数据已更新，刷新对应子图曲线。"""
+        """外部通知某通道数据已更新，刷新对应通道的 BriefPlot。"""
         if self.em_data is None:
             return
-        x_data = self.em_data.datetime_index
-        if channel.startswith('E'):
-            row = 'E'
-        elif channel.startswith('B') or channel.startswith('H'):
-            row = 'B'
-        else:
+        x_vals = dti_to_numpy(self.em_data.datetime_index)
+
+        if channel not in self.plot_rows:
+            self._sync_plot_rows()
+
+        if channel not in self.plot_rows:
             return
 
-        self._sync_plot_rows()
-        ch = self.em_data.data[channel]
-        widget = self.plot_rows[row].widget
-        y_data = ch.cts - ch.cts.mean()
+        ch = self.em_data.get_channel_series(channel)
+        widget = self.plot_rows[channel].widget
+        y_vals = np.asarray(ch.values - np.nanmean(ch.values), dtype=np.float64)
         if widget is not None:
-            if channel in widget.curves:
-                widget.update_curve(channel, x_data, y_data)
-            else:
-                widget.add_curve(x_data, y_data, channel, graph_type='plot')
+            widget.clear_curves()
+            widget.add_curve(x_vals, y_vals, channel, graph_type='plot')
             widget.show()
         self._on_viewport_changed()
 
     def shutdown(self):
+        """安全关闭所有工作线程并释放 UI 资源。"""
         if self._shutdown_done:
             return
         self._shutdown_done = True
 
-        for row in list(self.plot_rows.keys()):
-            if (
-                self.plot_rows[row].widget is not None
-                or self.plot_rows[row].thread is not None
-                or self.plot_rows[row].worker is not None
-            ):
-                self._teardown_plot_row(row)
+        for ch in list(self.plot_rows.keys()):
+            self._teardown_plot_row(ch)
 
     def closeEvent(self, event):
+        """窗口关闭时自动清理所有后台线程。"""
         self.shutdown()
         super().closeEvent(event)

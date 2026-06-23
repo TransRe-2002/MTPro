@@ -1,6 +1,7 @@
 import pandas as pd
+import xarray as xr
 
-from core.em_data import Channel, EMData
+from core.em_data import EMData
 from utils.geo import great_circle_distance, station_distance
 
 
@@ -13,14 +14,14 @@ class DemoData(EMData):
         self.end_time = pd.Timestamp("2024-01-01 00:00:10")
         self.dt = pd.Timedelta(seconds=5)
         self.datetime_index = pd.date_range(self.start_time, periods=3, freq="5s")
-        self.chid = ["Ex1"]
         self.kp_data = None
         self.latitude = latitude
         self.longitude = longitude
-        self.data["Ex1"] = Channel(
-            "Ex1",
-            pd.Series([1.0, 2.0, 3.0], index=self.datetime_index),
-            self,
+        self.data = xr.Dataset(coords={"time": self.datetime_index})
+        self.data["Ex1"] = xr.DataArray(
+            [1.0, 2.0, 3.0],
+            dims=("time",),
+            coords={"time": self.datetime_index},
         )
 
     def restore_data(self, ch: str):

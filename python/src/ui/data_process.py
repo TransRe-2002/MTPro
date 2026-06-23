@@ -1,102 +1,113 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 import sys
-from typing import Dict, Optional
+from typing import Callable, Optional
 
 import pandas as pd
+import xarray as xr
 
-from PySide6.QtCore import QByteArray, QMimeData, Qt, Signal
-from PySide6.QtGui import QDrag, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QPoint, Qt, Signal, QThread
+
+from base.processing_broker import ProcessingBroker
+from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
-    QGroupBox,
     QHBoxLayout,
+    QLabel,
     QMdiArea,
     QMdiSubWindow,
-    QRadioButton,
-    QSizePolicy,
-    QSplitter,
     QStackedWidget,
+    QTabBar,
+    QTabWidget,
     QTextEdit,
     QToolButton,
-    QTreeView,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
 )
 
 from base.data_manager import DataManager
-from core.em_data import Channel, EMData
+from core.em_data import EMData
+from processor.remove_region import RemoveRegion
 from processor.remove_spike import RemoveSpike
+from processor.remove_wavelet_denoise import RemoveWaveletDenoise
+from processor.remove_diurnal_sinusoid import RemoveDiurnalSinusoid
+from processor.remove_step_by_baseline import RemoveStepByBaseline
 from processor.remove_step_by_diff import RemoveStepByDiff
 from processor.remove_step_by_window import RemoveStepByWindow
+from processor.robust_estimate import RobustEstimateWidget
+from processor.remote_reference import RemoteReferenceWidget
 from ui.data_process_pipeline import DataProcessPipelineWidget
+from ui.data_process_shared import (
+    CLASSIC_TOOL_MIME,
+    DATA_TREE_SELECTION_MIME,
+    PIPELINE_TOOL_MIME,
+    create_classic_tool_model,
+)
 
 
 @dataclass(frozen=True)
 class ToolWindowState:
     tool_type: str
+    data_id: int
     channel_name: str
 
 
-class DraggableTreeView(QTreeView):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDragEnabled(True)
-        self.setEditTriggers(QTreeView.NoEditTriggers)
-        self.setSelectionMode(QTreeView.SingleSelection)
-
-    def startDrag(self, supportedActions):
-        index = self.currentIndex()
-        if not index.isValid():
-            return
-
-        item = self.model().itemFromIndex(index)
-        widget_type = item.data(Qt.UserRole + 1)
-        if widget_type:
-            mime_data = QMimeData()
-            mime_data.setData(
-                "application/x-widgettype",
-                QByteArray(widget_type.encode()),
-            )
-            drag = QDrag(self)
-            drag.setMimeData(mime_data)
-            drag.exec(supportedActions, Qt.CopyAction)
+def _mdi_target_size(
+    mdi_area: QMdiArea,
+    min_width: int,
+    min_height: int,
+) -> tuple[int, int]:
+    viewport_size = mdi_area.viewport().size()
+    available_width = viewport_size.width() or mdi_area.size().width()
+    available_height = viewport_size.height() or mdi_area.size().height()
+    target_width = max(min_width, available_width - 24) if available_width > 0 else min_width
+    target_height = max(min_height, available_height - 24) if available_height > 0 else min_height
+    return target_width, target_height
 
 
-class CustomMdiArea(QMdiArea):
-    def __init__(self, parent: DataProcessLegacyWidget = None):
+class ClassicMdiArea(QMdiArea):
+    def __init__(self, parent: "DataProcessLegacyWidget" = None):
         super().__init__(parent)
         self.parent_widget = parent
         self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat("application/x-widgettype"):
+        if event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        if not event.mimeData().hasFormat("application/x-widgettype"):
+        if not event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
             return
 
-        widget_type = event.mimeData().data(
-            "application/x-widgettype"
-        ).data().decode()
+        widget_type = event.mimeData().data(CLASSIC_TOOL_MIME).data().decode()
         position = event.position().toPoint()
-        channel = self.parent_widget.current_channel()
-        if channel is None:
-            return
+        STATION_TOOLS = {"robust estimate", "remote reference"}
 
-        sub_window = self.parent_widget.open_tool_window(
-            widget_type,
-            channel.name,
-            position=position,
-        )
+        if widget_type in STATION_TOOLS:
+            # Station tools do NOT require channel context — use dataset directly.
+            if self.parent_widget.data_id != 0 and self.parent_widget.em_data is not None:
+                data_id = self.parent_widget.data_id
+            else:
+                return
+            sub_window = self.parent_widget.open_tool_window(
+                widget_type, data_id, None, position=position,
+            )
+        else:
+            target = self.parent_widget.current_context()
+            if target is None:
+                return
+            data_id, channel_name = target
+            sub_window = self.parent_widget.open_tool_window(
+                widget_type, data_id, channel_name, position=position,
+            )
         if sub_window:
-            sub_window.show()
-            self.setActiveSubWindow(sub_window)
+            self.parent_widget.present_subwindow(sub_window)
             event.acceptProposedAction()
 
 
@@ -106,147 +117,159 @@ class DataProcessLegacyWidget(QWidget):
     def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
         super().__init__(parent)
         self.data_manager = data_manager
-        self.tree_view = None
-        self.mdi_area = None
+
+        # 创建数据处理中介（后台线程）
+        self.broker = ProcessingBroker(data_manager) if data_manager else None
+        self._broker_thread: Optional[QThread] = None
+        if self.broker is not None:
+            self._broker_thread = QThread(self)
+            self.broker.moveToThread(self._broker_thread)
+            self._broker_thread.start()
+            # Broker 数据变更 → 刷新 UI
+            self.broker.data_changed.connect(self.on_change_data_finished_for)
+            # Broker 结果确认 → 关闭对应工具窗口
+            self.broker.result_applied.connect(self._on_tool_result_applied)
+            # 应用退出时安全停止后台线程
+            QApplication.instance().aboutToQuit.connect(self._stop_broker)
+
+        self.mdi_area: Optional[ClassicMdiArea] = None
         self.data_id: int = 0
         self.em_data: Optional[EMData] = None
         self._selected_channel_name: Optional[str] = None
+        self._context_resolver: Optional[Callable[[], Optional[tuple[int, str]]]] = None
         self._init_ui()
-        self._init_tree_view()
+
+    def _stop_broker(self) -> None:
+        if self._broker_thread is not None and self._broker_thread.isRunning():
+            self._broker_thread.quit()
+            self._broker_thread.wait(3000)
+
+    def _init_ui(self):
+        self.mdi_area = ClassicMdiArea(self)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(self.mdi_area)
+        self.setLayout(main_layout)
+
+    def _create_placeholder_tool_widget(self, title: str, description: str) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        title_label = QLabel(title, widget)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        body_label = QLabel(description, widget)
+        body_label.setWordWrap(True)
+        body_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+
+        layout.addWidget(title_label)
+        layout.addWidget(body_label)
+        layout.addStretch(1)
+        return widget
 
     def init_data(self, data, data_id: int = 0):
         self.data_id = data_id
         self.em_data = data
         if self.em_data is None:
             self._selected_channel_name = None
-        self._enable_fields()
         self._close_invalid_tool_windows()
 
-    def _init_ui(self):
-        splitter = QSplitter(self)
-        splitter.setOrientation(Qt.Horizontal)
-        left_widget = QWidget(self)
-        left_layout = QVBoxLayout(left_widget)
+    @staticmethod
+    def create_tool_model() -> QStandardItemModel:
+        return create_classic_tool_model()
 
-        radio_button_group = QGroupBox("选择处理的曲线")
-        self.radio_button_group_layout = QVBoxLayout(radio_button_group)
-        self.data_group: Dict[str, QRadioButton] = {}
+    def set_context_resolver(
+        self,
+        resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
+    ) -> None:
+        self._context_resolver = resolver
 
-        self.tree_view = DraggableTreeView(self)
-        self.tree_view.setSizePolicy(
-            QSizePolicy.Policy.Minimum,
-            QSizePolicy.Policy.Expanding,
-        )
-        left_layout.addWidget(radio_button_group)
-        left_layout.addWidget(self.tree_view)
+    def current_context(self) -> Optional[tuple[int, str]]:
+        if self._context_resolver is not None:
+            target = self._context_resolver()
+            if target is not None:
+                data_id, channel_name = target
+                data = self.data_manager.get(data_id) if self.data_manager is not None else None
+                if data is not None:
+                    self.data_id = data_id
+                    self.em_data = data
+                    self._selected_channel_name = channel_name
+                return target
 
-        self.mdi_area = CustomMdiArea(self)
-        self.mdi_area.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
-        splitter.addWidget(left_widget)
-        splitter.addWidget(self.mdi_area)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 4)
+        channel_name = self.current_channel()
+        if self.data_id == 0 or channel_name is None:
+            return None
+        return self.data_id, channel_name
 
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(splitter)
-        self.setLayout(main_layout)
-
-    def _init_tree_view(self):
-        self.tree_model = QStandardItemModel()
-        self.tree_model.setHorizontalHeaderLabels(["数据处理工具"])
-
-        cat_manual_process = QStandardItem("手动数据处理")
-        cat_auto_process = QStandardItem("自动数据处理")
-        cat_output = QStandardItem("阻抗输出")
-
-        remove_spike_item = QStandardItem("手动框选去噪")
-        remove_spike_item.setData("remove spike", Qt.UserRole + 1)
-        cat_manual_process.appendRow(remove_spike_item)
-
-        remove_step_diff_item = QStandardItem("差分去阶跃")
-        remove_step_diff_item.setData("remove step diff", Qt.UserRole + 1)
-        cat_manual_process.appendRow(remove_step_diff_item)
-
-        remove_step_window_item = QStandardItem("窗口均值去阶跃")
-        remove_step_window_item.setData("remove step window", Qt.UserRole + 1)
-        cat_manual_process.appendRow(remove_step_window_item)
-
-        root = self.tree_model.invisibleRootItem()
-        root.appendRow(cat_manual_process)
-        root.appendRow(cat_auto_process)
-        root.appendRow(cat_output)
-
-        self.tree_view.setModel(self.tree_model)
-        self.tree_view.expandAll()
-
-    def _enable_fields(self):
-        layout = self.radio_button_group_layout
-        self.data_group.clear()
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-        if self.em_data is None:
-            return
-
-        for key in self.em_data.data.keys():
-            button = QRadioButton(f"{key}")
-            button.toggled.connect(
-                lambda checked, channel_name=key:
-                self._on_channel_toggled(channel_name, checked)
-            )
-            self.data_group[key] = button
-            self.radio_button_group_layout.addWidget(button)
-
-        button = None
-        if self._selected_channel_name is not None:
-            button = self.data_group.get(self._selected_channel_name)
-        if button is None:
-            button = next(iter(self.data_group.values()), None)
-        if button is not None:
-            button.setChecked(True)
-
-    def _on_channel_toggled(self, channel_name: str, checked: bool):
-        if checked:
-            self._selected_channel_name = channel_name
-
-    def current_channel(self) -> Optional[Channel]:
+    def current_channel(self) -> Optional[str]:
         if self.em_data is None:
             return None
 
         if self._selected_channel_name is not None:
-            channel = self.em_data.data.get(self._selected_channel_name)
-            button = self.data_group.get(self._selected_channel_name)
-            if channel is not None and button is not None and button.isChecked():
-                return channel
+            if self.em_data.has_channel(self._selected_channel_name):
+                return self._selected_channel_name
 
-        for key, radio_button in self.data_group.items():
-            if radio_button.isChecked():
-                self._selected_channel_name = key
-                return self.em_data.data.get(key)
-        return None
+        first_channel_name = self.em_data.first_channel_name()
+        if first_channel_name is None:
+            return None
+        self._selected_channel_name = first_channel_name
+        return first_channel_name
+
+    def _apply_subwindow_size(
+        self,
+        sub_window: QMdiSubWindow,
+        position: Optional[QPoint] = None,
+    ) -> None:
+        if self.mdi_area is None:
+            return
+        target_width, target_height = _mdi_target_size(self.mdi_area, 900, 680)
+        if position is not None:
+            sub_window.setGeometry(position.x(), position.y(), target_width, target_height)
+        else:
+            sub_window.resize(target_width, target_height)
+
+    def present_subwindow(self, sub_window: Optional[QMdiSubWindow]) -> None:
+        if sub_window is None or self.mdi_area is None:
+            return
+        sub_window.show()
+        sub_window.showMaximized()
+        self.mdi_area.setActiveSubWindow(sub_window)
 
     def open_tool_window(
         self,
         tool_type: str,
-        channel_name: str,
-        position=None,
+        data_id: int | str,
+        channel_name: Optional[str] = None,
+        position: Optional[QPoint] = None,
     ) -> Optional[QMdiSubWindow]:
-        if self.em_data is None or self.mdi_area is None:
+        STATION_TOOLS = {"robust estimate", "remote reference"}
+        is_station_tool = tool_type in STATION_TOOLS or self._canonical_tool_type(tool_type) in STATION_TOOLS
+
+        if isinstance(data_id, str) and channel_name is None:
+            channel_name = data_id
+            data_id = self.data_id
+
+        if not isinstance(data_id, int) or self.mdi_area is None:
+            return None
+        if not is_station_tool and channel_name is None:
             return None
 
-        channel = self.em_data.data.get(channel_name)
-        if channel is None:
+        data = self.data_manager.get(data_id) if self.data_manager is not None else None
+        if data is None and data_id == self.data_id:
+            data = self.em_data
+        if data is None:
+            return None
+
+        if not is_station_tool and not data.has_channel(channel_name):
             return None
 
         tool_key = self._canonical_tool_type(tool_type)
-        existing = self._find_tool_window(tool_key, channel_name)
+        if is_station_tool:
+            lookup_channel = ""
+        else:
+            lookup_channel = channel_name or ""
+        existing = self._find_tool_window(tool_key, data_id, lookup_channel)
         if existing is not None:
             content_widget = existing.widget()
             if content_widget is not None and content_widget.isHidden():
@@ -257,33 +280,48 @@ class DataProcessLegacyWidget(QWidget):
 
         sub_window = QMdiSubWindow()
         sub_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        sub_window.setWindowFlags(
+            sub_window.windowFlags() & ~Qt.WindowType.WindowSystemMenuHint
+        )
         sub_window.setProperty("tool_type", tool_type)
         sub_window.setProperty("tool_key", tool_key)
-        sub_window.setProperty("channel_name", channel_name)
-        sub_window.setWindowTitle(f"{tool_type} - {channel_name}")
-        if position is not None:
-            sub_window.setGeometry(position.x(), position.y(), 800, 600)
+        sub_window.setProperty("data_id", data_id)
+        if is_station_tool:
+            sub_window.setProperty("channel_name", "")
+            sub_window.setWindowTitle(f"{tool_type} - #{data_id} {data.name}")
         else:
-            sub_window.resize(800, 600)
+            sub_window.setProperty("channel_name", channel_name)
+            sub_window.setWindowTitle(f"{tool_type} - #{data_id} {data.name} - {channel_name}")
+        self._apply_subwindow_size(sub_window, position)
 
-        if tool_key == "remove spike":
-            content_widget = RemoveSpike(channel)
-            content_widget.result_signal.connect(
-                lambda ch, result, data_id=self.data_id:
-                self.on_change_data_finished_for(data_id, ch, result)
-            )
-        elif tool_key == "remove step diff":
-            content_widget = RemoveStepByDiff(channel)
-            content_widget.result_signal.connect(
-                lambda ch, result, data_id=self.data_id:
-                self.on_change_data_finished_for(data_id, ch, result)
-            )
-        elif tool_key == "remove step window":
-            content_widget = RemoveStepByWindow(channel)
-            content_widget.result_signal.connect(
-                lambda ch, result, data_id=self.data_id:
-                self.on_change_data_finished_for(data_id, ch, result)
-            )
+        # ─── 创建工具并接线到 Broker ───────────────────────
+        if tool_key == "remove region":
+            content_widget = RemoveRegion(data_id, channel_name)
+            self._wire_tool(content_widget, data_id, channel_name)
+            content_widget.channel_sync_requested.connect(self.broker.apply_result_all_channels)
+            content_widget.region_sync_requested.connect(self.broker.apply_region_to_all)
+        elif tool_key == "remove spike":
+            content_widget = RemoveSpike(data_id, channel_name)
+            self._wire_tool(content_widget, data_id, channel_name)
+            content_widget.channel_sync_requested.connect(self.broker.apply_result_all_channels)
+        elif tool_key in ("remove step diff", "remove step window",
+                          "remove step baseline", "remove wavelet denoise",
+                          "remove diurnal sinusoid"):
+            tool_cls = {
+                "remove step diff": RemoveStepByDiff,
+                "remove step window": RemoveStepByWindow,
+                "remove step baseline": RemoveStepByBaseline,
+                "remove wavelet denoise": RemoveWaveletDenoise,
+                "remove diurnal sinusoid": RemoveDiurnalSinusoid,
+            }[tool_key]
+            content_widget = tool_cls(data_id, channel_name)
+            self._wire_tool(content_widget, data_id, channel_name)
+        elif tool_key == "robust estimate":
+            content_widget = RobustEstimateWidget(data_id)
+            self._wire_tool(content_widget, data_id, "")
+        elif tool_key == "remote reference":
+            content_widget = RemoteReferenceWidget(data_id)
+            self._wire_tool(content_widget, data_id, "")
         else:
             content_widget = QTextEdit()
             content_widget.setPlainText(f"未知工具类型: {tool_type}")
@@ -299,63 +337,96 @@ class DataProcessLegacyWidget(QWidget):
         states: list[ToolWindowState] = []
         for sub_window in self.mdi_area.subWindowList():
             tool_type = sub_window.property("tool_type")
+            data_id = sub_window.property("data_id")
             channel_name = sub_window.property("channel_name")
-            if isinstance(tool_type, str) and isinstance(channel_name, str):
-                states.append(ToolWindowState(tool_type, channel_name))
+            if isinstance(tool_type, str) and isinstance(data_id, int) and isinstance(channel_name, str):
+                states.append(ToolWindowState(tool_type, data_id, channel_name))
         return states
 
-    def on_change_data_finished_for(self, data_id: int, channel: str, result):
-        if data_id == 0:
-            return
+    def _wire_tool(self, tool, data_id: int, channel_name: str) -> None:
+        """将工具的信号接线到 Broker，然后触发数据请求。"""
+        tool.data_requested.connect(self.broker.request_data)
+        tool.result_submitted.connect(self.broker.apply_result)
+        self.broker.data_ready.connect(tool._on_data_ready)
+        tool.data_requested.emit(data_id, channel_name)
 
-        data = self.data_manager.get(data_id) if self.data_manager is not None else None
+    def on_change_data_finished_for(self, data_id: int, channel: str, result):
+        if data_id == 0 or self.data_manager is None:
+            return
+        data = self.data_manager.get(data_id)
         if data is None:
             return
-
-        data.data[channel].cts = pd.Series(result)
+        existing_series = data.get_channel_series(channel)
+        if len(existing_series) == len(result):
+            data.set_channel_series(channel, pd.Series(
+                result,
+                index=existing_series.index,
+                name=existing_series.name,
+            ))
+        else:
+            data.set_channel_data(channel, result)
         self.change_finished_signal.emit(data_id, channel)
+
+    def _on_tool_result_applied(self, data_id: int, channel: str) -> None:
+        """Broker 确认结果写入后，关闭对应工具的子窗口。"""
+        if self.mdi_area is None:
+            return
+        for sub_window in self.mdi_area.subWindowList():
+            if (sub_window.property("data_id") == data_id
+                    and sub_window.property("channel_name") == channel):
+                sub_window.close()
+                break
 
     def _find_tool_window(
         self,
         tool_type: str,
+        data_id: int,
         channel_name: str,
     ) -> Optional[QMdiSubWindow]:
         if self.mdi_area is None:
             return None
-
         for sub_window in self.mdi_area.subWindowList():
             if (
                 sub_window.property("tool_key") == tool_type
+                and sub_window.property("data_id") == data_id
                 and sub_window.property("channel_name") == channel_name
             ):
                 return sub_window
         return None
 
+    def close_windows_for_data(self, data_id: int):
+        if self.mdi_area is None:
+            return
+        for sub_window in list(self.mdi_area.subWindowList()):
+            if sub_window.property("data_id") == data_id:
+                self._dispose_sub_window(sub_window)
+
     def _canonical_tool_type(self, tool_type: str) -> str:
         if tool_type == "remove step":
             return "remove step diff"
+        if tool_type == "remove pulse wavelet":
+            return "remove wavelet denoise"
         return tool_type
 
     def _close_invalid_tool_windows(self):
         if self.mdi_area is None:
             return
-
         if self.em_data is None:
             for sub_window in list(self.mdi_area.subWindowList()):
                 self._dispose_sub_window(sub_window)
             return
 
-        valid_channels = set(self.em_data.data.keys())
+        valid_channels = set(self.em_data.channel_names())
         for sub_window in list(self.mdi_area.subWindowList()):
+            data_id = sub_window.property("data_id")
             channel_name = sub_window.property("channel_name")
-            if isinstance(channel_name, str) and channel_name not in valid_channels:
+            if data_id == self.data_id and isinstance(channel_name, str) and channel_name and channel_name not in valid_channels:
                 self._dispose_sub_window(sub_window)
 
     def _dispose_sub_window(self, sub_window: QMdiSubWindow):
         if self.mdi_area is not None:
             self.mdi_area.removeSubWindow(sub_window)
         sub_window.close()
-        sub_window.deleteLater()
 
     def closeEvent(self, event):
         if self.mdi_area is not None:
@@ -364,82 +435,636 @@ class DataProcessLegacyWidget(QWidget):
         super().closeEvent(event)
 
 
+class WorkspaceMdiArea(QMdiArea):
+    change_finished_signal = Signal(int, str)
+
+    def __init__(self, mode: str, data_manager: Optional[DataManager] = None, parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.data_manager = data_manager
+        self.data_id = 0
+        self.em_data: Optional[EMData] = None
+        self._context_resolver: Optional[Callable[[], Optional[tuple[int, str]]]] = None
+        self._selection_payload_resolver: Optional[Callable[[], Optional[dict]]] = None
+        self._clear_checked_channels: Optional[Callable[[list[tuple[int, str]]], None]] = None
+        self._last_pipeline_window: Optional[DataProcessPipelineWidget] = None
+        self.setAcceptDrops(True)
+        self.classic_host = DataProcessLegacyWidget(data_manager, self)
+        # Classic tools should live directly inside this workspace MDI area.
+        # The legacy host is kept only as a controller/state holder.
+        nested_mdi = self.classic_host.mdi_area
+        if nested_mdi is not None and nested_mdi is not self:
+            nested_mdi.hide()
+            nested_mdi.setParent(None)
+            nested_mdi.deleteLater()
+        self.classic_host.mdi_area = self
+        self.classic_host.change_finished_signal.connect(self.change_finished_signal)
+
+    def init_data(self, data, data_id: int = 0):
+        self.data_id = data_id
+        self.em_data = data
+        self.classic_host.init_data(data, data_id)
+
+    def set_context_resolver(
+        self,
+        resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
+    ) -> None:
+        self._context_resolver = resolver
+        self.classic_host.set_context_resolver(resolver)
+
+    def set_selection_payload_resolver(
+        self,
+        resolver: Optional[Callable[[], Optional[dict]]],
+    ) -> None:
+        self._selection_payload_resolver = resolver
+
+    def set_clear_checked_channels(
+        self,
+        clearer: Optional[Callable[[list[tuple[int, str]]], None]],
+    ) -> None:
+        self._clear_checked_channels = clearer
+
+    def active_pipeline_window(self) -> Optional[DataProcessPipelineWidget]:
+        active = self.activeSubWindow()
+        if active is None:
+            return None
+        widget = active.widget()
+        return widget if isinstance(widget, DataProcessPipelineWidget) else None
+
+    def last_pipeline_window(self) -> Optional[DataProcessPipelineWidget]:
+        return self._last_pipeline_window
+
+    def pipeline_subwindow(self, pipeline_widget: DataProcessPipelineWidget) -> Optional[QMdiSubWindow]:
+        for sub_window in self.subWindowList():
+            if sub_window.widget() is pipeline_widget:
+                return sub_window
+        return None
+
+    def activate_pipeline_window(self, pipeline_widget: Optional[DataProcessPipelineWidget]) -> bool:
+        if pipeline_widget is None:
+            return False
+        sub_window = self.pipeline_subwindow(pipeline_widget)
+        if sub_window is None:
+            return False
+        sub_window.show()
+        self.setActiveSubWindow(sub_window)
+        self._last_pipeline_window = pipeline_widget
+        return True
+
+    def activate_classic_mode(self) -> None:
+        self.setActiveSubWindow(None)
+
+    def _apply_subwindow_size(
+        self,
+        sub_window: QMdiSubWindow,
+        position: Optional[QPoint] = None,
+    ) -> None:
+        min_width = 1100 if self.mode == "pipeline" else 900
+        min_height = 720 if self.mode == "pipeline" else 680
+        target_width, target_height = _mdi_target_size(self, min_width, min_height)
+        if position is not None:
+            sub_window.setGeometry(position.x(), position.y(), target_width, target_height)
+        else:
+            sub_window.resize(target_width, target_height)
+
+    def _present_subwindow(self, sub_window: Optional[QMdiSubWindow]) -> None:
+        if sub_window is None:
+            return
+        sub_window.show()
+        sub_window.showMaximized()
+        self.setActiveSubWindow(sub_window)
+
+    def dragEnterEvent(self, event):
+        if self.mode == "pipeline" and event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
+            event.acceptProposedAction()
+        elif self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self.mode == "pipeline" and event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
+            event.acceptProposedAction()
+        elif self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if self.mode == "pipeline" and event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
+            self._handle_data_selection_drop(event)
+            return
+
+        if self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
+            widget_type = event.mimeData().data(CLASSIC_TOOL_MIME).data().decode()
+            STATION_TOOLS = {"robust estimate", "remote reference"}
+            if widget_type in STATION_TOOLS:
+                if self.classic_host.em_data is not None and self.classic_host.data_id != 0:
+                    data_id = self.classic_host.data_id
+                    channel_name = ""
+                else:
+                    event.ignore()
+                    return
+            else:
+                target = self._context_resolver() if self._context_resolver is not None else None
+                if target is None:
+                    event.ignore()
+                    return
+                data_id, channel_name = target
+            sub_window = self.classic_host.open_tool_window(widget_type, data_id, channel_name, event.position().toPoint())
+            if sub_window is not None:
+                self.classic_host.present_subwindow(sub_window)
+                event.acceptProposedAction()
+                return
+
+        event.ignore()
+
+    def _handle_data_selection_drop(self, event):
+        payload = None
+        if event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
+            try:
+                raw_payload = bytes(event.mimeData().data(DATA_TREE_SELECTION_MIME)).decode("utf-8")
+                payload = json.loads(raw_payload)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+
+        if payload is None and self._selection_payload_resolver is not None:
+            payload = self._selection_payload_resolver()
+
+        if payload is None:
+            event.ignore()
+            return
+
+        refs = self._channel_refs_from_payload(payload)
+        if not refs:
+            event.ignore()
+            return
+
+        drop_position = event.position()
+        if hasattr(drop_position, "toPoint"):
+            drop_point = drop_position.toPoint()
+        else:
+            drop_point = drop_position
+
+        target_subwindow = self._subwindow_at(drop_point)
+        target_widget = None if target_subwindow is None else target_subwindow.widget()
+
+        if isinstance(target_widget, DataProcessPipelineWidget):
+            added, duplicated, failed = self.add_channels_to_pipeline_window(target_widget, refs)
+        else:
+            pipeline_widget = self.create_pipeline_window(refs, position=drop_point)
+            if pipeline_widget is None:
+                added, duplicated, failed = [], [], refs
+            else:
+                added = pipeline_widget.channel_refs()
+                duplicated = []
+                failed = [ref for ref in refs if ref not in added]
+
+        if added and self._clear_checked_channels is not None:
+            self._clear_checked_channels(added)
+
+        if duplicated or failed:
+            parts = []
+            if duplicated:
+                dup_text = "\n".join(f"#{data_id} {channel_name}" for data_id, channel_name in duplicated)
+                parts.append(f"已存在，已忽略:\n{dup_text}")
+            if failed:
+                fail_text = "\n".join(f"#{data_id} {channel_name}" for data_id, channel_name in failed)
+                parts.append(f"时间范围不兼容，未加入:\n{fail_text}")
+            QMessageBox.information(self, "部分通道未加入", "\n\n".join(parts))
+
+        if added:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _subwindow_at(self, pos: QPoint) -> Optional[QMdiSubWindow]:
+        widget = self.childAt(pos)
+        while widget is not None and not isinstance(widget, QMdiSubWindow):
+            widget = widget.parentWidget()
+        return widget if isinstance(widget, QMdiSubWindow) else None
+
+    def _channel_refs_from_payload(self, payload: dict) -> list[tuple[int, str]]:
+        kind = payload.get("kind")
+        if kind == "dataset":
+            data_id = payload.get("data_id")
+            if not isinstance(data_id, int) or self.data_manager is None:
+                return []
+            em_data = self.data_manager.get(data_id)
+            if em_data is None:
+                return []
+            return [(data_id, channel_name) for channel_name in em_data.channel_names()]
+
+        refs = payload.get("refs")
+        if kind == "channels" and isinstance(refs, list):
+            result = []
+            for item in refs:
+                if not isinstance(item, dict):
+                    continue
+                data_id = item.get("data_id")
+                channel_name = item.get("channel_name")
+                if isinstance(data_id, int) and isinstance(channel_name, str):
+                    result.append((data_id, channel_name))
+            return result
+        return []
+
+    def create_pipeline_window(
+        self,
+        channel_refs: list[tuple[int, str]],
+        position: Optional[QPoint] = None,
+    ) -> Optional[DataProcessPipelineWidget]:
+        pipeline_widget = DataProcessPipelineWidget(self.data_manager, self)
+        pipeline_widget.data_id = self.data_id
+        pipeline_widget.em_data = self.em_data
+        pipeline_widget.change_finished_signal.connect(self.change_finished_signal)
+        added, duplicated, failed = pipeline_widget.add_channels(channel_refs)
+        if not added:
+            pipeline_widget.deleteLater()
+            return None
+
+        sub_window = QMdiSubWindow()
+        sub_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        sub_window.setWindowFlags(
+            sub_window.windowFlags() & ~Qt.WindowType.WindowSystemMenuHint
+        )
+        sub_window.setWidget(pipeline_widget)
+        sub_window.setWindowTitle(pipeline_widget.window_title())
+        self._apply_subwindow_size(sub_window, position)
+        self.addSubWindow(sub_window)
+        self._present_subwindow(sub_window)
+        self._last_pipeline_window = pipeline_widget
+
+        if duplicated or failed:
+            parts = []
+            if duplicated:
+                dup_text = "\n".join(f"#{data_id} {channel_name}" for data_id, channel_name in duplicated)
+                parts.append(f"已存在，已忽略:\n{dup_text}")
+            if failed:
+                fail_text = "\n".join(f"#{data_id} {channel_name}" for data_id, channel_name in failed)
+                parts.append(f"时间范围不兼容，未加入:\n{fail_text}")
+            QMessageBox.information(self, "部分通道未加入", "\n\n".join(parts))
+        return pipeline_widget
+
+    def add_channels_to_pipeline_window(
+        self,
+        pipeline_widget: DataProcessPipelineWidget,
+        channel_refs: list[tuple[int, str]],
+    ) -> tuple[list[tuple[int, str]], list[tuple[int, str]], list[tuple[int, str]]]:
+        added, duplicated, failed = pipeline_widget.add_channels(channel_refs)
+        subwindow = pipeline_widget.parentWidget()
+        while subwindow is not None and not isinstance(subwindow, QMdiSubWindow):
+            subwindow = subwindow.parentWidget()
+        if isinstance(subwindow, QMdiSubWindow):
+            subwindow.setWindowTitle(pipeline_widget.window_title())
+        self._last_pipeline_window = pipeline_widget
+        return added, duplicated, failed
+
+    def close_pipeline_windows_for_data(self, data_id: int):
+        for sub_window in list(self.subWindowList()):
+            widget = sub_window.widget()
+            if isinstance(widget, DataProcessPipelineWidget):
+                widget.remove_data(data_id)
+                if widget.channel_count() == 0:
+                    self.removeSubWindow(sub_window)
+                    sub_window.close()
+
+    def closeEvent(self, event):
+        for sub_window in list(self.subWindowList()):
+            self.removeSubWindow(sub_window)
+            sub_window.close()
+        super().closeEvent(event)
+
+
+class WorkspaceTabPanel(QWidget):
+    change_finished_signal = Signal(int, str)
+
+    def __init__(self, mode: str, data_manager: Optional[DataManager] = None, parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.data_manager = data_manager
+        self.data_id = 0
+        self.em_data: Optional[EMData] = None
+        self._context_resolver: Optional[Callable[[], Optional[tuple[int, str]]]] = None
+        self._selection_payload_resolver: Optional[Callable[[], Optional[dict]]] = None
+        self._clear_checked_channels: Optional[Callable[[list[tuple[int, str]]], None]] = None
+        self._workspace_counter = 0
+        self._workspaces: list[QWidget] = []
+        self._current_workspace_index = 0
+        self.workspace_tabs = QTabWidget(self)
+        self.workspace_tabs.setMovable(True)
+        self.workspace_tabs.setTabsClosable(True)
+        self.workspace_tabs.currentChanged.connect(self._on_tab_changed)
+        self.workspace_tabs.tabCloseRequested.connect(self._close_workspace)
+        self._creating_workspace = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.workspace_tabs, 1)
+
+        self._ensure_add_tab()
+        self._create_workspace()
+
+    def _tab_label(self, number: int) -> str:
+        return f"工作区 {number}"
+
+    def _ensure_add_tab(self):
+        if self.workspace_tabs.count() == 0 or self.workspace_tabs.tabText(self.workspace_tabs.count() - 1) != "+":
+            current_index = self.workspace_tabs.currentIndex()
+            self.workspace_tabs.blockSignals(True)
+            self.workspace_tabs.addTab(QWidget(self.workspace_tabs), "+")
+            if current_index >= 0:
+                self.workspace_tabs.setCurrentIndex(current_index)
+            self.workspace_tabs.blockSignals(False)
+        self._update_tab_buttons()
+
+    def _workspace_container(self, mdi_area: WorkspaceMdiArea) -> QWidget:
+        container = QWidget(self.workspace_tabs)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(mdi_area, 1)
+        container.setLayout(layout)
+        container.setProperty("mdi_area", mdi_area)
+        return container
+
+    def _create_workspace(self) -> WorkspaceMdiArea:
+        if not hasattr(self, "_workspaces"):
+            self._workspaces: list[QWidget] = []
+            self._current_workspace_index = 0
+        self._workspace_counter += 1
+        mdi_area = WorkspaceMdiArea(self.mode, self.data_manager, self.workspace_tabs)
+        mdi_area.set_context_resolver(self._context_resolver)
+        mdi_area.set_selection_payload_resolver(self._selection_payload_resolver)
+        mdi_area.set_clear_checked_channels(self._clear_checked_channels)
+        mdi_area.change_finished_signal.connect(self.change_finished_signal)
+        mdi_area.init_data(self.em_data, self.data_id)
+        container = self._workspace_container(mdi_area)
+        self._workspaces.append(container)
+        insert_index = max(0, self.workspace_tabs.count() - 1)
+        self.workspace_tabs.blockSignals(True)
+        self.workspace_tabs.insertTab(insert_index, container, self._tab_label(self._workspace_counter))
+        self.workspace_tabs.setCurrentIndex(insert_index)
+        self.workspace_tabs.blockSignals(False)
+        self._current_workspace_index = len(self._workspaces) - 1
+        self._update_tab_buttons()
+        return mdi_area
+
+    def _update_tab_buttons(self) -> None:
+        tab_bar = self.workspace_tabs.tabBar()
+        add_index = self.workspace_tabs.count() - 1
+        show_close = len(self._workspaces) > 1
+
+        for index in range(self.workspace_tabs.count()):
+            for side in (QTabBar.LeftSide, QTabBar.RightSide):
+                button = tab_bar.tabButton(index, side)
+                if button is None:
+                    continue
+                if index == add_index:
+                    button.hide()
+                else:
+                    button.setVisible(show_close)
+
+    def _close_workspace(self, index: int) -> None:
+        add_index = self.workspace_tabs.count() - 1
+        if index < 0 or index >= add_index:
+            return
+        if len(self._workspaces) <= 1:
+            self._update_tab_buttons()
+            return
+
+        container = self._workspaces.pop(index)
+        mdi_area = container.property("mdi_area")
+        if isinstance(mdi_area, WorkspaceMdiArea):
+            mdi_area.close()
+
+        self.workspace_tabs.blockSignals(True)
+        self.workspace_tabs.removeTab(index)
+        next_index = min(index, len(self._workspaces) - 1)
+        self.workspace_tabs.setCurrentIndex(max(0, next_index))
+        self.workspace_tabs.blockSignals(False)
+
+        container.deleteLater()
+        self._current_workspace_index = max(0, min(next_index, len(self._workspaces) - 1))
+        self._update_tab_buttons()
+
+    def _on_tab_changed(self, index: int):
+        add_index = self.workspace_tabs.count() - 1
+        if index == add_index:
+            if self._creating_workspace:
+                return
+            self._creating_workspace = True
+            try:
+                self._create_workspace()
+            finally:
+                self._creating_workspace = False
+            return
+        if 0 <= index < add_index:
+            self._current_workspace_index = index
+
+    def current_workspace(self) -> Optional[WorkspaceMdiArea]:
+        if not self._workspaces:
+            return None
+        index = min(self._current_workspace_index, len(self._workspaces) - 1)
+        container = self._workspaces[index]
+        widget = container.property("mdi_area")
+        return widget if isinstance(widget, WorkspaceMdiArea) else None
+
+    def init_data(self, data, data_id: int = 0):
+        self.data_id = data_id
+        self.em_data = data
+        for container in self._workspaces:
+            mdi_area = container.property("mdi_area")
+            if isinstance(mdi_area, WorkspaceMdiArea):
+                mdi_area.init_data(data, data_id)
+
+    def set_context_resolver(
+        self,
+        resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
+    ) -> None:
+        self._context_resolver = resolver
+        for container in self._workspaces:
+            mdi_area = container.property("mdi_area")
+            if isinstance(mdi_area, WorkspaceMdiArea):
+                mdi_area.set_context_resolver(resolver)
+
+    def set_selection_payload_resolver(
+        self,
+        resolver: Optional[Callable[[], Optional[dict]]],
+    ) -> None:
+        self._selection_payload_resolver = resolver
+        for container in self._workspaces:
+            mdi_area = container.property("mdi_area")
+            if isinstance(mdi_area, WorkspaceMdiArea):
+                mdi_area.set_selection_payload_resolver(resolver)
+
+    def set_clear_checked_channels(
+        self,
+        clearer: Optional[Callable[[list[tuple[int, str]]], None]],
+    ) -> None:
+        self._clear_checked_channels = clearer
+        for container in self._workspaces:
+            mdi_area = container.property("mdi_area")
+            if isinstance(mdi_area, WorkspaceMdiArea):
+                mdi_area.set_clear_checked_channels(clearer)
+
+    def close_windows_for_data(self, data_id: int):
+        for container in self._workspaces:
+            mdi_area = container.property("mdi_area")
+            if not isinstance(mdi_area, WorkspaceMdiArea):
+                continue
+            mdi_area.classic_host.close_windows_for_data(data_id)
+            mdi_area.close_pipeline_windows_for_data(data_id)
+
+
 class DataProcessWidget(QWidget):
     change_finished_signal = Signal(int, str)
+    PIPELINE_ENABLED = False
 
     def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
         super().__init__(parent)
         self.data_manager = data_manager
         self.data_id = 0
         self.em_data: Optional[EMData] = None
+        self._context_resolver: Optional[Callable[[], Optional[tuple[int, str]]]] = None
+        self._selection_payload_resolver: Optional[Callable[[], Optional[dict]]] = None
+        self._clear_checked_channels: Optional[Callable[[list[tuple[int, str]]], None]] = None
         self._mode = "classic"
 
-        self.mode_buttons = QButtonGroup(self)
-        self.mode_buttons.setExclusive(True)
+        self.mode_label = QLabel("模式", self)
+        self.mode_button_group = QButtonGroup(self)
         self.classic_button = QToolButton(self)
         self.classic_button.setText("Classic")
         self.classic_button.setCheckable(True)
-        self.classic_button.setChecked(True)
+        self.classic_button.setAutoExclusive(True)
+        self.classic_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.pipeline_button = QToolButton(self)
         self.pipeline_button.setText("Pipeline")
         self.pipeline_button.setCheckable(True)
+        self.pipeline_button.setAutoExclusive(True)
+        self.pipeline_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.mode_button_group.addButton(self.classic_button)
+        self.mode_button_group.addButton(self.pipeline_button)
+        self.classic_button.clicked.connect(lambda: self.set_mode("classic"))
+        self.pipeline_button.clicked.connect(lambda: self.set_mode("pipeline"))
+        self.classic_button.setObjectName("classicModeButton")
+        self.pipeline_button.setObjectName("pipelineModeButton")
+        self.classic_button.setStyleSheet(
+            "QToolButton { padding: 6px 16px; border: 1px solid #545454; border-right: none; border-radius: 6px 0 0 6px; background: #2b2b2b; }"
+            "QToolButton:checked { background: #3d7ea6; color: white; }"
+        )
+        self.pipeline_button.setStyleSheet(
+            "QToolButton { padding: 6px 16px; border: 1px solid #545454; border-radius: 0 6px 6px 0; background: #2b2b2b; }"
+            "QToolButton:checked { background: #3d7ea6; color: white; }"
+        )
+        self.pipeline_button.setEnabled(self.PIPELINE_ENABLED)
+        self.pipeline_button.setToolTip("Pipeline 功能暂时屏蔽" if not self.PIPELINE_ENABLED else "")
 
-        self.mode_buttons.addButton(self.classic_button, 0)
-        self.mode_buttons.addButton(self.pipeline_button, 1)
+        self.mode_stack = QStackedWidget(self)
+        self.classic_panel = WorkspaceTabPanel("classic", data_manager, self)
+        self.pipeline_panel = WorkspaceTabPanel("pipeline", data_manager, self)
+        self.classic_panel.change_finished_signal.connect(self.change_finished_signal)
+        self.pipeline_panel.change_finished_signal.connect(self.change_finished_signal)
+        self.mode_stack.addWidget(self.classic_panel)
+        self.mode_stack.addWidget(self.pipeline_panel)
 
-        self.stack = QStackedWidget(self)
-        self.legacy_widget = DataProcessLegacyWidget(data_manager, self.stack)
-        self.pipeline_widget = DataProcessPipelineWidget(data_manager, self.stack)
-        self.stack.addWidget(self.legacy_widget)
-        self.stack.addWidget(self.pipeline_widget)
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(8, 6, 8, 6)
+        header_layout.setSpacing(10)
+        header_layout.addWidget(self.mode_label)
+        header_layout.addWidget(self.classic_button)
+        header_layout.addWidget(self.pipeline_button)
+        header_layout.addStretch(1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.addLayout(header_layout)
+        layout.addWidget(self.mode_stack, 1)
 
-        switch_row = QWidget(self)
-        switch_layout = QHBoxLayout(switch_row)
-        switch_layout.setContentsMargins(8, 8, 8, 4)
-        switch_layout.addWidget(self.classic_button)
-        switch_layout.addWidget(self.pipeline_button)
-        switch_layout.addStretch(1)
+        self.set_mode("classic")
 
-        layout.addWidget(switch_row)
-        layout.addWidget(self.stack, 1)
+    def _current_panel(self) -> WorkspaceTabPanel:
+        return self.classic_panel if self._mode == "classic" else self.pipeline_panel
 
-        self.mode_buttons.idClicked.connect(self._on_mode_changed)
-        self.legacy_widget.change_finished_signal.connect(self.change_finished_signal)
-        self.pipeline_widget.change_finished_signal.connect(self.change_finished_signal)
+    def open_tool_for(self, data_id: int, channel_name: str, tool_type: str):
+        data = self.data_manager.get(data_id) if self.data_manager is not None else None
+        if data is None:
+            return None
+        self.init_data(data, data_id)
+        self.set_mode("classic")
+        workspace = self.classic_panel.current_workspace()
+        if workspace is None:
+            workspace = self.classic_panel._create_workspace()
+        sub_window = workspace.classic_host.open_tool_window(tool_type, data_id, channel_name)
+        if sub_window is not None:
+            workspace.classic_host.present_subwindow(sub_window)
+        return sub_window
+
+    def current_workspace(self) -> Optional[WorkspaceMdiArea]:
+        return self._current_panel().current_workspace()
 
     def init_data(self, data, data_id: int = 0):
         self.data_id = data_id
         self.em_data = data
-        self.legacy_widget.init_data(data, data_id)
-        self.pipeline_widget.init_data(data, data_id)
+        self.classic_panel.init_data(data, data_id)
+        self.pipeline_panel.init_data(data, data_id)
+
+    def set_context_resolver(
+        self,
+        resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
+    ) -> None:
+        self._context_resolver = resolver
+        self.classic_panel.set_context_resolver(resolver)
+        self.pipeline_panel.set_context_resolver(resolver)
+
+    def set_selection_payload_resolver(
+        self,
+        resolver: Optional[Callable[[], Optional[dict]]],
+    ) -> None:
+        self._selection_payload_resolver = resolver
+        self.classic_panel.set_selection_payload_resolver(resolver)
+        self.pipeline_panel.set_selection_payload_resolver(resolver)
+
+    def set_clear_checked_channels(
+        self,
+        clearer: Optional[Callable[[list[tuple[int, str]]], None]],
+    ) -> None:
+        self._clear_checked_channels = clearer
+        self.classic_panel.set_clear_checked_channels(clearer)
+        self.pipeline_panel.set_clear_checked_channels(clearer)
+
+    def close_windows_for_data(self, data_id: int):
+        self.classic_panel.close_windows_for_data(data_id)
+        self.pipeline_panel.close_windows_for_data(data_id)
 
     def current_mode(self) -> str:
         return self._mode
 
     def set_mode(self, mode: str):
-        if mode == self._mode:
+        if mode not in ("classic", "pipeline"):
             return
-        if mode == "pipeline":
-            self.pipeline_button.setChecked(True)
-            self._on_mode_changed(1)
-        else:
-            self.classic_button.setChecked(True)
-            self._on_mode_changed(0)
+        if mode == "pipeline" and not self.PIPELINE_ENABLED:
+            mode = "classic"
+        self._mode = mode
+        self.classic_button.setChecked(mode == "classic")
+        self.pipeline_button.setChecked(mode == "pipeline")
+        self.mode_stack.setCurrentWidget(self.classic_panel if mode == "classic" else self.pipeline_panel)
 
-    def _on_mode_changed(self, button_id: int):
-        if button_id == 1:
-            self._mode = "pipeline"
-            self.stack.setCurrentWidget(self.pipeline_widget)
-        else:
-            self._mode = "classic"
-            self.stack.setCurrentWidget(self.legacy_widget)
+    @property
+    def legacy_widget(self) -> Optional[DataProcessLegacyWidget]:
+        workspace = self.classic_panel.current_workspace()
+        return None if workspace is None else workspace.classic_host
+
+    @property
+    def pipeline_widget(self) -> Optional[DataProcessPipelineWidget]:
+        workspace = self.pipeline_panel.current_workspace()
+        if workspace is None:
+            return None
+        return workspace.active_pipeline_window() or workspace.last_pipeline_window()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     from io_utils.mat_io import MatLoader
 
     app = QApplication(sys.argv)

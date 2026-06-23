@@ -12,11 +12,115 @@ from core.mat_data import MatEMData
 from io_utils.em_io import EMDataSaver, EMDataLoader
 from utils.timestamp import pts_to_array
 
-_TZ_CST_ = pytz.timezone('Asia/Shanghai')
+_TZ_UTC_ = pytz.timezone('UTC')
 
 _EMPTY_F64_ = np.zeros((0, 0), dtype=np.float64)
 _EMPTY_CELL_ = np.zeros((1, 0), dtype=object)
 _DATE_VEC_ = np.zeros((1, 6), dtype=np.float64)
+
+# ---------------------------------------------------------------------------
+# MATLAB v7.3 (HDF5) 文件读取支持
+# ---------------------------------------------------------------------------
+
+def _load_mat_v73(path: str) -> dict:
+    """读取 MATLAB v7.3 (HDF5) 文件并转换为 scipy.io.loadmat 兼容的 dict。
+
+    v7.3 文件用 HDF5 存储，结构与 scipy 的 (1,1) cell 嵌套格式完全不同。
+    此函数负责将 HDF5 结构递归转换为与 scipy 输出一致的形式。
+    """
+    import h5py
+
+    def _decode_char(raw: np.ndarray) -> str:
+        """MATLAB char 数组 (uint16 UTF-16) → Python str。"""
+        return raw.tobytes().decode('utf-16').rstrip('\x00')
+
+    def _is_empty_ref(ds: h5py.Dataset) -> bool:
+        """HDF5 中对空 MATLAB 数组的引用桩。"""
+        return ds.dtype == np.uint64 and ds.ndim == 1 and ds.shape[0] <= 3
+
+    def _wrap_cell(value) -> np.ndarray:
+        """将值包装到 (1, 1) object 数组（模拟 MATLAB cell 语义）。"""
+        cell = np.empty((1, 1), dtype=object)
+        cell[0, 0] = value
+        return cell
+
+    def _convert_value(item, h5f: h5py.File):
+        """将 HDF5 项（Group/Dataset）转换为 scipy 格式的值（未包装 cell）。"""
+        # ---- Group → MATLAB struct → dict ----
+        if isinstance(item, h5py.Group):
+            fields = {}
+            for key in item.keys():
+                if key.startswith('#'):
+                    continue
+                fields[key] = _wrap_cell(_convert_value(item[key], h5f))
+            # 返回 dict，外层会包装到 structured array
+            return fields
+
+        # ---- Dataset ----
+        ds = item
+
+        # 空数组引用桩
+        if _is_empty_ref(ds):
+            return np.zeros((0, 0), dtype=np.float64)
+
+        # char 数组 (uint16) → 包装为 (1,) 数组，与 scipy 格式一致
+        if ds.dtype == np.uint16:
+            return np.array([_decode_char(ds[:])])
+
+        # cell 数组 (object dtype, 元素是 HDF5 references)
+        if ds.dtype == object:
+            raw = ds[:]
+            rows, cols = raw.shape
+            # 构建 (rows, cols) object 数组，每个单元格递归转换
+            cells = np.empty((rows, cols), dtype=object)
+            for r in range(rows):
+                for c in range(cols):
+                    ref = raw[r, c]
+                    if isinstance(ref, h5py.h5r.Reference):
+                        obj = h5f[ref]
+                        if isinstance(obj, h5py.Dataset) and obj.dtype == np.uint16:
+                            # char 数组引用 → 字符串 → 包装为 (1,) 数组
+                            cells[r, c] = np.array([_decode_char(obj[:])])
+                        elif isinstance(obj, h5py.Dataset):
+                            cells[r, c] = _convert_value(obj, h5f)
+                        else:
+                            cells[r, c] = _convert_value(obj, h5f)
+                    else:
+                        cells[r, c] = ref
+            # scipy 格式中 cell 数组通常是行向量 (1, N)，与数值数组一样需转置
+            if cells.ndim == 2:
+                return cells.T
+            return cells
+
+        # 普通数值数组
+        data = ds[:]
+        # MATLAB 列优先 vs HDF5/C 行优先：所有 2D 数组需转置还原
+        if data.ndim == 2:
+            data = data.T
+        # float 数组但值全为整数（如时间向量 [2024, 8, 11, ...]）
+        # → 转为 int，避免 pandas Timestamp 误将 float 解释为 epoch
+        if data.dtype == np.float64 and np.all(np.abs(data - np.round(data)) < 1e-10):
+            data = data.astype(np.int64)
+        return data
+
+    with h5py.File(path, 'r') as f:
+        result = {}
+        for var_name in f.keys():
+            if var_name.startswith('#'):
+                continue
+            item = f[var_name]
+            converted = _convert_value(item, f)
+            if isinstance(item, h5py.Group):
+                # struct: 构建 (1, 1) structured array 模拟 scipy 格式
+                field_names = list(converted.keys())
+                dtype_spec = np.dtype([(fn, 'O') for fn in field_names])
+                arr = np.empty((1, 1), dtype=dtype_spec)
+                for fn in field_names:
+                    arr[fn] = converted[fn]
+                result[var_name] = arr
+            else:
+                result[var_name] = _wrap_cell(converted)
+    return result
 
 TS_STRUCT_TEMPLATE = {
     # 维度信息
@@ -55,7 +159,7 @@ TS_STRUCT_TEMPLATE = {
 }
 
 def _make_timestamp_(start: pd.Timestamp, dt_sec: float, npts: int) -> np.ndarray:
-    year_start = pd.Timestamp(year=start.year, month=1, day=1, tz=_TZ_CST_)
+    year_start = pd.Timestamp(year=start.year, month=1, day=1, tz=_TZ_UTC_)
     year_days  = 366 if (start.year % 4 == 0 and
                          (start.year % 100 != 0 or start.year % 400 == 0)) else 365
     secs_in_year = year_days * 86400.0
@@ -82,16 +186,26 @@ def new_ts_struct() -> dict:
 
 class MatLoader(EMDataLoader):
     @staticmethod
-    def load(path: str) -> MatEMData:
-        mat_data = loadmat(path)
-        return MatEMData(mat_data, path)
+    def load(path: str, tz: str = 'Asia/Shanghai') -> MatEMData:
+        # 检测文件格式：v7.3 文件以 HDF5 存储，需要 h5py 读取
+        with open(path, 'rb') as fh:
+            header = fh.read(128)
+        if b'MATLAB 7.3 MAT-file' in header:
+            mat_data = _load_mat_v73(path)
+        else:
+            mat_data = loadmat(path)
+        return MatEMData(mat_data, path, tz=tz)
 
 class MatSaver(EMDataSaver):
     @staticmethod
     def save(em_data: MatEMData, path: str):
         if isinstance(em_data, MatEMData):
             em_data.update_meta()
-            savemat(path, em_data.mat_meta)
+            if hasattr(em_data, "mat_meta"):
+                # 只保存 tsStruct，避免 loadmat 遗留的 __header__/__version__/__globals__ 字段引发 scipy 警告
+                savemat(path, {"tsStruct": em_data.mat_meta['tsStruct']})
+            else:
+                raise TypeError(f"{type(em_data).__name__} is missing 'mat_meta' attribute")
         else:
             ts = new_ts_struct()
             ts["NCh"] = em_data.NCh
@@ -118,8 +232,8 @@ class MatSaver(EMDataSaver):
             ts["units"] = _make_cell_row_(units)
 
             data = np.empty((em_data.NCh, em_data.npts), dtype=np.float64)
-            for i, ch in enumerate(em_data.chid):
-                data[i, :] = em_data.data[ch].cts.to_numpy()
+            for i, channel_name in enumerate(em_data.channel_names()):
+                data[i, :] = np.asarray(em_data.data[channel_name].to_numpy(), dtype=np.float64)
             ts["data"] = data
 
             ts["timeStamp"] = _make_timestamp_(em_data.start_time, em_data.dt.total_seconds(), em_data.npts)

@@ -3,11 +3,12 @@ import json
 import pandas as pd
 import numpy as np
 import os
-from pandas import HDFStore
+import h5py
 from typing import Optional
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+from utils.app_state import load_app_state
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,9 @@ def fetch_kp(start: pd.Timestamp, end: pd.Timestamp, hdf5_path: str = 'kp.h5') -
     Returns:
         pd.DataFrame，列为 ['Kp_datetime', 'Kp']，与原始fetch_kp返回格式一致
     """
+    if hdf5_path == 'kp.h5':
+        hdf5_path = load_app_state().kp_hdf5_path
+
     # ── 1. 时区统一 & 对齐到3小时边界 ─────────────────────────────
     if start.tz is None:
         start = start.tz_localize('UTC')
@@ -141,7 +145,7 @@ def fetch_kp(start: pd.Timestamp, end: pd.Timestamp, hdf5_path: str = 'kp.h5') -
 def _to_output_df(df: pd.DataFrame) -> pd.DataFrame:
     """将内部以index存储的DataFrame转为对外输出格式：['Kp_datetime', 'Kp'] 两列"""
     out = df.reset_index()
-    out['Kp_datetime'] = out['Kp_datetime'].dt.tz_convert('UTC+00:00')
+    out['Kp_datetime'] = out['Kp_datetime'].dt.tz_convert('UTC')
     return out[['Kp_datetime', 'Kp']]
 
 
@@ -194,29 +198,48 @@ def _fetch_kp_from_network(fetch_start: pd.Timestamp, fetch_end: pd.Timestamp) -
 
 
 def _save_kp_internal(df: pd.DataFrame, hdf5_path: str):
-    """保存以Kp_datetime为index的DataFrame到h5"""
+    """保存以Kp_datetime为index的DataFrame到h5（h5py直写，无pytables依赖）"""
     if df is None or df.empty:
         return
     try:
-        with HDFStore(hdf5_path, mode='w') as store:
-            store.put('kp_data', df, format='fixed')
+        with h5py.File(hdf5_path, 'w') as f:
+            grp = f.create_group('kp_data')
+            grp.create_dataset(
+                'axis0', data=np.array(['Kp_datetime'], dtype='S32'))
+            # pandas HDF fixed format: axis1 = int64 index (ns since epoch)
+            ts_ns = df.index.asi8
+            grp.create_dataset('axis1', data=ts_ns, dtype='i8')
+            grp.create_dataset(
+                'block0_items', data=np.array([df.columns[0]], dtype='S32'))
+            grp.create_dataset(
+                'block0_values', data=df.values.astype('f8'))
         logger.info("数据已保存到 %s，共 %s 条记录", hdf5_path, len(df))
     except Exception as e:
         logger.warning("保存数据时出错: %s", e)
 
 
 def _load_kp_internal(hdf5_path: str) -> Optional[pd.DataFrame]:
-    """从h5读取数据，返回以Kp_datetime为index的DataFrame"""
+    """从h5读取数据（h5py直读，无pytables依赖），返回以Kp_datetime为index的DataFrame"""
     if not os.path.exists(hdf5_path):
         logger.info("文件 %s 不存在", hdf5_path)
         return None
     try:
-        with HDFStore(hdf5_path, mode='r') as store:
-            if 'kp_data' not in store:
+        with h5py.File(hdf5_path, 'r') as f:
+            if 'kp_data' not in f:
                 return None
-            df = store['kp_data']
-            logger.info("从 %s 加载了 %s 条记录", hdf5_path, len(df))
-            return df
+            grp = f['kp_data']
+            ts_ns = grp['axis1'][:]
+            values = grp['block0_values'][:].ravel()
+            col_name = grp['block0_items'][0]
+            index_name = grp['axis0'][0]
+            if isinstance(col_name, bytes):
+                col_name = col_name.decode('utf-8')
+            if isinstance(index_name, bytes):
+                index_name = index_name.decode('utf-8')
+        index = pd.DatetimeIndex(ts_ns, name='Kp_datetime').tz_localize('UTC')
+        df = pd.DataFrame({'Kp': values.astype('f8')}, index=index)
+        logger.info("从 %s 加载了 %s 条记录", hdf5_path, len(df))
+        return df
     except Exception as e:
         logger.warning("加载数据时出错: %s", e)
         return None

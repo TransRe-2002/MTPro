@@ -1,0 +1,1398 @@
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+import numpy as np
+import pyqtgraph as pg
+import matplotlib
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from scipy.signal import detrend
+
+matplotlib.rcParams["font.sans-serif"] = [
+    "FZHei-B01", "Microsoft YaHei", "Noto Sans CJK JP", "Sarasa UI SC",
+] + matplotlib.rcParams["font.sans-serif"]
+matplotlib.rcParams["axes.unicode_minus"] = False
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
+    QComboBox, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+    QSpinBox, QDoubleSpinBox, QLabel, QMenu, QMessageBox, QSplitter, QFrame,
+    QDateTimeEdit, QApplication, QStackedWidget, QDialog,
+)
+from PySide6.QtCore import Qt, Signal, QDateTime
+
+from processor.step_plot_widget import StepPlotWidget
+from utils.time_convert import pts_to_qdt, qdt_to_pts
+from utils.geo import station_distance
+
+pg.setConfigOptions(antialias=True)
+pg.setConfigOption('background', 'w')
+pg.setConfigOption('foreground', 'k')
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_OPTION = {
+    "window_size": 1024,
+    "step_pct": 50.0,
+    "huber_threshold": 1.5,
+    "max_iterations": 25,
+    "tolerance": 1e-8,
+}
+
+CH_COLOURS = {
+    "Ex": (220, 50, 50),
+    "Ey": (200, 120, 0),
+    "Hx": (30, 80, 220),
+    "Hy": (30, 160, 80),
+    "Hz": (140, 40, 180),
+}
+
+
+def _detect_channels(channel_names: list[str]) -> dict[str, Optional[str]]:
+    mapping: dict[str, Optional[str]] = {
+        "Ex": None, "Ey": None, "Hx": None, "Hy": None, "Hz": None,
+    }
+    for ch in channel_names:
+        lower = ch.lower()
+        if lower.startswith("e") and "x" in lower and mapping["Ex"] is None:
+            mapping["Ex"] = ch
+        elif lower.startswith("e") and "y" in lower and mapping["Ey"] is None:
+            mapping["Ey"] = ch
+        elif (lower.startswith("h") or lower.startswith("b")) and "x" in lower and mapping["Hx"] is None:
+            mapping["Hx"] = ch
+        elif (lower.startswith("h") or lower.startswith("b")) and "y" in lower and mapping["Hy"] is None:
+            mapping["Hy"] = ch
+        elif (lower.startswith("h") or lower.startswith("b")) and "z" in lower and mapping["Hz"] is None:
+            mapping["Hz"] = ch
+    return mapping
+
+
+def _is_e_channel(name: str) -> bool:
+    return name.lower().startswith("e")
+
+
+def _is_h_channel(name: str) -> bool:
+    return name.lower().startswith(("h", "b"))
+
+
+def _has_magnetic_channel(data: EMData) -> bool:
+    return any(ch.lower().startswith(("h", "b")) for ch in data.channel_names())
+
+
+def _has_electric_channel(data: EMData) -> bool:
+    return any(ch.lower().startswith("e") for ch in data.channel_names())
+
+
+class RemoteReferenceControlDialog(QDialog):
+    """远参考法调参面板（独立浮窗）。"""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        w = parent  # RemoteReferenceWidget
+        self.setWindowTitle("远参考法 — 参数调整")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # 第一行：台站并排
+        station_row = QHBoxLayout()
+        station_row.setSpacing(8)
+        station_row.addWidget(w._local_station_widget)
+        station_row.addWidget(w._remote_station_widget)
+        layout.addLayout(station_row)
+
+        # 第二行：距离 + 采样率
+        info_row = QHBoxLayout()
+        info_row.setSpacing(12)
+        info_row.addWidget(w.distance_label)
+        info_row.addWidget(w.sample_rate_warn)
+        info_row.addStretch()
+        layout.addLayout(info_row)
+
+        # 下半部分：左右两栏
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+
+        # 左栏：时间范围 + 通道映射
+        left_col = QVBoxLayout()
+        left_col.setSpacing(6)
+        left_col.addWidget(w._time_group)
+        left_col.addWidget(w._local_ch_group)
+        left_col.addWidget(w._remote_ch_group)
+        left_col.addStretch()
+        bottom.addLayout(left_col)
+
+        # 右栏：估计参数 + 按钮 + 状态
+        right_col = QVBoxLayout()
+        right_col.setSpacing(6)
+        right_col.addWidget(w._param_group)
+        right_col.addWidget(w._btn_widget)
+        right_col.addWidget(w.status_label)
+        right_col.addStretch()
+        bottom.addLayout(right_col)
+
+        layout.addLayout(bottom)
+
+
+class _PkgWrapper:
+    """将 Broker 数据包包装为 EMData 兼容接口。"""
+    __slots__ = ('_pkg',)
+
+    def __init__(self, pkg: dict):
+        self._pkg = pkg
+
+    @property
+    def npts(self) -> int: return self._pkg.get('npts', 0)
+    @property
+    def dt(self): return pd.Timedelta(seconds=self._pkg.get('dt', 1.0))
+    @property
+    def start_time(self):
+        return pd.Timestamp(self._pkg.get('start_time', 0), unit='s', tz='Asia/Shanghai')
+    @property
+    def end_time(self):
+        s, dt, n = self._pkg.get('start_time', 0), self._pkg.get('dt', 1), self._pkg.get('npts', 0)
+        return pd.Timestamp(s + dt * n, unit='s', tz='Asia/Shanghai') if n > 0 else self.start_time
+    @property
+    def datetime_index(self): return self._pkg.get('datetime_index')
+    @property
+    def name(self) -> str: return self._pkg.get('name', '')
+    @property
+    def latitude(self): return self._pkg.get('latitude')
+    @property
+    def longitude(self): return self._pkg.get('longitude')
+    def channel_names(self) -> list[str]: return self._pkg.get('channel_names', [])
+    def get_channel_series(self, ch: str) -> pd.Series:
+        arr = self._pkg.get('all_y', {}).get(ch, np.array([]))
+        idx = self.datetime_index
+        return pd.Series(arr, index=idx if idx is not None else range(len(arr)), name=ch)
+
+
+class RemoteReferenceWidget(QWidget):
+    """远参考法阻抗估计交互界面。
+
+    上部为本地站和远参考站波形图左右并排，
+    下部为计算结果表格和对比图，
+    控制参数通过独立浮窗调节。
+    """
+    result_ready = Signal(object)
+
+    data_requested = Signal(int, str)
+    result_submitted = Signal(int, str, object)
+
+    def __init__(
+        self,
+        data_id: int = 0,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self._data_id = data_id
+        self._local_pkg: dict = {}
+        self._remote_pkg: dict = {}
+        self._result = None
+        self._spectrum = None  # emtf_rs 原始 SpectrumResult
+        self._bands = None     # to_bands 聚合后的 BandedResult
+        self._curves_local: dict[str, pg.PlotDataItem] = {}
+        self._curves_remote: dict[str, pg.PlotDataItem] = {}
+        self._updating_range = False
+        self._syncing_region = False  # 防止两个 LinearRegionItem 递归同步
+        self._syncing_xrange = False  # 防止两个图 X 轴递归同步
+        self._ts_array: Optional[np.ndarray] = None
+        self._ts_remote_array: Optional[np.ndarray] = None
+        self._control_dialog: Optional[RemoteReferenceControlDialog] = None
+
+        # ── 本地站波形预览（双 Y 轴） ──
+        self.local_plot = StepPlotWidget()
+        self.local_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.local_plot.setLabel('left', 'E (mV/km)')
+        self.local_plot.setLabel('bottom', '时间')
+        self._local_legend = self.local_plot.addLegend(offset=(0, 10))
+        self._local_plot_item = self.local_plot.getPlotItem()
+
+        self.local_plot.showAxis('right')
+        self.local_plot.setLabel('right', 'B (nT)')
+        self._local_b_viewbox = pg.ViewBox()
+        self._local_plot_item.scene().addItem(self._local_b_viewbox)
+        self._local_plot_item.getAxis('right').linkToView(self._local_b_viewbox)
+        self._local_b_viewbox.setXLink(self._local_plot_item)
+        self._local_plot_item.vb.sigResized.connect(self._update_local_dual_geometry)
+        self.local_plot.zoom_callback = self._sync_local_b_viewbox_zoom
+
+        # 本地站 LinearRegionItem
+        self.region_item = pg.LinearRegionItem(values=[0, 1], movable=True)
+        border_pen = pg.mkPen(color=(65, 105, 225), width=1)
+        self.region_item.lines[0].setPen(border_pen)
+        self.region_item.lines[1].setPen(border_pen)
+        self.region_item.setBrush(pg.mkBrush(135, 206, 250, 50))
+        self.local_plot.addItem(self.region_item)
+        self.region_item.sigRegionChanged.connect(self._on_local_region_changed)
+        self.region_item.sigRegionChangeFinished.connect(self._on_region_change_finished)
+
+        # ── 远参考站波形预览（单 Y 轴，仅磁场） ──
+        self.remote_plot = StepPlotWidget()
+        self.remote_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.remote_plot.setLabel('left', 'B (nT)')
+        self.remote_plot.setLabel('bottom', '时间')
+        self._remote_legend = self.remote_plot.addLegend(offset=(0, 10))
+        self._remote_plot_item = self.remote_plot.getPlotItem()
+
+        # 远参考站 LinearRegionItem
+        self.remote_region_item = pg.LinearRegionItem(values=[0, 1], movable=True)
+        self.remote_region_item.lines[0].setPen(border_pen)
+        self.remote_region_item.lines[1].setPen(border_pen)
+        self.remote_region_item.setBrush(pg.mkBrush(135, 206, 250, 50))
+        self.remote_plot.addItem(self.remote_region_item)
+        self.remote_region_item.sigRegionChanged.connect(self._on_remote_region_changed)
+        self.remote_region_item.sigRegionChangeFinished.connect(self._on_region_change_finished)
+
+        # X 轴双向同步
+        self._local_plot_item.vb.sigRangeChanged.connect(self._on_local_xrange_changed)
+        self._remote_plot_item.vb.sigRangeChanged.connect(self._on_remote_xrange_changed)
+
+        # ── 本地站选择器 ──
+        self._local_station_widget = QWidget()
+        local_station_layout = QHBoxLayout(self._local_station_widget)
+        local_station_layout.setContentsMargins(0, 0, 0, 0)
+        local_station_layout.addWidget(QLabel("本地站:"))
+        self.local_station_combo = QComboBox()
+        self.local_station_combo.currentIndexChanged.connect(self._on_local_station_changed)
+        local_station_layout.addWidget(self.local_station_combo, 1)
+
+        # ── 远参考站选择器 ──
+        self._remote_station_widget = QWidget()
+        remote_station_layout = QHBoxLayout(self._remote_station_widget)
+        remote_station_layout.setContentsMargins(0, 0, 0, 0)
+        remote_station_layout.addWidget(QLabel("远参考站:"))
+        self.remote_station_combo = QComboBox()
+        self.remote_station_combo.currentIndexChanged.connect(self._on_remote_station_changed)
+        remote_station_layout.addWidget(self.remote_station_combo, 1)
+
+        # ── 台站距离 ──
+        self.distance_label = QLabel("")
+        self.distance_label.setStyleSheet("color: #336699; font-weight: bold;")
+        self.sample_rate_warn = QLabel("")
+        self.sample_rate_warn.setStyleSheet("color: #cc6600; font-weight: bold;")
+
+        # ── 时间范围编辑区 ──
+        self._time_group = QGroupBox("时间范围")
+        time_layout = QFormLayout(self._time_group)
+        time_row = QHBoxLayout()
+        self.start_dt = QDateTimeEdit()
+        self.start_dt.setDisplayFormat("yyyy-MM-dd hh:mm:ss")
+        self.start_dt.setCalendarPopup(True)
+        self.start_dt.setTimeSpec(Qt.TimeSpec.UTC)
+        self.start_dt.dateTimeChanged.connect(self._on_dt_start_changed)
+        self.end_dt = QDateTimeEdit()
+        self.end_dt.setDisplayFormat("yyyy-MM-dd hh:mm:ss")
+        self.end_dt.setCalendarPopup(True)
+        self.end_dt.setTimeSpec(Qt.TimeSpec.UTC)
+        self.end_dt.dateTimeChanged.connect(self._on_dt_end_changed)
+        time_row.addWidget(QLabel("起:"))
+        time_row.addWidget(self.start_dt, 1)
+        time_row.addWidget(QLabel("止:"))
+        time_row.addWidget(self.end_dt, 1)
+        time_layout.addRow(time_row)
+
+        idx_row = QHBoxLayout()
+        self.start_spin = QSpinBox()
+        self.start_spin.setRange(0, 0)
+        self.start_spin.setToolTip("起始样点索引")
+        self.start_spin.valueChanged.connect(self._on_spin_start_changed)
+        self.end_spin = QSpinBox()
+        self.end_spin.setRange(0, 0)
+        self.end_spin.setToolTip("结束样点索引（不包含）")
+        self.end_spin.valueChanged.connect(self._on_spin_end_changed)
+        self.full_button = QPushButton("全量")
+        self.full_button.setFixedWidth(48)
+        self.full_button.clicked.connect(self._reset_range)
+        idx_row.addWidget(QLabel("样点起:"))
+        idx_row.addWidget(self.start_spin)
+        idx_row.addWidget(QLabel("止:"))
+        idx_row.addWidget(self.end_spin)
+        idx_row.addWidget(self.full_button)
+        time_layout.addRow(idx_row)
+
+        self.range_info = QLabel("")
+        self.warning_label = QLabel("")
+        self.warning_label.setStyleSheet("color: #cc6600; font-weight: bold;")
+        time_layout.addRow(self.range_info)
+        time_layout.addRow(self.warning_label)
+
+        # ── 通道映射（本地站） ──
+        self._local_ch_group = QGroupBox("通道映射（本地站）")
+        local_ch_form = QFormLayout(self._local_ch_group)
+        self.ch_combo_ex = QComboBox()
+        self.ch_combo_ey = QComboBox()
+        self.ch_combo_hx = QComboBox()
+        self.ch_combo_hy = QComboBox()
+        self.ch_combo_hz = QComboBox()
+        self.ch_combo_hz.addItem("(不使用)", None)
+        for combo in [self.ch_combo_ex, self.ch_combo_ey, self.ch_combo_hx, self.ch_combo_hy, self.ch_combo_hz]:
+            combo.currentIndexChanged.connect(lambda: self._on_channel_changed())
+        local_ch_form.addRow("Ex:", self.ch_combo_ex)
+        local_ch_form.addRow("Ey:", self.ch_combo_ey)
+        local_ch_form.addRow("Hx:", self.ch_combo_hx)
+        local_ch_form.addRow("Hy:", self.ch_combo_hy)
+        local_ch_form.addRow("Hz:", self.ch_combo_hz)
+
+        # ── 通道映射（远参考站） ──
+        self._remote_ch_group = QGroupBox("通道映射（远参考站）")
+        remote_ch_form = QFormLayout(self._remote_ch_group)
+        self.ch_combo_remote_hx = QComboBox()
+        self.ch_combo_remote_hy = QComboBox()
+        self.ch_combo_remote_hx.currentIndexChanged.connect(lambda: self._on_channel_changed())
+        self.ch_combo_remote_hy.currentIndexChanged.connect(lambda: self._on_channel_changed())
+        remote_ch_form.addRow("Hx:", self.ch_combo_remote_hx)
+        remote_ch_form.addRow("Hy:", self.ch_combo_remote_hy)
+
+        # ── 估计参数 ──
+        self._param_group = QGroupBox("估计参数")
+        param_form = QFormLayout(self._param_group)
+
+        self.sample_rate_label = QLabel("—")
+        param_form.addRow("采样率 (Hz):", self.sample_rate_label)
+
+        self.window_combo = QComboBox()
+        self._window_values = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
+        for v in self._window_values:
+            self.window_combo.addItem(str(v), v)
+        self.window_combo.setCurrentIndex(0)
+        self.window_combo.currentIndexChanged.connect(self._update_warning)
+        param_form.addRow("窗口大小 (样点):", self.window_combo)
+
+        self.step_pct_spin = QDoubleSpinBox()
+        self.step_pct_spin.setRange(1.0, 100.0)
+        self.step_pct_spin.setDecimals(0)
+        self.step_pct_spin.setValue(50.0)
+        self.step_pct_spin.setSuffix("%")
+        param_form.addRow("步长 (%窗口):", self.step_pct_spin)
+
+        self.huber_spin = QDoubleSpinBox()
+        self.huber_spin.setRange(0.1, 10.0)
+        self.huber_spin.setSingleStep(0.1)
+        self.huber_spin.setValue(DEFAULT_OPTION["huber_threshold"])
+        param_form.addRow("Huber threshold:", self.huber_spin)
+
+        self.max_iter_spin = QSpinBox()
+        self.max_iter_spin.setRange(1, 200)
+        self.max_iter_spin.setValue(DEFAULT_OPTION["max_iterations"])
+        param_form.addRow("最大迭代:", self.max_iter_spin)
+
+        self.tol_spin = QDoubleSpinBox()
+        self.tol_spin.setRange(1e-16, 1.0)
+        self.tol_spin.setDecimals(12)
+        self.tol_spin.setSingleStep(1e-8)
+        self.tol_spin.setValue(DEFAULT_OPTION["tolerance"])
+        param_form.addRow("收敛容差:", self.tol_spin)
+
+        self.bands_spin = QSpinBox()
+        self.bands_spin.setRange(10, 200)
+        self.bands_spin.setValue(40)
+        self.bands_spin.setToolTip("对数均分频带数量，影响视电阻率/相位图的频点密度")
+        self.bands_spin.valueChanged.connect(self._on_bands_changed)
+        param_form.addRow("频带数量:", self.bands_spin)
+
+        # ── 运行按钮 ──
+        self._btn_widget = QWidget()
+        btn_layout = QHBoxLayout(self._btn_widget)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        self.run_button = QPushButton("运行远参考估计")
+        self.run_button.clicked.connect(self._run_estimation)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.run_button)
+
+        self.status_label = QLabel("")
+
+        # ── 结果表格 ──
+        self.table = QTableWidget()
+        self.table.setColumnCount(10)
+        self.table.setHorizontalHeaderLabels([
+            "freq (Hz)", "period (s)",
+            "Zxx", "Zxy", "Zyx", "Zyy",
+            "Zxx SE", "Zxy SE", "Zyx SE", "Zyy SE",
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self.table.keyPressEvent = self._table_key_press_event
+
+        self.export_edi_btn = QPushButton("输出阻抗")
+        self.export_edi_btn.clicked.connect(self._export_edi)
+        self.tune_btn = QPushButton("参数调整")
+        self.tune_btn.clicked.connect(self._show_control_dialog)
+
+        self.resistivity_table = QTableWidget()
+        self.resistivity_table.setColumnCount(10)
+        self.resistivity_table.setHorizontalHeaderLabels([
+            "freq (Hz)", "period (s)",
+            "ρxy (Ω·m)", "ρyx (Ω·m)",
+            "φxy (°)", "φyx (°)",
+            "ρxy SE", "ρyx SE",
+            "φxy SE (°)", "φyx SE (°)",
+        ])
+        self.resistivity_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.resistivity_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.resistivity_table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self.resistivity_table.keyPressEvent = self._table_key_press_event
+
+        self.result_tabs = QTabWidget()
+        tab_corner = QWidget()
+        tab_corner_layout = QHBoxLayout(tab_corner)
+        tab_corner_layout.setContentsMargins(0, 0, 4, 0)
+        tab_corner_layout.addWidget(self.tune_btn)
+        tab_corner_layout.addWidget(self.export_edi_btn)
+        self.result_tabs.setCornerWidget(tab_corner)
+        self.result_tabs.addTab(self.table, "阻抗结果")
+        self.result_tabs.addTab(self.resistivity_table, "视电阻率与相位")
+
+        self.mpl_fig = Figure(figsize=(6, 5), tight_layout=True)
+        self.mpl_canvas = FigureCanvas(self.mpl_fig)
+        self.mpl_canvas.setParent(self)
+        self.result_tabs.addTab(self.mpl_canvas, "对比图")
+
+        self._placeholder = QLabel("此处显示计算结果信息")
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setStyleSheet("color: #888; font-size: 14px;")
+        self._result_stack = QStackedWidget()
+        self._result_stack.addWidget(self._placeholder)
+        self._result_stack.addWidget(self.result_tabs)
+        self._result_stack.setCurrentIndex(0)
+
+        # ── 组装布局 ──
+        # 两个波形图左右并排
+        self.local_plot.setLabel('top', '本地站')
+        self.remote_plot.setLabel('top', '远参考站')
+        plot_row = QHBoxLayout()
+        plot_row.setContentsMargins(0, 0, 0, 0)
+        plot_row.addWidget(self.local_plot)
+        plot_row.addWidget(self.remote_plot)
+        plot_widget = QWidget()
+        plot_widget.setLayout(plot_row)
+
+        # 下方：结果 TabWidget
+        main_splitter = QSplitter(Qt.Orientation.Vertical)
+        main_splitter.addWidget(plot_widget)
+        main_splitter.addWidget(self._result_stack)
+        main_splitter.setSizes([360, 600])
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(main_splitter)
+
+        # ── 控制面板（独立浮窗） ──
+        self._control_dialog = RemoteReferenceControlDialog(self)
+        self._control_dialog.show()
+
+        # ── 初始填充 ──
+        self._populate_stations()
+        if data_id != 0:
+            idx = self.local_station_combo.findData(data_id)
+            if idx >= 0:
+                self.local_station_combo.setCurrentIndex(idx)
+
+    def _show_control_dialog(self):
+        """打开/重新显示调参窗口。"""
+        if self._control_dialog is not None:
+            self._control_dialog.show()
+            self._control_dialog.raise_()
+            self._control_dialog.activateWindow()
+
+    def closeEvent(self, event):
+        if self._control_dialog is not None:
+            self._control_dialog.close()
+        super().closeEvent(event)
+
+    # ─── 双 Y 轴同步（本地站） ─────────────────────────────────
+
+    def _update_local_dual_geometry(self):
+        self._local_b_viewbox.setGeometry(self._local_plot_item.vb.sceneBoundingRect())
+
+    def _sync_local_b_viewbox_zoom(self, old_main_yrange, new_main_yrange):
+        old_range = old_main_yrange[1] - old_main_yrange[0]
+        new_range = new_main_yrange[1] - new_main_yrange[0]
+        if old_range <= 1e-16:
+            return
+        scale = new_range / old_range
+        b_yrange = self._local_b_viewbox.viewRange()[1]
+        b_center = (b_yrange[0] + b_yrange[1]) / 2.0
+        b_half = (b_yrange[1] - b_yrange[0]) / 2.0
+        self._local_b_viewbox.setYRange(
+            b_center - b_half * scale, b_center + b_half * scale, padding=0,
+        )
+
+    # ─── 远参考站 X 轴双向同步 ────────────────────────────────
+
+    def _on_local_xrange_changed(self, _vb, range_info):
+        if self._syncing_xrange:
+            return
+        x_range = range_info[0]
+        self._syncing_xrange = True
+        self._remote_plot_item.vb.blockSignals(True)
+        self._remote_plot_item.setXRange(x_range[0], x_range[1], padding=0)
+        self._remote_plot_item.vb.blockSignals(False)
+        self._syncing_xrange = False
+
+    def _on_remote_xrange_changed(self, _vb, range_info):
+        if self._syncing_xrange:
+            return
+        x_range = range_info[0]
+        self._syncing_xrange = True
+        self._local_plot_item.vb.blockSignals(True)
+        self._local_plot_item.setXRange(x_range[0], x_range[1], padding=0)
+        # 主 VB 信号被阻断后 setXLink 不会自动同步 B ViewBox，需手动更新
+        self._local_b_viewbox.setXRange(x_range[0], x_range[1], padding=0)
+        self._local_plot_item.vb.blockSignals(False)
+        self._syncing_xrange = False
+
+    # ─── 台站管理 ──────────────────────────────────────────────────
+
+    def _on_data_ready(self, data_id: int, channel: str, pkg: dict) -> None:
+        local_id = self.local_station_combo.currentData()
+        remote_id = self.remote_station_combo.currentData()
+
+        if data_id == self._data_id and not self._local_pkg:
+            # 初始请求：填充台站列表 + 选中当前台站
+            self._local_pkg = pkg
+            self._populate_stations()
+            if self._data_id != 0:
+                idx = self.local_station_combo.findData(self._data_id)
+                if idx >= 0:
+                    self.local_station_combo.setCurrentIndex(idx)
+        elif data_id == local_id:
+            self._local_pkg = pkg
+            self._apply_local_station_data()
+        elif data_id == remote_id:
+            self._remote_pkg = pkg
+            self._apply_remote_station_data()
+
+    def _populate_stations(self):
+        prev_local = self.local_station_combo.currentData()
+        prev_remote = self.remote_station_combo.currentData()
+        stations = self._local_pkg.get('stations', [])
+
+        valid_local: list[tuple[str, int]] = []
+        valid_remote: list[tuple[str, int]] = []
+        for s in stations:
+            name = f"#{s['id']} {s['name']}"
+            if s['has_magnetic'] and s['has_electric']:
+                valid_local.append((name, s['id']))
+            if s['has_magnetic']:
+                valid_remote.append((name, s['id']))
+
+        self.local_station_combo.blockSignals(True)
+        self.local_station_combo.clear()
+        for name, key in valid_local:
+            self.local_station_combo.addItem(name, key)
+        self.local_station_combo.blockSignals(False)
+        if prev_local is not None and self.local_station_combo.findData(prev_local) >= 0:
+            self.local_station_combo.blockSignals(True)
+            self.local_station_combo.setCurrentIndex(self.local_station_combo.findData(prev_local))
+            self.local_station_combo.blockSignals(False)
+        elif self.local_station_combo.count() > 0:
+            self.local_station_combo.blockSignals(True)
+            self.local_station_combo.setCurrentIndex(0)
+            self.local_station_combo.blockSignals(False)
+            self._on_local_station_changed(0)
+
+        self.remote_station_combo.blockSignals(True)
+        self.remote_station_combo.clear()
+        for name, key in valid_remote:
+            self.remote_station_combo.addItem(name, key)
+        self.remote_station_combo.blockSignals(False)
+        if prev_remote is not None and self.remote_station_combo.findData(prev_remote) >= 0:
+            self.remote_station_combo.setCurrentIndex(self.remote_station_combo.findData(prev_remote))
+        elif self.remote_station_combo.count() > 0:
+            self._on_remote_station_changed(0)
+
+    def _current_local_data(self):
+        return _PkgWrapper(self._local_pkg) if self._local_pkg else None
+
+    def _current_remote_data(self):
+        return _PkgWrapper(self._remote_pkg) if self._remote_pkg else None
+
+    def _update_station_distance(self):
+        local = self._current_local_data()
+        remote = self._current_remote_data()
+        if local is None or remote is None:
+            self.distance_label.setText("")
+            return
+        try:
+            dist = station_distance(local, remote, unit="km")
+            self.distance_label.setText(f"台站距离: {dist:.2f} km")
+        except ValueError as e:
+            self.distance_label.setText(f"(无法计算距离: {e})")
+
+    def _update_sample_rate_warn(self):
+        local = self._current_local_data()
+        remote = self._current_remote_data()
+        if local is None or remote is None:
+            self.sample_rate_warn.setText("")
+            return
+        local_sr = 1.0 / local.dt.total_seconds()
+        remote_sr = 1.0 / remote.dt.total_seconds()
+        if abs(local_sr - remote_sr) > 1e-6:
+            self.sample_rate_warn.setText(
+                f"⚠ 采样率不一致: 本地 {local_sr:.4f} Hz, 远参考 {remote_sr:.4f} Hz"
+            )
+        else:
+            self.sample_rate_warn.setText("")
+
+    # ─── 本地站通道填充 ─────────────────────────────────────────────
+
+    def _populate_local_channels(self):
+        data = self._current_local_data()
+        channels = data.channel_names() if data is not None else []
+        mapping = _detect_channels(channels)
+
+        for combo, key in [
+            (self.ch_combo_ex, "Ex"),
+            (self.ch_combo_ey, "Ey"),
+            (self.ch_combo_hx, "Hx"),
+            (self.ch_combo_hy, "Hy"),
+        ]:
+            combo.blockSignals(True)
+            combo.clear()
+            for ch in channels:
+                combo.addItem(ch, ch)
+            auto_ch = mapping.get(key)
+            if auto_ch is not None:
+                idx_ = combo.findText(auto_ch)
+                if idx_ >= 0:
+                    combo.setCurrentIndex(idx_)
+            combo.blockSignals(False)
+
+        self.ch_combo_hz.blockSignals(True)
+        self.ch_combo_hz.clear()
+        self.ch_combo_hz.addItem("(不使用)", None)
+        for ch in channels:
+            self.ch_combo_hz.addItem(ch, ch)
+        self.ch_combo_hz.setCurrentIndex(0)
+        self.ch_combo_hz.blockSignals(False)
+
+    # ─── 远参考站通道填充 ────────────────────────────────────────────
+
+    def _populate_remote_channels(self):
+        data = self._current_remote_data()
+        channels = data.channel_names() if data is not None else []
+        mapping = _detect_channels(channels)
+
+        for combo, key in [
+            (self.ch_combo_remote_hx, "Hx"),
+            (self.ch_combo_remote_hy, "Hy"),
+        ]:
+            combo.blockSignals(True)
+            combo.clear()
+            for ch in channels:
+                if _is_h_channel(ch):
+                    combo.addItem(ch, ch)
+            auto_ch = mapping.get(key)
+            if auto_ch is not None:
+                idx_ = combo.findText(auto_ch)
+                if idx_ >= 0:
+                    combo.setCurrentIndex(idx_)
+            combo.blockSignals(False)
+
+    def _selected_remote_channels(self) -> dict[str, Optional[str]]:
+        return {
+            "Hx": self.ch_combo_remote_hx.currentData(),
+            "Hy": self.ch_combo_remote_hy.currentData(),
+        }
+
+    # ─── 台站切换 ──────────────────────────────────────────────────
+
+    def _on_local_station_changed(self, _idx: int):
+        new_id = self.local_station_combo.currentData()
+        if new_id is not None:
+            self.data_requested.emit(new_id, "")
+        # UI 更新由 _on_data_ready → _apply_local_station_data 完成
+
+    def _apply_local_station_data(self):
+        data = self._current_local_data()
+        self._populate_local_channels()
+        if data is not None:
+            self.sample_rate_label.setText(f"{1.0 / data.dt.total_seconds():.4f}")
+            n = data.npts
+            self.start_spin.blockSignals(True)
+            self.start_spin.setRange(0, n - 1)
+            self.start_spin.setValue(0)
+            self.start_spin.blockSignals(False)
+            self.end_spin.blockSignals(True)
+            self.end_spin.setRange(1, n)
+            self.end_spin.setValue(n)
+            self.end_spin.blockSignals(False)
+            self.start_dt.blockSignals(True)
+            self.start_dt.setDateTime(pts_to_qdt(data.start_time))
+            self.start_dt.setMinimumDateTime(pts_to_qdt(data.start_time))
+            self.start_dt.setMaximumDateTime(pts_to_qdt(data.end_time))
+            self.start_dt.blockSignals(False)
+            self.end_dt.blockSignals(True)
+            self.end_dt.setDateTime(pts_to_qdt(data.end_time))
+            self.end_dt.setMinimumDateTime(pts_to_qdt(data.start_time))
+            self.end_dt.setMaximumDateTime(pts_to_qdt(data.end_time))
+            self.end_dt.blockSignals(False)
+        self._update_station_distance()
+        self._update_sample_rate_warn()
+        self._refresh_plots()
+
+    def _on_remote_station_changed(self, _idx: int):
+        new_id = self.remote_station_combo.currentData()
+        if new_id is not None:
+            self.data_requested.emit(new_id, "")
+        # UI 更新由 _on_data_ready → _apply_remote_station_data 完成
+
+    def _apply_remote_station_data(self):
+        self._populate_remote_channels()
+        self._update_station_distance()
+        self._update_sample_rate_warn()
+        self._refresh_plots()
+
+    def _on_channel_changed(self):
+        self._refresh_plots()
+
+    # ─── 波形图 ────────────────────────────────────────────────────
+
+    def _selected_local_channels(self) -> dict[str, Optional[str]]:
+        return {
+            "Ex": self.ch_combo_ex.currentData(),
+            "Ey": self.ch_combo_ey.currentData(),
+            "Hx": self.ch_combo_hx.currentData(),
+            "Hy": self.ch_combo_hy.currentData(),
+            "Hz": self.ch_combo_hz.currentData(),
+        }
+
+    def _refresh_plots(self):
+        self._refresh_local_plot()
+        self._refresh_remote_plot()
+
+    def _refresh_local_plot(self):
+        data = self._current_local_data()
+        for curve in list(self._curves_local.values()):
+            curve_view = curve.getViewBox()
+            if curve_view is self._local_b_viewbox:
+                self._local_b_viewbox.removeItem(curve)
+            else:
+                self._local_plot_item.vb.removeItem(curve)
+        self._curves_local.clear()
+        self._local_legend.clear()
+
+        if data is None:
+            return
+
+        t = np.array([ts.timestamp() for ts in data.datetime_index])
+        self._ts_array = t
+
+        for tag, ch_name in self._selected_local_channels().items():
+            if ch_name is None:
+                continue
+            y = data.get_channel_series(ch_name).to_numpy()
+            y = y - np.nanmean(y)
+            colour = CH_COLOURS.get(tag, (100, 100, 100))
+            pen = pg.mkPen(color=colour, width=1)
+            label = f"{tag} ({ch_name})"
+
+            if _is_e_channel(ch_name):
+                curve = pg.PlotDataItem(t, y, pen=pen, name=label,
+                                        autoDownsample=True, clipToView=True,
+                                        connect='finite')
+                curve.setParentItem(self._local_plot_item.vb)
+                curve.forgetViewBox()
+                self._local_plot_item.vb.addItem(curve)
+            else:
+                curve = pg.PlotDataItem(t, y, pen=pen, name=label,
+                                        autoDownsample=True, clipToView=True,
+                                        connect='finite')
+                curve.setParentItem(self._local_b_viewbox)
+                curve.forgetViewBox()
+                self._local_b_viewbox.addItem(curve)
+            self._local_legend.addItem(curve, label)
+            self._curves_local[tag] = curve
+
+        if len(t) > 1:
+            self.region_item.blockSignals(True)
+            self.region_item.setRegion((t[0], t[-1]))
+            self.region_item.blockSignals(False)
+            self.remote_region_item.blockSignals(True)
+            self.remote_region_item.setRegion((t[0], t[-1]))
+            self.remote_region_item.blockSignals(False)
+
+        self._update_range_info()
+        self._update_warning()
+
+    def _refresh_remote_plot(self):
+        data = self._current_remote_data()
+        for curve in list(self._curves_remote.values()):
+            self._remote_plot_item.vb.removeItem(curve)
+        self._curves_remote.clear()
+        self._remote_legend.clear()
+
+        if data is None:
+            return
+
+        t = np.array([ts.timestamp() for ts in data.datetime_index])
+        self._ts_remote_array = t
+
+        for tag, ch_name in self._selected_remote_channels().items():
+            if ch_name is None:
+                continue
+            y = data.get_channel_series(ch_name).to_numpy()
+            y = y - np.nanmean(y)
+            colour = CH_COLOURS.get(tag, (100, 100, 100))
+            pen = pg.mkPen(color=colour, width=1)
+            label = f"{tag} ({ch_name})"
+            curve = pg.PlotDataItem(t, y, pen=pen, name=label,
+                                    autoDownsample=True, clipToView=True,
+                                    connect='finite')
+            curve.setParentItem(self._remote_plot_item.vb)
+            curve.forgetViewBox()
+            self._remote_plot_item.vb.addItem(curve)
+            self._remote_legend.addItem(curve, label)
+            self._curves_remote[tag] = curve
+
+    # ─── 区域 / 范围选择 ──────────────────────────────────────────
+
+    def _on_local_region_changed(self):
+        """本地站 LinearRegionItem 拖拽 → 同步远参考站 region + 更新微调框。"""
+        if self._updating_range or self._syncing_region:
+            return
+        data = self._current_local_data()
+        if data is None:
+            return
+        left, right = self.region_item.getRegion()
+        start, end = self._ts_range_to_indices(left, right)
+
+        # 同步远参考站 region
+        self._syncing_region = True
+        self.remote_region_item.blockSignals(True)
+        self.remote_region_item.setRegion((left, right))
+        self.remote_region_item.blockSignals(False)
+        self._syncing_region = False
+
+        self._updating_range = True
+        self.start_spin.blockSignals(True)
+        self.start_spin.setValue(start)
+        self.start_spin.blockSignals(False)
+        self.end_spin.blockSignals(True)
+        self.end_spin.setValue(end)
+        self.end_spin.blockSignals(False)
+        self._updating_range = False
+
+    def _on_remote_region_changed(self):
+        """远参考站 LinearRegionItem 拖拽 → 同步本地站 region + 更新微调框。"""
+        if self._updating_range or self._syncing_region:
+            return
+        data = self._current_local_data()
+        if data is None:
+            return
+        left, right = self.remote_region_item.getRegion()
+        start, end = self._ts_range_to_indices(left, right)
+
+        # 同步本地站 region
+        self._syncing_region = True
+        self.region_item.blockSignals(True)
+        self.region_item.setRegion((left, right))
+        self.region_item.blockSignals(False)
+        self._syncing_region = False
+
+        self._updating_range = True
+        self.start_spin.blockSignals(True)
+        self.start_spin.setValue(start)
+        self.start_spin.blockSignals(False)
+        self.end_spin.blockSignals(True)
+        self.end_spin.setValue(end)
+        self.end_spin.blockSignals(False)
+        self._updating_range = False
+
+    def _on_region_change_finished(self):
+        if self._updating_range:
+            return
+        data = self._current_local_data()
+        if data is None:
+            return
+        left, right = self.region_item.getRegion()
+        start, end = self._ts_range_to_indices(left, right)
+        self._set_dt_from_indices(start, end)
+        self._update_range_info()
+        self._update_warning()
+
+    def _on_spin_start_changed(self, val: int):
+        if self._updating_range:
+            return
+        self._set_region_from_indices(val, self.end_spin.value())
+        self._set_dt_from_indices(val, self.end_spin.value())
+        self._update_range_info()
+        self._update_warning()
+
+    def _on_spin_end_changed(self, val: int):
+        if self._updating_range:
+            return
+        self._set_region_from_indices(self.start_spin.value(), val)
+        self._set_dt_from_indices(self.start_spin.value(), val)
+        self._update_range_info()
+        self._update_warning()
+
+    def _on_dt_start_changed(self, qdt: QDateTime):
+        if self._updating_range:
+            return
+        data = self._current_local_data()
+        if data is None:
+            return
+        t = qdt_to_pts(qdt)
+        idx = np.searchsorted(data.datetime_index, t)
+        idx = max(0, min(idx, data.npts - 1))
+        self._set_spins(idx, self.end_spin.value())
+        self._set_region_from_indices(idx, self.end_spin.value())
+
+    def _on_dt_end_changed(self, qdt: QDateTime):
+        if self._updating_range:
+            return
+        data = self._current_local_data()
+        if data is None:
+            return
+        t = qdt_to_pts(qdt)
+        idx = np.searchsorted(data.datetime_index, t)
+        idx = max(1, min(idx, data.npts))
+        self._set_spins(self.start_spin.value(), idx)
+        self._set_region_from_indices(self.start_spin.value(), idx)
+
+    def _ts_range_to_indices(self, left: float, right: float) -> tuple[int, int]:
+        data = self._current_local_data()
+        if data is None or self._ts_array is None:
+            return 0, 0
+        t_arr = self._ts_array
+        start = int(np.searchsorted(t_arr, left))
+        end = int(np.searchsorted(t_arr, right))
+        return max(0, start), min(data.npts, end)
+
+    def _set_spins(self, start: int, end: int):
+        self._updating_range = True
+        self.start_spin.blockSignals(True)
+        self.start_spin.setValue(start)
+        self.start_spin.blockSignals(False)
+        self.end_spin.blockSignals(True)
+        self.end_spin.setValue(end)
+        self.end_spin.blockSignals(False)
+        self._updating_range = False
+        self._update_range_info()
+        self._update_warning()
+
+    def _set_dt_from_indices(self, start: int, end: int):
+        data = self._current_local_data()
+        if data is None:
+            return
+        idx = data.datetime_index
+        n = len(idx)
+        start = max(0, min(start, n - 1))
+        end = max(1, min(end, n))
+        self._updating_range = True
+        self.start_dt.blockSignals(True)
+        self.start_dt.setDateTime(pts_to_qdt(idx[start]))
+        self.start_dt.blockSignals(False)
+        self.end_dt.blockSignals(True)
+        self.end_dt.setDateTime(pts_to_qdt(idx[end - 1]))
+        self.end_dt.blockSignals(False)
+        self._updating_range = False
+
+    def _set_region_from_indices(self, start: int, end: int):
+        data = self._current_local_data()
+        if data is None or self._ts_array is None:
+            return
+        t_arr = self._ts_array
+        if end > 0 and start < len(t_arr):
+            ll, rr = t_arr[start], t_arr[min(end, len(t_arr) - 1)]
+            self._updating_range = True
+            self.region_item.blockSignals(True)
+            self.region_item.setRegion((ll, rr))
+            self.region_item.blockSignals(False)
+            self.remote_region_item.blockSignals(True)
+            self.remote_region_item.setRegion((ll, rr))
+            self.remote_region_item.blockSignals(False)
+            self._updating_range = False
+
+    def _reset_range(self):
+        data = self._current_local_data()
+        if data is None:
+            return
+        n = data.npts
+        self._set_spins(0, n)
+        self._set_dt_from_indices(0, n)
+        self._set_region_from_indices(0, n)
+        self._update_range_info()
+        self._update_warning()
+
+    def _update_range_info(self):
+        data = self._current_local_data()
+        if data is None:
+            return
+        start = self.start_spin.value()
+        end = self.end_spin.value()
+        n = end - start
+        dt = data.dt.total_seconds()
+        duration = n * dt
+        self.range_info.setText(f"选中 {n} 样点 ({start}:{end}), 时长 {duration:.0f}s")
+
+    def _update_warning(self):
+        window_size = self.window_combo.currentData()
+        min_required = 26 * window_size
+        start = self.start_spin.value()
+        end = self.end_spin.value()
+        n = end - start
+        if n < min_required:
+            self.warning_label.setText(
+                f"警告: 选中 {n} 样点 < 26×窗口={min_required}，"
+                f"建议增加数据长度或减小窗口"
+            )
+        else:
+            self.warning_label.setText("")
+
+    # ─── 远参考估计 ──────────────────────────────────────────────
+
+    def _run_estimation(self):
+        local = self._current_local_data()
+        remote = self._current_remote_data()
+        if local is None:
+            QMessageBox.warning(self, "错误", "请选择一个本地站。")
+            return
+        if remote is None:
+            QMessageBox.warning(self, "错误", "请选择一个远参考站。")
+            return
+
+        local_sr = 1.0 / local.dt.total_seconds()
+        remote_sr = 1.0 / remote.dt.total_seconds()
+        if abs(local_sr - remote_sr) > 1e-6:
+            QMessageBox.warning(
+                self, "采样率不一致",
+                f"本地站 ({local_sr:.4f} Hz) 和远参考站 ({remote_sr:.4f} Hz) 采样率不一致，无法计算。",
+            )
+            return
+
+        ch_ex = self.ch_combo_ex.currentData()
+        ch_ey = self.ch_combo_ey.currentData()
+        ch_hx_local = self.ch_combo_hx.currentData()
+        ch_hy_local = self.ch_combo_hy.currentData()
+        ch_hz = self.ch_combo_hz.currentData()
+
+        for label, ch in [("Ex", ch_ex), ("Ey", ch_ey), ("Hx", ch_hx_local), ("Hy", ch_hy_local)]:
+            if ch is None:
+                QMessageBox.warning(self, "错误", f"请选择本地站 {label} 通道。")
+                return
+
+        ch_hx_remote = self.ch_combo_remote_hx.currentData()
+        ch_hy_remote = self.ch_combo_remote_hy.currentData()
+        if ch_hx_remote is None or ch_hy_remote is None:
+            QMessageBox.warning(self, "错误", "请选择远参考站 Hx 和 Hy 通道。")
+            return
+
+        try:
+            import emtf_rs
+
+            start = self.start_spin.value()
+            end = self.end_spin.value()
+            if end <= start:
+                QMessageBox.warning(self, "错误", "结束索引必须大于起始索引。")
+                return
+
+            # 本地站数据
+            ex_arr = local.get_channel_series(ch_ex).to_numpy()[start:end]
+            ey_arr = local.get_channel_series(ch_ey).to_numpy()[start:end]
+            local_hx_arr = local.get_channel_series(ch_hx_local).to_numpy()[start:end]
+            local_hy_arr = local.get_channel_series(ch_hy_local).to_numpy()[start:end]
+            hz_arr = None
+            if ch_hz is not None:
+                hz_arr = local.get_channel_series(ch_hz).to_numpy()[start:end]
+
+            # 远参考站数据：按时间对齐
+            local_start_ts = local.datetime_index[start]
+            local_end_ts = local.datetime_index[end - 1]
+            remote_idx = remote.datetime_index
+            remote_start = int(np.searchsorted(remote_idx, local_start_ts))
+            remote_end = int(np.searchsorted(remote_idx, local_end_ts))
+            remote_end = min(remote_end, remote.npts)
+
+            remote_hx_arr = remote.get_channel_series(ch_hx_remote).to_numpy()[remote_start:remote_end]
+            remote_hy_arr = remote.get_channel_series(ch_hy_remote).to_numpy()[remote_start:remote_end]
+
+            if len(remote_hx_arr) == 0 or len(remote_hy_arr) == 0:
+                QMessageBox.warning(
+                    self, "时间范围不匹配",
+                    "远参考站在选定时间范围内无数据，请调整时间范围。",
+                )
+                return
+
+            min_len = min(len(ex_arr), len(remote_hx_arr))
+            if min_len < len(ex_arr):
+                ex_arr = ex_arr[:min_len]
+                ey_arr = ey_arr[:min_len]
+                local_hx_arr = local_hx_arr[:min_len]
+                local_hy_arr = local_hy_arr[:min_len]
+                if hz_arr is not None:
+                    hz_arr = hz_arr[:min_len]
+            if min_len < len(remote_hx_arr):
+                remote_hx_arr = remote_hx_arr[:min_len]
+                remote_hy_arr = remote_hy_arr[:min_len]
+
+            def _preprocess(arr: np.ndarray, name: str) -> np.ndarray:
+                n_nan = np.sum(~np.isfinite(arr))
+                if n_nan > 0:
+                    logger.warning("%s: %d NaN in selected range (%.2f%%), "
+                                   "detrend skipped", name, n_nan,
+                                   100 * n_nan / len(arr))
+                    return arr
+                return detrend(arr)
+
+            ex_arr = _preprocess(ex_arr, ch_ex)
+            ey_arr = _preprocess(ey_arr, ch_ey)
+            local_hx_arr = _preprocess(local_hx_arr, ch_hx_local)
+            local_hy_arr = _preprocess(local_hy_arr, ch_hy_local)
+            remote_hx_arr = _preprocess(remote_hx_arr, ch_hx_remote)
+            remote_hy_arr = _preprocess(remote_hy_arr, ch_hy_remote)
+            if hz_arr is not None:
+                hz_arr = _preprocess(hz_arr, str(ch_hz))
+
+            sample_rate = local_sr
+            window_size = self.window_combo.currentData()
+            n_samples = end - start
+            if window_size > n_samples:
+                QMessageBox.warning(
+                    self, "参数错误",
+                    f"窗口大小 ({window_size}) 超过选中数据点数 ({n_samples})，"
+                    f"请减小窗口大小或扩大数据范围。"
+                )
+                return
+            step_size = max(1, int(window_size * self.step_pct_spin.value() / 100.0))
+            huber = self.huber_spin.value()
+            max_iter = self.max_iter_spin.value()
+            tolerance = self.tol_spin.value()
+
+            self.status_label.setText("正在计算...")
+            self.run_button.setEnabled(False)
+            QApplication.processEvents()
+
+            result = emtf_rs.estimate_remote_reference_spectrum(
+                ex_arr, ey_arr,
+                local_hx_arr, local_hy_arr,
+                remote_hx_arr, remote_hy_arr,
+                sample_rate_hz=sample_rate,
+                window_size=window_size,
+                hz=hz_arr,
+                step_size=step_size,
+                huber_threshold=huber,
+                max_iterations=max_iter,
+                tolerance=tolerance,
+            )
+
+            self._spectrum = result
+            self._result = result
+            self._build_bands()
+            self._display_result(result)
+            self.result_ready.emit(result)
+            self.status_label.setText(
+                f"完成 — {len(result.frequencies_hz)} 个频率, {result.segment_count} 个时间窗"
+            )
+
+        except Exception as e:
+            logger.exception("Remote reference estimation failed")
+            QMessageBox.critical(self, "估计失败", str(e))
+            self.status_label.setText("失败")
+        finally:
+            self.run_button.setEnabled(True)
+
+    def _build_bands(self):
+        """从 spectrum 构建 BandedResult，period 范围 2*dt ~ w*dt 对数均分。"""
+        import emtf_rs
+
+        if self._spectrum is None:
+            self._bands = None
+            return
+        data = self._current_local_data()
+        if data is None:
+            self._bands = None
+            return
+        dt = data.dt.total_seconds()
+        w = self.window_combo.currentData()
+        n_bands = self.bands_spin.value()
+        periods = np.logspace(np.log10(2 * dt), np.log10(w * dt), n_bands)
+        band_configs = [
+            emtf_rs.BandConfig(
+                name=f"band_{i+1}",
+                min_period=float(periods[i]),
+                max_period=float(periods[i+1]),
+            )
+            for i in range(len(periods) - 1)
+        ]
+        self._bands = self._spectrum.to_bands(band_configs)
+
+    def _on_bands_changed(self):
+        """频带数量变更时重建 bands 并刷新对比图。"""
+        if self._spectrum is None:
+            return
+        self._build_bands()
+        self._draw_comparison_plot()
+
+    # ─── 结果展示 ──────────────────────────────────────────────────
+
+    def _display_result(self, result):
+        """将 SpectrumResult 填充到表格中，并用 to_bands 后的 BandedResult 画图。"""
+        self._result_stack.setCurrentIndex(1)
+        freqs = np.array(result.frequencies_hz)
+        n = len(freqs)
+
+        def _c2s(c: complex) -> str:
+            return f"{c.real:.4e}{c.imag:+.4e}j"
+
+        self.table.setRowCount(n)
+        for i in range(n):
+            f = freqs[i]
+            period = 1.0 / f if f > 0 else float("inf")
+            self.table.setItem(i, 0, QTableWidgetItem(f"{f:.6f}"))
+            self.table.setItem(i, 1, QTableWidgetItem(f"{period:.3f}"))
+            self.table.setItem(i, 2, QTableWidgetItem(_c2s(result.zxx[i])))
+            self.table.setItem(i, 3, QTableWidgetItem(_c2s(result.zxy[i])))
+            self.table.setItem(i, 4, QTableWidgetItem(_c2s(result.zyx[i])))
+            self.table.setItem(i, 5, QTableWidgetItem(_c2s(result.zyy[i])))
+            self.table.setItem(i, 6, QTableWidgetItem(f"{result.zxx_se[i]:.4e}"))
+            self.table.setItem(i, 7, QTableWidgetItem(f"{result.zxy_se[i]:.4e}"))
+            self.table.setItem(i, 8, QTableWidgetItem(f"{result.zyx_se[i]:.4e}"))
+            self.table.setItem(i, 9, QTableWidgetItem(f"{result.zyy_se[i]:.4e}"))
+
+        self.resistivity_table.setRowCount(n)
+        for i in range(n):
+            f = freqs[i]
+            period = 1.0 / f if f > 0 else float("inf")
+            self.resistivity_table.setItem(i, 0, QTableWidgetItem(f"{f:.6f}"))
+            self.resistivity_table.setItem(i, 1, QTableWidgetItem(f"{period:.3f}"))
+            self.resistivity_table.setItem(i, 2, QTableWidgetItem(f"{result.rho_xy[i]:.4e}"))
+            self.resistivity_table.setItem(i, 3, QTableWidgetItem(f"{result.rho_yx[i]:.4e}"))
+            self.resistivity_table.setItem(i, 4, QTableWidgetItem(f"{result.phi_xy[i]:.4f}"))
+            self.resistivity_table.setItem(i, 5, QTableWidgetItem(f"{result.phi_yx[i]:.4f}"))
+            self.resistivity_table.setItem(i, 6, QTableWidgetItem(f"{result.rho_xy_se[i]:.4e}"))
+            self.resistivity_table.setItem(i, 7, QTableWidgetItem(f"{result.rho_yx_se[i]:.4e}"))
+            self.resistivity_table.setItem(i, 8, QTableWidgetItem(f"{result.phi_xy_se[i]:.4f}"))
+            self.resistivity_table.setItem(i, 9, QTableWidgetItem(f"{result.phi_yx_se[i]:.4f}"))
+
+        self._draw_comparison_plot()
+
+    def _draw_comparison_plot(self):
+        """用 matplotlib 绘制视电阻率和相位的误差棒对比图。"""
+        if self._bands is None:
+            self.mpl_fig.clear()
+            self.mpl_canvas.draw()
+            return
+
+        result = self._bands
+
+        p = np.array(result.periods)
+        finite = np.isfinite(p) & (p > 0)
+        if not finite.any():
+            self.mpl_fig.clear()
+            self.mpl_canvas.draw()
+            return
+
+        p = p[finite]
+        rho_xy = np.array(result.rho_xy)[finite]
+        rho_xy_se = np.array(result.rho_xy_se)[finite]
+        phi_xy = np.array(result.phi_xy)[finite]
+        phi_xy_se = np.array(result.phi_xy_se)[finite]
+        rho_yx = np.array(result.rho_yx)[finite]
+        rho_yx_se = np.array(result.rho_yx_se)[finite]
+        phi_yx = np.array(result.phi_yx)[finite]
+        phi_yx_se = np.array(result.phi_yx_se)[finite]
+
+        self.mpl_fig.clear()
+        ax1, ax2 = self.mpl_fig.subplots(2, 1)
+
+        ax1.errorbar(p, rho_xy, yerr=rho_xy_se,
+                     fmt='o', color='red', capsize=3, markersize=5,
+                     label='ρxy (Ω·m)')
+        ax1.errorbar(p, rho_yx, yerr=rho_yx_se,
+                     fmt='s', color='blue', capsize=3, markersize=5,
+                     label='ρyx (Ω·m)')
+        ax1.set_yscale('log')
+        ax1.set_xscale('log')
+        ax1.set_ylabel('Apparent Resistivity (Ω·m)')
+        ax1.set_xlabel('Period (s)')
+        ax1.set_title('视电阻率')
+        ax1.legend(loc='upper right', fontsize=7, framealpha=0.4, edgecolor='none')
+        ax1.grid(True, alpha=0.3)
+
+        ax2.errorbar(p, phi_xy, yerr=phi_xy_se,
+                     fmt='o', color='red', capsize=3, markersize=5,
+                     label='φxy (°)')
+        ax2.errorbar(p, phi_yx, yerr=phi_yx_se,
+                     fmt='s', color='blue', capsize=3, markersize=5,
+                     label='φyx (°)')
+        ax2.set_xscale('log')
+        ax2.set_xlabel('Period (s)')
+        ax2.set_ylabel('Phase (°)')
+        ax2.set_title('相位')
+        ax2.legend(loc='upper right', fontsize=7, framealpha=0.4, edgecolor='none')
+        ax2.grid(True, alpha=0.3)
+
+        self.mpl_canvas.draw()
+
+    def result(self):
+        return self._result
+
+    # ─── 表格剪贴板 / 导出 ──────────────────────────────────────────
+
+    def _table_key_press_event(self, event):
+        if event.matches(Qt.KeyboardShortcut.StandardKey.Copy):
+            self._copy_selection()
+        else:
+            QTableWidget.keyPressEvent(self.table, event)
+
+    def _on_table_context_menu(self, pos):
+        """右键菜单：复制 / 输出阻抗。"""
+        menu = QMenu()
+        copy_action = menu.addAction("复制")
+        edi_action = menu.addAction("输出阻抗...")
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action is copy_action:
+            self._copy_selection()
+        elif action is edi_action:
+            self._export_edi()
+
+    def _copy_selection(self):
+        table = self.result_tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return
+        selected = table.selectedRanges()
+        if not selected:
+            return
+        rows = set()
+        for r in selected:
+            for row in range(r.topRow(), r.bottomRow() + 1):
+                rows.add(row)
+        lines = []
+        lines.append("\t".join(
+            table.horizontalHeaderItem(c).text()
+            for c in range(table.columnCount())
+        ))
+        for row in sorted(rows):
+            cells = []
+            for col in range(table.columnCount()):
+                item = table.item(row, col)
+                cells.append(item.text() if item is not None else "")
+            lines.append("\t".join(cells))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _export_edi(self):
+        """将当前结果聚合为频带后导出 EDI + Z-file 到指定文件夹。"""
+        from PySide6.QtWidgets import QFileDialog
+
+        if self._bands is None:
+            QMessageBox.warning(self, "无结果", "请先运行估计。")
+            return
+
+        folder = QFileDialog.getExistingDirectory(self, "选择导出文件夹")
+        if not folder:
+            return
+
+        self._bands.export_to_folder(
+            folder,
+            station_name=self._current_local_data().name,
+            mode="rr",
+        )
+        self.status_label.setText(f"已导出到 {folder}")

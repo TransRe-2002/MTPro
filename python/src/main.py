@@ -1,6 +1,10 @@
+import os
+import sys
+
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QObject
-import sys
 
 from ui.mainwindow import MainWindow
 from ui.log_console import install_standard_stream_logging
@@ -14,10 +18,11 @@ class Main(QObject):
 
     def main(self):
         self.window.showMaximized()
-        sys.exit(app.exec())
+        app.exec()
 
 if __name__ == "__main__":
     app = QApplication([])
     install_standard_stream_logging()
     main = Main(app)
     main.main()
+    sys.exit()

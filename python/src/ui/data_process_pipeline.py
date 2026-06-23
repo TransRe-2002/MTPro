@@ -139,10 +139,15 @@ class PipelineLayer:
 
 @dataclass
 class ChannelPipeline:
+    data_id: int
     channel: str
     expanded: bool = True
     layers: list[PipelineLayer] = field(default_factory=list)
     baseline_snapshot: Optional[np.ndarray] = field(default=None, repr=False)
+
+    @property
+    def ref(self) -> tuple[int, str]:
+        return self.data_id, self.channel
 
     def add_layer(self) -> PipelineLayer:
         layer = PipelineLayer(label=f"step {len(self.layers) + 1}")
@@ -458,8 +463,8 @@ class RulerWidget(QWidget):
 
 
 class PipelineTrackWidget(QWidget):
-    add_block_requested = Signal(str, str, int)
-    tool_dropped = Signal(str, str, str, int)
+    add_block_requested = Signal(int, str, str, int)
+    tool_dropped = Signal(int, str, str, str, int)
     block_selected = Signal(str)
     block_double_clicked = Signal(str)
     block_removed = Signal(str)
@@ -602,7 +607,7 @@ class PipelineTrackWidget(QWidget):
 
         tool_id = bytes(event.mimeData().data(PIPELINE_TOOL_MIME)).decode()
         start = self._px_to_pts(event.position().toPoint().x())
-        self.tool_dropped.emit(self.pipeline.channel, self.layer.layer_id, tool_id, start)
+        self.tool_dropped.emit(self.pipeline.data_id, self.pipeline.channel, self.layer.layer_id, tool_id, start)
         event.acceptProposedAction()
 
     def _hit_test(self, x_pos: int) -> tuple[Optional[PipelineBlock], str]:
@@ -694,9 +699,13 @@ class PipelineTrackWidget(QWidget):
             return []
         return [track for lane in owner._lane_widgets for track in lane._tracks]
 
-    def _find_track(self, channel_name: str, layer_id: str) -> Optional[PipelineTrackWidget]:
+    def _find_track(self, data_id: int, channel_name: str, layer_id: str) -> Optional[PipelineTrackWidget]:
         for track in self._iter_tracks():
-            if track.pipeline.channel == channel_name and track.layer.layer_id == layer_id:
+            if (
+                track.pipeline.data_id == data_id
+                and track.pipeline.channel == channel_name
+                and track.layer.layer_id == layer_id
+            ):
                 return track
         return None
 
@@ -720,7 +729,7 @@ class PipelineTrackWidget(QWidget):
             self._drag_origin_start = block.start
             self._drag_origin_end = block.end
             self._drag_origin_layer_id = self.layer.layer_id
-            self._drag_origin_channel = self.pipeline.channel
+            self._drag_origin_channel = f"{self.pipeline.data_id}:{self.pipeline.channel}"
             self._drag_pointer_offset_pts = self._px_to_pts(x_pos) - block.start
             self._drag_target_layer = self.layer
             self._drag_target_pipeline = self.pipeline
@@ -734,6 +743,7 @@ class PipelineTrackWidget(QWidget):
         self.selected_block_id = ""
         self.block_selected.emit("")
         self.add_block_requested.emit(
+            self.pipeline.data_id,
             self.pipeline.channel,
             self.layer.layer_id,
             self._px_to_pts(x_pos),
@@ -757,7 +767,7 @@ class PipelineTrackWidget(QWidget):
         if self._drag_mode == "move":
             current_pipeline = self._drag_target_pipeline or self.pipeline
             current_layer = self._drag_target_layer or self.layer
-            current_track = self._find_track(current_pipeline.channel, current_layer.layer_id)
+            current_track = self._find_track(current_pipeline.data_id, current_pipeline.channel, current_layer.layer_id)
             if current_track is None:
                 current_track = self
             resolved = self._resolve_target_track(event.globalPosition().toPoint())
@@ -869,9 +879,9 @@ class PipelineTrackWidget(QWidget):
 
 
 class ChannelPipelineWidget(QWidget):
-    add_layer_requested = Signal(str)
-    add_block_requested = Signal(str, str, int)
-    tool_dropped = Signal(str, str, str, int)
+    add_layer_requested = Signal(int, str)
+    add_block_requested = Signal(int, str, str, int)
+    tool_dropped = Signal(int, str, str, str, int)
     block_selected = Signal(str)
     block_double_clicked = Signal(str)
     block_removed = Signal(str)
@@ -928,7 +938,7 @@ class ChannelPipelineWidget(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
 
-        header_left = QLabel(self.pipeline.channel)
+        header_left = QLabel(f"#{self.pipeline.data_id} {self.pipeline.channel}")
         header_left.setFixedHeight(CHANNEL_HEADER_H)
         header_left.setIndent(8)
         header_left.setFrameShape(QFrame.Shape.StyledPanel)
@@ -961,7 +971,7 @@ class ChannelPipelineWidget(QWidget):
 
         add_left = QPushButton("+ add step", left)
         add_left.setFixedHeight(ADD_ROW_H)
-        add_left.clicked.connect(lambda: self.add_layer_requested.emit(self.pipeline.channel))
+        add_left.clicked.connect(lambda: self.add_layer_requested.emit(self.pipeline.data_id, self.pipeline.channel))
         left_layout.addWidget(add_left)
 
         add_right = QFrame(right)
@@ -1010,6 +1020,7 @@ class DataProcessPipelineWidget(QWidget):
         self.data_manager = data_manager
         self.data_id = 0
         self.em_data: Optional[EMData] = None
+        self._channel_refs: list[tuple[int, str]] = []
         self.selected_tool_id: Optional[str] = None
         self.selected_block_id: str = ""
         self.pipelines: list[ChannelPipeline] = []
@@ -1204,71 +1215,212 @@ class DataProcessPipelineWidget(QWidget):
         self.data_id = data_id
         self.em_data = data
         self.selected_block_id = ""
-        if self.em_data is None:
+        if self.em_data is None and not self._channel_refs:
             self.pipelines = []
             self._rebuild_lanes()
             return
 
-        channel_names = list(self.em_data.data.keys())
-        if not self.pipelines:
-            self.pipelines = self._build_default_pipelines(channel_names)
-        else:
-            self._sync_pipelines(channel_names)
+        if self.em_data is not None and not self._channel_refs:
+            self._channel_refs = [(data_id, channel_name) for channel_name in self.em_data.channel_names()]
+
+        self._sync_pipelines(self._channel_refs)
+        self._normalize_pipelines_for_current_window()
         self._rebuild_lanes()
         self._refresh_all_pipeline_statuses()
         self._refresh_selection()
 
-    def _build_default_pipelines(self, channel_names: list[str]) -> list[ChannelPipeline]:
+    def add_channels(self, channel_refs: list[tuple[int, str]]) -> tuple[list[tuple[int, str]], list[tuple[int, str]], list[tuple[int, str]]]:
+        added: list[tuple[int, str]] = []
+        duplicated: list[tuple[int, str]] = []
+        failed: list[tuple[int, str]] = []
+
+        for data_id, channel_name in channel_refs:
+            if (data_id, channel_name) in self._channel_refs:
+                duplicated.append((data_id, channel_name))
+                continue
+            em_data = self._data_for(data_id)
+            if em_data is None or not em_data.has_channel(channel_name):
+                failed.append((data_id, channel_name))
+                continue
+            if not self._has_common_time_overlap(self._channel_refs + [(data_id, channel_name)]):
+                failed.append((data_id, channel_name))
+                continue
+            self._channel_refs.append((data_id, channel_name))
+            added.append((data_id, channel_name))
+
+        if added:
+            self._sync_pipelines(self._channel_refs)
+            self._normalize_pipelines_for_current_window()
+            self._rebuild_lanes()
+            self._refresh_all_pipeline_statuses()
+            self._refresh_selection()
+
+        return added, duplicated, failed
+
+    def remove_data(self, data_id: int):
+        refs = [ref for ref in self._channel_refs if ref[0] == data_id]
+        if not refs:
+            return
+        self._channel_refs = [ref for ref in self._channel_refs if ref[0] != data_id]
+        self._sync_pipelines(self._channel_refs)
+        self._normalize_pipelines_for_current_window()
+        self._rebuild_lanes()
+        self._refresh_all_pipeline_statuses()
+        self._refresh_selection()
+
+    def channel_count(self) -> int:
+        return len(self._channel_refs)
+
+    def channel_refs(self) -> list[tuple[int, str]]:
+        return list(self._channel_refs)
+
+    def window_title(self) -> str:
+        if not self._channel_refs:
+            return "Pipeline Editor"
+        labels = [f"#{data_id}:{channel}" for data_id, channel in self._channel_refs]
+        if len(labels) > 3:
+            labels = labels[:3] + ["..."]
+        return "Pipeline Editor - " + ", ".join(labels)
+
+    def _build_default_pipelines(self, channel_refs: list[tuple[int, str]]) -> list[ChannelPipeline]:
         pipelines: list[ChannelPipeline] = []
-        for channel_name in channel_names:
+        for data_id, channel_name in channel_refs:
             pipeline = ChannelPipeline(
+                data_id=data_id,
                 channel=channel_name,
-                baseline_snapshot=self._snapshot_for_channel(channel_name),
+                baseline_snapshot=self._snapshot_for_channel(data_id, channel_name),
             )
             pipeline.add_layer()
             pipelines.append(pipeline)
         return pipelines
 
-    def _sync_pipelines(self, channel_names: list[str]):
-        existing_by_name = {pipeline.channel: pipeline for pipeline in self.pipelines}
+    def _sync_pipelines(self, channel_refs: list[tuple[int, str]]):
+        existing_by_ref = {pipeline.ref: pipeline for pipeline in self.pipelines}
         synced: list[ChannelPipeline] = []
-        for channel_name in channel_names:
-            pipeline = existing_by_name.get(channel_name)
+        for data_id, channel_name in channel_refs:
+            pipeline = existing_by_ref.get((data_id, channel_name))
             if pipeline is None:
                 pipeline = ChannelPipeline(
+                    data_id=data_id,
                     channel=channel_name,
-                    baseline_snapshot=self._snapshot_for_channel(channel_name),
+                    baseline_snapshot=self._snapshot_for_channel(data_id, channel_name),
                 )
                 pipeline.add_layer()
             elif pipeline.baseline_snapshot is None:
-                pipeline.baseline_snapshot = self._snapshot_for_channel(channel_name)
+                pipeline.baseline_snapshot = self._snapshot_for_channel(data_id, channel_name)
             synced.append(pipeline)
         self.pipelines = synced
 
-    def _channel_series(self, channel_name: str) -> Optional[pd.Series]:
-        if self.em_data is None:
-            return None
-        channel = self.em_data.data.get(channel_name)
-        if channel is None:
-            return None
-        return channel.cts
+    def _data_for(self, data_id: int) -> Optional[EMData]:
+        if self.data_manager is not None:
+            return self.data_manager.get(data_id)
+        if self.em_data is not None and data_id == self.data_id:
+            return self.em_data
+        return None
 
-    def _snapshot_for_channel(self, channel_name: str) -> np.ndarray:
-        series = self._channel_series(channel_name)
+    def _channel_series(self, data_id: int, channel_name: str) -> Optional[pd.Series]:
+        data = self._data_for(data_id)
+        if data is None:
+            return None
+        if not data.has_channel(channel_name):
+            return None
+        return data.get_channel_series(channel_name)
+
+    def _time_range_for_channel(self, data_id: int, channel_name: str) -> Optional[tuple[pd.Timestamp, pd.Timestamp]]:
+        series = self._channel_series(data_id, channel_name)
+        if series is None or series.empty:
+            return None
+        index = series.index
+        if len(index) == 0:
+            return None
+        return pd.Timestamp(index[0]), pd.Timestamp(index[-1])
+
+    def _common_time_range(
+        self,
+        refs: Optional[list[tuple[int, str]]] = None,
+    ) -> Optional[tuple[pd.Timestamp, pd.Timestamp]]:
+        channel_refs = self._channel_refs if refs is None else refs
+        if not channel_refs:
+            return None
+
+        starts: list[pd.Timestamp] = []
+        ends: list[pd.Timestamp] = []
+        for data_id, channel_name in channel_refs:
+            channel_range = self._time_range_for_channel(data_id, channel_name)
+            if channel_range is None:
+                return None
+            starts.append(channel_range[0])
+            ends.append(channel_range[1])
+
+        common_start = max(starts)
+        common_end = min(ends)
+        if common_start > common_end:
+            return None
+        return common_start, common_end
+
+    def _has_common_time_overlap(self, refs: list[tuple[int, str]]) -> bool:
+        return self._common_time_range(refs) is not None
+
+    def _channel_slice(self, data_id: int, channel_name: str) -> pd.Series:
+        series = self._channel_series(data_id, channel_name)
         if series is None:
+            return pd.Series(dtype=np.float64)
+
+        common_range = self._common_time_range()
+        if common_range is None:
+            return series.iloc[0:0]
+
+        start, end = common_range
+        return series.loc[start:end]
+
+    def _snapshot_for_channel(self, data_id: int, channel_name: str) -> np.ndarray:
+        series = self._channel_slice(data_id, channel_name)
+        if series.empty:
             return np.array([], dtype=np.float64)
         return series.to_numpy(dtype=np.float64, copy=True)
 
-    def _find_pipeline(self, channel_name: str) -> Optional[ChannelPipeline]:
+    def _find_pipeline(self, data_id: int, channel_name: str) -> Optional[ChannelPipeline]:
         for pipeline in self.pipelines:
-            if pipeline.channel == channel_name:
+            if pipeline.data_id == data_id and pipeline.channel == channel_name:
                 return pipeline
         return None
 
     def _pipeline_baseline(self, pipeline: ChannelPipeline) -> np.ndarray:
         if pipeline.baseline_snapshot is None:
-            pipeline.baseline_snapshot = self._snapshot_for_channel(pipeline.channel)
+            pipeline.baseline_snapshot = self._snapshot_for_channel(pipeline.data_id, pipeline.channel)
         return np.array(pipeline.baseline_snapshot, copy=True)
+
+    def _pipeline_data_len(self, pipeline: ChannelPipeline) -> int:
+        return int(self._channel_slice(pipeline.data_id, pipeline.channel).shape[0])
+
+    def _editor_data_len(self) -> int:
+        if not self.pipelines:
+            return 0
+        return max(self._pipeline_data_len(pipeline) for pipeline in self.pipelines)
+
+    def _normalize_pipelines_for_current_window(self):
+        for pipeline in self.pipelines:
+            data_len = self._pipeline_data_len(pipeline)
+            current_snapshot = self._snapshot_for_channel(pipeline.data_id, pipeline.channel)
+            if pipeline.baseline_snapshot is None or pipeline.baseline_snapshot.size != data_len:
+                pipeline.baseline_snapshot = current_snapshot
+                for layer in pipeline.layers:
+                    for block in layer.blocks:
+                        self._invalidate_block_cache(block, "time window changed; reopen editor to refresh result")
+
+            for layer in pipeline.layers:
+                normalized_blocks: list[PipelineBlock] = []
+                for block in layer.blocks:
+                    if data_len <= 0:
+                        self._invalidate_block_cache(block, "channel has no samples in the common time window")
+                        continue
+                    block.start = max(0, min(block.start, data_len))
+                    block.end = max(block.start, min(block.end, data_len))
+                    if block.end <= block.start:
+                        self._invalidate_block_cache(block, "block is outside the common time window")
+                        continue
+                    normalized_blocks.append(block)
+                layer.blocks = normalized_blocks
 
     def _rebuild_lanes(self):
         while self.scroll_layout.count() > 1:
@@ -1279,8 +1431,8 @@ class DataProcessPipelineWidget(QWidget):
 
         self._lane_widgets.clear()
         self._ruler_widget = None
-        if self.em_data is None:
-            placeholder = QLabel("请选择左侧数据后开始构建 pipeline。", self.scroll_content)
+        if not self.pipelines:
+            placeholder = QLabel("拖动一个或多个 channel 到工作区后开始构建 pipeline。", self.scroll_content)
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             placeholder.setMargin(24)
             self.scroll_layout.insertWidget(0, placeholder)
@@ -1297,16 +1449,17 @@ class DataProcessPipelineWidget(QWidget):
         ruler_spacer.setFrameShape(QFrame.Shape.StyledPanel)
         ruler_layout.addWidget(ruler_spacer)
 
-        self._ruler_widget = RulerWidget(self._snap, self.em_data.npts, ruler_row)
+        self._ruler_widget = RulerWidget(self._snap, max(1, self._editor_data_len()), ruler_row)
         self._ruler_widget.set_zoom(self._zoom)
         ruler_layout.addWidget(self._ruler_widget, 1)
         self.scroll_layout.insertWidget(0, ruler_row)
 
         for pipeline in self.pipelines:
+            data_len = self._pipeline_data_len(pipeline)
             lane = ChannelPipelineWidget(
                 pipeline,
                 self._pipeline_baseline(pipeline),
-                self.em_data.npts,
+                data_len,
                 self._snap,
                 self.scroll_content,
             )
@@ -1354,9 +1507,9 @@ class DataProcessPipelineWidget(QWidget):
             self._ruler_widget.update()
         self._refresh_lane_tracks()
 
-    def _on_add_layer_requested(self, channel_name: str):
+    def _on_add_layer_requested(self, data_id: int, channel_name: str):
         for lane in self._lane_widgets:
-            if lane.pipeline.channel == channel_name:
+            if lane.pipeline.data_id == data_id and lane.pipeline.channel == channel_name:
                 lane.add_layer()
                 lane.set_zoom(self._zoom)
                 return
@@ -1368,8 +1521,8 @@ class DataProcessPipelineWidget(QWidget):
             params[key] = default
         return params
 
-    def _find_layer(self, channel_name: str, layer_id: str) -> Optional[tuple[ChannelPipeline, PipelineLayer]]:
-        pipeline = self._find_pipeline(channel_name)
+    def _find_layer(self, data_id: int, channel_name: str, layer_id: str) -> Optional[tuple[ChannelPipeline, PipelineLayer]]:
+        pipeline = self._find_pipeline(data_id, channel_name)
         if pipeline is None:
             return None
         for layer in pipeline.layers:
@@ -1377,9 +1530,7 @@ class DataProcessPipelineWidget(QWidget):
                 return pipeline, layer
         return None
 
-    def _block_intervals(self, layer: PipelineLayer, exclude_id: str = "") -> list[tuple[int, int]]:
-        if self.em_data is None:
-            return []
+    def _block_intervals(self, layer: PipelineLayer, data_len: int, exclude_id: str = "") -> list[tuple[int, int]]:
         intervals: list[tuple[int, int]] = []
         cursor = 0
         for block in layer.sorted_blocks():
@@ -1388,8 +1539,8 @@ class DataProcessPipelineWidget(QWidget):
             if block.start > cursor:
                 intervals.append((cursor, block.start))
             cursor = max(cursor, block.end)
-        if cursor < self.em_data.npts:
-            intervals.append((cursor, self.em_data.npts))
+        if cursor < data_len:
+            intervals.append((cursor, data_len))
         return intervals
 
     def _place_block_start(
@@ -1397,10 +1548,11 @@ class DataProcessPipelineWidget(QWidget):
         layer: PipelineLayer,
         span: int,
         raw_start: int,
+        data_len: int,
         exclude_id: str = "",
     ) -> Optional[int]:
         valid_intervals = []
-        for gap_start, gap_end in self._block_intervals(layer, exclude_id):
+        for gap_start, gap_end in self._block_intervals(layer, data_len, exclude_id):
             if gap_end - gap_start >= span:
                 valid_intervals.append((gap_start, gap_end - span))
         if not valid_intervals:
@@ -1416,22 +1568,27 @@ class DataProcessPipelineWidget(QWidget):
                 best_distance = distance
         return best_start
 
-    def _add_block_with_tool(self, channel_name: str, layer_id: str, start: int, tool_id: Optional[str]):
-        if tool_id is None or self.em_data is None:
+    def _add_block_with_tool(self, data_id: int, channel_name: str, layer_id: str, start: int, tool_id: Optional[str]):
+        if tool_id is None:
             QMessageBox.information(self, "提示", "请先在左侧选择一个工具。")
             return
         tool_id = self._canonical_tool_id(tool_id)
 
-        span = min(
-            self.em_data.npts,
-            max(1, min(2000, max(200, self.em_data.npts // 10))),
-        )
-        snapped_start, _guides = self._snap.snap_interval(start, start + span, px_per_point(self._zoom), self.em_data.npts)
-        found = self._find_layer(channel_name, layer_id)
+        found = self._find_layer(data_id, channel_name, layer_id)
         if found is None:
             return
-        _pipeline, layer = found
-        fitted_start = self._place_block_start(layer, span, snapped_start)
+        pipeline, layer = found
+        data_len = self._pipeline_data_len(pipeline)
+        if data_len <= 0:
+            QMessageBox.information(self, "提示", "当前 channel 在公共时间窗口内没有样点。")
+            return
+
+        span = min(
+            data_len,
+            max(1, min(2000, max(200, data_len // 10))),
+        )
+        snapped_start, _guides = self._snap.snap_interval(start, start + span, px_per_point(self._zoom), data_len)
+        fitted_start = self._place_block_start(layer, span, snapped_start, data_len)
         if fitted_start is None:
             QMessageBox.information(self, "提示", "当前 step 没有足够空间放置新的 block。")
             return
@@ -1447,13 +1604,13 @@ class DataProcessPipelineWidget(QWidget):
         self.selected_block_id = block.block_id
         self._refresh_selection()
 
-    def _on_add_block_requested(self, channel_name: str, layer_id: str, start: int):
-        self._add_block_with_tool(channel_name, layer_id, start, self.selected_tool_id)
+    def _on_add_block_requested(self, data_id: int, channel_name: str, layer_id: str, start: int):
+        self._add_block_with_tool(data_id, channel_name, layer_id, start, self.selected_tool_id)
 
-    def _on_tool_dropped(self, channel_name: str, layer_id: str, tool_id: str, start: int):
+    def _on_tool_dropped(self, data_id: int, channel_name: str, layer_id: str, tool_id: str, start: int):
         canonical_tool_id = self._canonical_tool_id(tool_id)
         self._set_selected_tool(canonical_tool_id)
-        self._add_block_with_tool(channel_name, layer_id, start, canonical_tool_id)
+        self._add_block_with_tool(data_id, channel_name, layer_id, start, canonical_tool_id)
 
     def _on_block_selected(self, block_id: str):
         self.selected_block_id = block_id
@@ -1503,21 +1660,25 @@ class DataProcessPipelineWidget(QWidget):
 
     def _make_preview_channel(
         self,
+        data_id: int,
         channel_name: str,
         samples: np.ndarray,
         start: int,
         end: int,
     ) -> Optional[PreviewChannelSlice]:
-        if self.em_data is None:
+        if self.data_manager is None:
             return None
-        base_channel = self.em_data.data.get(channel_name)
-        if base_channel is None:
+        data = self.data_manager.get(data_id)
+        if data is None:
             return None
+        if not data.has_channel(channel_name):
+            return None
+        base_slice = self._channel_slice(data_id, channel_name)
 
         start = max(0, min(len(samples), start))
         end = max(start, min(len(samples), end))
         sliced = np.asarray(samples[start:end], dtype=np.float64)
-        index = base_channel.cts.index[start:end]
+        index = base_slice.index[start:end]
         series = pd.Series(sliced, index=index)
         return PreviewChannelSlice(channel_name, series)
 
@@ -1535,6 +1696,7 @@ class DataProcessPipelineWidget(QWidget):
         block: PipelineBlock,
     ):
         input_snapshot = self._compose_channel_preview(
+            pipeline.data_id,
             pipeline.channel,
             stop_before_block_id=block.block_id,
             update_status=False,
@@ -1542,6 +1704,7 @@ class DataProcessPipelineWidget(QWidget):
         range_start = max(0, min(input_snapshot.size, block.start))
         range_end = max(range_start, min(input_snapshot.size, block.end))
         preview_channel = self._make_preview_channel(
+            pipeline.data_id,
             pipeline.channel,
             input_snapshot,
             range_start,
@@ -1554,7 +1717,7 @@ class DataProcessPipelineWidget(QWidget):
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.setWindowTitle(
             f"{TOOL_META.get(block.tool_id, {}).get('name', block.tool_id)}"
-            f" | {pipeline.channel} | {layer.label}"
+            f" | #{pipeline.data_id} {pipeline.channel} | {layer.label}"
         )
         dialog.resize(1200, 720)
         layout = QVBoxLayout(dialog)
@@ -1583,7 +1746,7 @@ class DataProcessPipelineWidget(QWidget):
         layer: PipelineLayer,
         block: PipelineBlock,
     ):
-        dialog = PipelineParamDialog(pipeline.channel, layer.label, block, self)
+        dialog = PipelineParamDialog(f"#{pipeline.data_id} {pipeline.channel}", layer.label, block, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -1635,7 +1798,7 @@ class DataProcessPipelineWidget(QWidget):
 
     def _refresh_all_pipeline_statuses(self):
         for pipeline in self.pipelines:
-            self._compose_channel_preview(pipeline.channel, update_status=True)
+            self._compose_channel_preview(pipeline.data_id, pipeline.channel, update_status=True)
         for lane in self._lane_widgets:
             lane.refresh()
 
@@ -1671,11 +1834,12 @@ class DataProcessPipelineWidget(QWidget):
 
     def _compose_channel_preview(
         self,
+        data_id: int,
         channel_name: str,
         stop_before_block_id: str = "",
         update_status: bool = False,
     ) -> np.ndarray:
-        pipeline = self._find_pipeline(channel_name)
+        pipeline = self._find_pipeline(data_id, channel_name)
         if pipeline is None:
             return np.array([], dtype=np.float64)
 
@@ -1687,10 +1851,11 @@ class DataProcessPipelineWidget(QWidget):
                 current_snapshot = self._apply_block_preview(block, current_snapshot, update_status)
         return np.array(current_snapshot, copy=True)
 
-    def _collect_preview_results(self, update_status: bool) -> dict[str, np.ndarray]:
-        results: dict[str, np.ndarray] = {}
+    def _collect_preview_results(self, update_status: bool) -> dict[tuple[int, str], np.ndarray]:
+        results: dict[tuple[int, str], np.ndarray] = {}
         for pipeline in self.pipelines:
-            results[pipeline.channel] = self._compose_channel_preview(
+            results[pipeline.ref] = self._compose_channel_preview(
+                pipeline.data_id,
                 pipeline.channel,
                 update_status=update_status,
             )
@@ -1704,7 +1869,7 @@ class DataProcessPipelineWidget(QWidget):
         return counts
 
     def _show_preview_summary(self):
-        if self.em_data is None:
+        if not self.pipelines:
             return
 
         self._collect_preview_results(update_status=True)
@@ -1719,7 +1884,7 @@ class DataProcessPipelineWidget(QWidget):
         for pipeline in self.pipelines:
             counts = self._pipeline_status_counts(pipeline)
             lines.append(
-                f"{pipeline.channel}: "
+                f"#{pipeline.data_id} {pipeline.channel}: "
                 f"ready={counts.get('ready', 0)}, "
                 f"stale={counts.get('stale', 0)}, "
                 f"pending={counts.get('empty', 0)}, "
@@ -1740,27 +1905,32 @@ class DataProcessPipelineWidget(QWidget):
                     block.status = "configured" if block.params else "empty"
 
     def _commit_preview(self):
-        if self.em_data is None or self.data_id == 0:
+        if not self.pipelines:
             return
 
         preview_results = self._collect_preview_results(update_status=True)
         changed_channels: list[str] = []
 
         for pipeline in self.pipelines:
-            channel = self.em_data.data.get(pipeline.channel)
-            preview_snapshot = preview_results.get(pipeline.channel)
-            if channel is None or preview_snapshot is None:
+            data = self._data_for(pipeline.data_id)
+            preview_snapshot = preview_results.get(pipeline.ref)
+            if data is None or not data.has_channel(pipeline.channel) or preview_snapshot is None:
+                continue
+            target_series = self._channel_slice(pipeline.data_id, pipeline.channel)
+            if target_series.shape[0] != preview_snapshot.shape[0]:
                 continue
 
-            current_snapshot = channel.cts.to_numpy(dtype=np.float64, copy=True)
+            current_snapshot = target_series.to_numpy(dtype=np.float64, copy=True)
             pipeline.baseline_snapshot = np.array(preview_snapshot, copy=True)
             if np.array_equal(current_snapshot, preview_snapshot, equal_nan=True):
                 continue
 
-            channel.cts = pd.Series(preview_snapshot, index=channel.cts.index)
-            changed_channels.append(pipeline.channel)
+            updated_series = data.get_channel_series(pipeline.channel).copy()
+            updated_series.loc[target_series.index] = preview_snapshot
+            data.set_channel_series(pipeline.channel, updated_series)
+            changed_channels.append(f"#{pipeline.data_id} {pipeline.channel}")
             self._reset_pipeline_after_commit(pipeline)
-            self.change_finished_signal.emit(self.data_id, pipeline.channel)
+            self.change_finished_signal.emit(pipeline.data_id, pipeline.channel)
 
         if not changed_channels:
             QMessageBox.information(self, "Commit", "没有可提交的新 preview 结果。")
@@ -1794,7 +1964,7 @@ class DataProcessPipelineWidget(QWidget):
         meta = TOOL_META.get(block.tool_id, {})
         self.info_text.setPlainText(
             f"selected block\n"
-            f"channel: {pipeline.channel}\n"
+            f"channel: #{pipeline.data_id} {pipeline.channel}\n"
             f"layer: {layer.label}\n"
             f"tool: {meta.get('name', block.tool_id)}\n"
             f"range: {block.start} ~ {block.end}\n"

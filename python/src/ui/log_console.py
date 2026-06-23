@@ -7,8 +7,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, Qt
-from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtGui import QFont, QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QFrame,
 )
 
 
@@ -44,24 +45,39 @@ class LogConsoleWidget(QWidget):
         self.text_edit = QTextEdit(self)
         self.text_edit.setReadOnly(True)
         self.text_edit.document().setMaximumBlockCount(3000)
-        self.text_edit.setFont(QFont("Courier New", 10))
+        self.text_edit.setFont(QFont("Courier New", 9))
         self.text_edit.setAcceptRichText(True)
+        self.text_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
 
-        self.title_label = QLabel("运行日志", self)
+        self.title_label = QLabel("命令行窗口 / Command Window", self)
+        self.title_label.setFont(QFont("Arial", 9, QFont.Weight.Bold))
         self.clear_button = QPushButton("清空", self)
+        self.clear_button.setFixedWidth(52)
+        self.clear_button.setFixedHeight(22)
+        self.clear_button.setFont(QFont("Arial", 9))
         self.copy_button = QPushButton("复制", self)
+        self.copy_button.setFixedWidth(52)
+        self.copy_button.setFixedHeight(22)
+        self.copy_button.setFont(QFont("Arial", 9))
+
+        # 标题分隔线
+        sep = QFrame(self)
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
 
         controls = QHBoxLayout()
-        controls.setContentsMargins(0, 0, 0, 2)
+        controls.setContentsMargins(2, 2, 2, 0)
+        controls.setSpacing(4)
         controls.addWidget(self.title_label)
         controls.addStretch(1)
         controls.addWidget(self.copy_button)
         controls.addWidget(self.clear_button)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(4, 2, 4, 4)
+        layout.setSpacing(2)
         layout.addLayout(controls)
+        layout.addWidget(sep)
         layout.addWidget(self.text_edit, 1)
 
         self.clear_button.clicked.connect(self.text_edit.clear)
@@ -100,15 +116,24 @@ class LogConsoleWidget(QWidget):
 
 
 class StreamToLogger(io.TextIOBase):
-    def __init__(self, logger: logging.Logger, level: int):
+    def __init__(
+        self,
+        logger: logging.Logger,
+        level: int,
+        original_stream: io.TextIOBase | None = None,
+    ):
         super().__init__()
         self.logger = logger
         self.level = level
+        self.original_stream = original_stream
         self._buffer = ""
 
     def write(self, text: str) -> int:
         if not text:
             return 0
+        if self.original_stream is not None:
+            self.original_stream.write(text)
+            self.original_stream.flush()
         self._buffer += text
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
@@ -165,8 +190,8 @@ def install_standard_stream_logging() -> tuple[io.TextIOBase, io.TextIOBase]:
 
     original_stdout = sys.stdout
     original_stderr = sys.stderr
-    sys.stdout = StreamToLogger(stdout_logger, logging.INFO)
-    sys.stderr = StreamToLogger(stderr_logger, logging.ERROR)
+    sys.stdout = StreamToLogger(stdout_logger, logging.INFO, original_stdout)
+    sys.stderr = StreamToLogger(stderr_logger, logging.ERROR, original_stderr)
     return original_stdout, original_stderr
 
 

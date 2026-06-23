@@ -1,30 +1,50 @@
 from __future__ import annotations
 
 from pandas import Timestamp, DatetimeIndex
-from PySide6.QtCore import QDateTime
+from PySide6.QtCore import QDateTime, QTimeZone
 
-def pts_to_qdt(pts: Timestamp|DatetimeIndex) -> QDateTime:
-    """将 pandas.Timestamp 转换为 QDateTime"""
-    return QDateTime.fromSecsSinceEpoch(int(pts.timestamp()))
 
-def qdt_to_pts(qdt: QDateTime) -> Timestamp:
-    """将 QDateTime 转换为 pandas.Timestamp"""
-    return Timestamp(qdt.toSecsSinceEpoch(), unit='s', tz='UTC+08:00')
+def pts_to_qdt(pts: Timestamp, tz: str | None = None) -> QDateTime:
+    """将 pandas.Timestamp 转换为 QDateTime。
 
-def test_time_convert():
-    # 创建一个当前的 pandas.Timestamp
-    now_pts = Timestamp.now(tz='UTC+08:00')
-    now_qdt = QDateTime.currentDateTime()
-    print(f"原始 pandas.Timestamp: {now_pts}")
-    print(f"原始 QDateTime: {now_qdt.toString('yyyy-MM-dd HH:mm:ss')}")
+    Args:
+        pts: 时区感知的 Timestamp。
+        tz: 目标时区名称。None（默认）时使用 Timestamp 自身的时区；
+            传入如 ``'Asia/Shanghai'`` 则先 tz_convert 再创建对应时区的 QDateTime。
 
-    # 转换为 QDateTime
-    qdt = pts_to_qdt(now_pts)  # 请替换为您选择的函数名
-    print(f"转换后的 QDateTime: {qdt.toString('yyyy-MM-dd HH:mm:ss')}")
+    Returns:
+        QDateTime，其时区与 pts 的时区一致（或 tz 指定的目标时区）。
 
-    # 再转换回来
-    new_pts = qdt_to_pts(qdt)  # 请替换为您选择的函数名
-    print(f"转换回来的 pandas.Timestamp: {new_pts}")
+    Example:
+        >>> ts = pd.Timestamp('2024-05-01 00:00:00', tz='Asia/Shanghai')
+        >>> qdt = pts_to_qdt(ts)                 # QDateTime 显示为 Asia/Shanghai 时间
+        >>> qdt = pts_to_qdt(ts, tz='UTC')       # QDateTime 显示为 UTC 时间
+    """
+    if tz is not None:
+        pts = pts.tz_convert(tz)
 
-    # 检查是否一致（在秒级精度下）
-    assert int(now_pts.timestamp()) == int(new_pts.timestamp())
+    if pts.tz is None:
+        # naive Timestamp → 当 UTC 处理
+        qtz = QTimeZone.UTC
+    else:
+        qtz = QTimeZone(str(pts.tz).encode())
+
+    return QDateTime.fromSecsSinceEpoch(int(pts.timestamp()), qtz)
+
+
+def qdt_to_pts(qdt: QDateTime, tz: str = 'UTC') -> Timestamp:
+    """将 QDateTime 转换为 pandas.Timestamp。
+
+    Args:
+        qdt: QDateTime 对象。
+        tz: 目标时区名称，默认 ``'UTC'``。
+
+    Returns:
+        带指定时区的 Timestamp。
+
+    Example:
+        >>> qdt = QDateTime.currentDateTime()
+        >>> ts_utc = qdt_to_pts(qdt)             # → Timestamp in UTC
+        >>> ts_cst = qdt_to_pts(qdt, tz='Asia/Shanghai')  # → Timestamp in CST
+    """
+    return Timestamp(qdt.toSecsSinceEpoch(), unit='s', tz=tz)

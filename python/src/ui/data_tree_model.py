@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Set
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt
 
 from base.data_manager import DataManager
-from core.em_data import Channel, EMData
+from core.em_data import EMData
 
 
 class DataTreeModel(QAbstractItemModel):
@@ -156,7 +156,11 @@ class DataTreeModel(QAbstractItemModel):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
 
-        base_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        base_flags = (
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsDragEnabled
+        )
         if self.is_channel_index(index):
             return base_flags | Qt.ItemFlag.ItemIsUserCheckable
         return base_flags
@@ -175,8 +179,8 @@ class DataTreeModel(QAbstractItemModel):
             return "数据名称"
         return None
 
-    def checked_channels(self) -> List[Channel]:
-        result: List[Channel] = []
+    def checked_channel_refs(self) -> List[tuple[int, str]]:
+        result: List[tuple[int, str]] = []
         for key in self._keys:
             em_data = self.data_manager.get(key)
             if em_data is None:
@@ -188,9 +192,15 @@ class DataTreeModel(QAbstractItemModel):
 
             for channel_name in self._channel_names(em_data):
                 if channel_name in checked_names:
-                    result.append(em_data.data[channel_name])
-
+                    result.append((key, channel_name))
         return result
+
+    def set_channel_checked(self, key: int, channel_name: str, checked: bool) -> bool:
+        index = self.index_for_channel(key, channel_name)
+        if not index.isValid():
+            return False
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        return self.setData(index, state, Qt.ItemDataRole.CheckStateRole)
 
     def is_dataset_index(self, index: QModelIndex) -> bool:
         return index.isValid() and index.internalId() == self._ROOT_ID
@@ -230,6 +240,22 @@ class DataTreeModel(QAbstractItemModel):
             return channel_names[index.row()]
         return None
 
+    def index_for_channel(self, key: int, channel_name: str) -> QModelIndex:
+        parent = self.index_for_key(key)
+        if not parent.isValid():
+            return QModelIndex()
+
+        em_data = self.data_manager.get(key)
+        if em_data is None:
+            return QModelIndex()
+
+        channel_names = self._channel_names(em_data)
+        try:
+            row = channel_names.index(channel_name)
+        except ValueError:
+            return QModelIndex()
+        return self.index(row, 0, parent)
+
     def on_data_added(self, key: int):
         if key in self._row_by_key:
             return
@@ -266,4 +292,4 @@ class DataTreeModel(QAbstractItemModel):
     def _channel_names(em_data: EMData) -> List[str]:
         if getattr(em_data, "chid", None):
             return list(em_data.chid)
-        return list(em_data.data.keys())
+        return em_data.channel_names()

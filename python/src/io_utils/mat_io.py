@@ -187,14 +187,83 @@ def new_ts_struct() -> dict:
 class MatLoader(EMDataLoader):
     @staticmethod
     def load(path: str, tz: str = 'Asia/Shanghai') -> MatEMData:
-        # 检测文件格式：v7.3 文件以 HDF5 存储，需要 h5py 读取
+        # 检测文件格式：v7.3 / HDF5 需要 h5py 读取，v5/v4 用 scipy
         with open(path, 'rb') as fh:
             header = fh.read(128)
-        if b'MATLAB 7.3 MAT-file' in header:
+        if b'MATLAB 7.3 MAT-file' in header or header[:4] == b'\x89HDF':
             mat_data = _load_mat_v73(path)
         else:
             mat_data = loadmat(path)
         return MatEMData(mat_data, path, tz=tz)
+
+def _save_mat_v73(path: str, mdict: dict) -> None:
+    """将 scipy 格式 dict 写入 MATLAB v7.3 (HDF5) 文件。"""
+    import h5py
+
+    def _write_item(h5f, name: str, value):
+        """递归写入一个值（可能是 struct/cell/array）到 HDF5 文件。"""
+        if isinstance(value, np.ndarray) and value.dtype.names:
+            # Struct: (1,1) named dtype array → HDF5 group
+            grp = h5f.create_group(name)
+            val_flat = value[0, 0]
+            for fname in value.dtype.names:
+                _write_item(grp, fname, val_flat[fname])
+        elif isinstance(value, np.ndarray) and value.dtype == object and value.ndim == 2:
+            # Cell array → object reference dataset
+            rows, cols = value.shape[1], value.shape[0]  # MATLAB dims
+            dt = h5py.special_dtype(ref=h5py.Reference)
+            ds = h5f.create_dataset(name, shape=(rows, cols), dtype=dt)
+            for r in range(rows):
+                for c in range(cols):
+                    cell_val = value[c, r]  # undo transpose
+                    ref_name = f"{name}_r{r}_c{c}"
+                    _write_item(h5f, ref_name, cell_val)
+                    ds[r, c] = h5f[ref_name].ref
+        elif isinstance(value, np.ndarray) and value.ndim == 2 and value.shape[0] == 1:
+            # Char array wrapper: (1,) array containing string
+            if value.dtype == object and value.size == 1:
+                inner = value[0]
+                if isinstance(inner, str):
+                    encoded = np.frombuffer(inner.encode('utf-16-le'), dtype=np.uint16)
+                    h5f.create_dataset(name, data=encoded)
+                    return
+                if isinstance(inner, np.ndarray) and inner.dtype.kind in ('U', 'S'):
+                    s = str(inner[0]) if inner.size > 0 else ''
+                    encoded = np.frombuffer(s.encode('utf-16-le'), dtype=np.uint16)
+                    h5f.create_dataset(name, data=encoded)
+                    return
+            _write_array(h5f, name, value)
+        elif isinstance(value, np.ndarray):
+            _write_array(h5f, name, value)
+        elif isinstance(value, str):
+            encoded = np.frombuffer(value.encode('utf-16-le'), dtype=np.uint16)
+            h5f.create_dataset(name, data=encoded)
+        elif isinstance(value, (int, float, np.integer, np.floating)):
+            h5f.create_dataset(name, data=np.array([value]))
+
+    def _write_array(h5f, name: str, arr: np.ndarray):
+        """写入数值数组（处理空数组、Unicode 字符串、列优先转置）。"""
+        if arr.size == 0:
+            h5f.create_dataset(name, data=np.zeros((0, 0), dtype=np.float64))
+            return
+        # Unicode 字符串数组 → UTF-16 LE uint16
+        if arr.dtype.kind == 'U':
+            s = str(arr.flat[0]) if arr.size > 0 else ''
+            encoded = np.frombuffer(s.encode('utf-16-le'), dtype=np.uint16)
+            h5f.create_dataset(name, data=encoded)
+            return
+        # MATLAB 列优先 vs C 行优先：转置
+        if arr.ndim == 2:
+            arr = arr.T
+        # int64 → float64（MATLAB 默认数值类型）
+        if arr.dtype == np.int64:
+            arr = arr.astype(np.float64)
+        h5f.create_dataset(name, data=arr)
+
+    with h5py.File(path, 'w') as f:
+        for var_name, value in mdict.items():
+            _write_item(f, var_name, value)
+
 
 class MatSaver(EMDataSaver):
     @staticmethod
@@ -202,8 +271,8 @@ class MatSaver(EMDataSaver):
         if isinstance(em_data, MatEMData):
             em_data.update_meta()
             if hasattr(em_data, "mat_meta"):
-                # 只保存 tsStruct，避免 loadmat 遗留的 __header__/__version__/__globals__ 字段引发 scipy 警告
-                savemat(path, {"tsStruct": em_data.mat_meta['tsStruct']})
+                key = em_data._struct_key
+                _save_mat_v73(path, {key: em_data.mat_meta[key]})
             else:
                 raise TypeError(f"{type(em_data).__name__} is missing 'mat_meta' attribute")
         else:

@@ -60,7 +60,8 @@ class MatEMData(EMData):
 
         # ── 基础属性 ──
         self.name: str = _field(ts, 'name')[0, 0][0]
-        self.dt = pd.Timedelta(seconds=float(_field(ts, 'dt')[0, 0][0, 0]))
+        dt_val = _field(ts, 'dt')[0, 0]
+        self.dt = pd.Timedelta(seconds=float(dt_val.flat[0]) if dt_val.size > 0 else 1.0)
 
         # npts
         npts_raw = _field(ts, 'npts')[0, 0]
@@ -202,24 +203,29 @@ class MatEMData(EMData):
         write_end = _to_arr(actual_end)
         write_zero = _to_arr(self.zero_time)
 
-        # 重写 data
+        # 重写 data（写回存在的字段，不存在的跳过）
         new_data = np.empty((self.NCh, self.npts), dtype=np.float64)
         for i, ch_name in enumerate(self.channel_names()):
             new_data[i, :] = np.asarray(
                 self.data[ch_name].to_numpy(), dtype=np.float64,
             )
-        ts['data'][0, 0] = new_data
-        ts['startTime'][0, 0] = write_start
-        ts['endTime'][0, 0] = write_end
-        ts['zeroTime'][0, 0] = write_zero
-
-        ts['dt'][0, 0] = np.array([self.dt.total_seconds()])
-        ts['npts'][0, 0] = np.array([[self.npts]])
-        # 保持原有字段名写回
+        self._try_set(ts, 'data', new_data)
+        self._try_set(ts, 'startTime', write_start)
+        self._try_set(ts, 'endTime', write_end)
+        self._try_set(ts, 'zeroTime', write_zero)
+        self._try_set(ts, 'dt', np.array([self.dt.total_seconds()]))
+        self._try_set(ts, 'npts', np.array([[self.npts]]))
         try:
             ts['NCh'][0, 0] = np.array([[self.NCh]])
         except ValueError:
-            ts['nch'][0, 0] = np.array([[self.NCh]])
+            self._try_set(ts, 'nch', np.array([[self.NCh]]))
+
+    @staticmethod
+    def _try_set(ts, field: str, value):
+        try:
+            ts[field][0, 0] = value
+        except (ValueError, KeyError):
+            pass
 
     def restore_data(self, ch: str):
         pass

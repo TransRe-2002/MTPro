@@ -142,7 +142,9 @@ class DataProcessLegacyWidget(QWidget):
     def _stop_broker(self) -> None:
         if self._broker_thread is not None and self._broker_thread.isRunning():
             self._broker_thread.quit()
-            self._broker_thread.wait(3000)
+            if not self._broker_thread.wait(1000):
+                self._broker_thread.terminate()
+                self._broker_thread.wait()
 
     def _init_ui(self):
         self.mdi_area = ClassicMdiArea(self)

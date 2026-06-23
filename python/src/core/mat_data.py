@@ -139,7 +139,7 @@ class MatEMData(EMData):
                 # (1, 2) cell: [m_units, e_units]
                 self.m_units = u.flat[0][0] if u.flat[0].size > 0 else None
                 self.e_units = u.flat[1][0] if u.flat[1].size > 0 else None
-            elif u.size == 1:
+            elif u.size == 1 and len(self.chid) > 0:
                 ch_name = self.chid[0]
                 if ch_name.startswith('E'):
                     self.e_units = u.flat[0][0] if u.flat[0].size > 0 else None

@@ -192,30 +192,36 @@ class ProcessingBroker(QObject):
         if not matched:
             return
 
-        # ── Phase 2: 并行修改 ──────────────────────────────────
-        def _modify_dataset(pack: tuple[int, object]) -> list[tuple[int, str, np.ndarray]]:
-            data_id, em_data = pack
-            results: list[tuple[int, str, np.ndarray]] = []
+        # ── Phase 2: 并行修改（展平到通道级别）─────────────────
+        tasks: list[tuple[int, str, np.ndarray]] = []
+        for data_id, em_data in matched:
             for ch in em_data.channel_names():
                 da = em_data.data[ch]
                 if len(da.values) != ref_npts:
                     continue
-                vals = da.values.copy()
-                vals[indices] = np.nan
-                em_data.data[ch] = xr.DataArray(
-                    vals, dims=da.dims, coords=da.coords,
-                )
-                results.append((data_id, ch, vals))
-            return results
+                tasks.append((data_id, ch, da.values.copy()))
 
-        changes: list[tuple[int, str, np.ndarray]] = []
-        with ThreadPoolExecutor(max_workers=min(4, len(matched))) as pool:
-            futures = [pool.submit(_modify_dataset, m) for m in matched]
+        if not tasks:
+            return
+
+        def _modify_channel(task):
+            data_id, ch, vals = task
+            vals[indices] = np.nan
+            return (data_id, ch, vals)
+
+        changes = []
+        with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as pool:
+            futures = [pool.submit(_modify_channel, t) for t in tasks]
             for future in as_completed(futures):
-                changes.extend(future.result())
+                changes.append(future.result())
 
-        # ── Phase 3: 发信号 ────────────────────────────────────
+        # ── Phase 3: 写回 + 发信号 ─────────────────────────────
         for data_id, ch, vals in changes:
+            em = self._safe_get(data_id)
+            if em is not None:
+                em.data[ch] = xr.DataArray(
+                    vals, dims=em.data[ch].dims, coords=em.data[ch].coords,
+                )
             self.data_changed.emit(data_id, ch, vals)
 
         logger.info("Broker: synced region deletion to %d datasets (%d channels)",

@@ -19,21 +19,54 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 from PySide6 import QtCore, QtGui
 import pyqtgraph as pg
 
+from processor._display_utils import decimate_for_display
 from processor._modifier_constraint import apply_modifier_axis_constraint
 
 pg.setConfigOptions(antialias=True)
 pg.setConfigOption("background", "w")
 pg.setConfigOption("foreground", "k")
 
+# PlotCurveItem 默认优化参数，所有处理器共用
+_CURVE_OPTS = dict(
+    autoDownsample=True,
+    downsampleMethod='peak',
+    clipToView=True,
+    connect='finite',
+)
+
 
 class StepPlotWidget(pg.PlotWidget):
-    """带统一交互行为的时间序列绘图控件。"""
+    """带统一交互行为的时间序列绘图控件。
+
+    内置显示降采样和 pyqtgraph 性能优化参数，
+    所有处理器工具自动享受千万级数据流畅渲染。
+    """
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs, axisItems={"bottom": pg.DateAxisItem()})
         self.double_click_callback = None
         self.right_click_callback = None
         self.zoom_callback = None
         self._setup_view()
+
+    @staticmethod
+    def make_curve(x, y, pen='b', decimate: bool = True, **kwargs):
+        """创建优化的 PlotCurveItem。
+
+        自动应用降采样和 pyqtgraph 性能参数。
+        设置 ``decimate=False`` 可跳过降采样（小数据量时）。
+        """
+        opts = {**_CURVE_OPTS, **kwargs}
+        if decimate:
+            x, y = decimate_for_display(x, y)
+        return pg.PlotCurveItem(x, y, pen=pen, **opts)
+
+    @staticmethod
+    def make_scatter(x, y, brush='r', size=5, symbol='o'):
+        """创建 ScatterPlotItem（无降采样，适用于散点标记）。"""
+        return pg.ScatterPlotItem(
+            x=x, y=y, pen=pg.mkPen(None),
+            brush=pg.mkBrush(brush), size=size, symbol=symbol,
+        )
 
     def _setup_view(self) -> None:
         """设置初始视图状态。"""

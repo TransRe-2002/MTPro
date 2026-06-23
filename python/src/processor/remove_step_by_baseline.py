@@ -192,22 +192,22 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
             autoDownsample=True, downsampleMethod='peak',
             clipToView=True, useOpenGL=True, connect='finite',
         )
-        self.origin_line = pg.PlotCurveItem(
+        self.origin_line = StepPlotWidget.make_curve(
             self.x_data, origin_centered,
             pen=pg.mkPen(120, 120, 120, width=1, style=Qt.PenStyle.DashLine),
             name="原始序列", **curve_opts,
         )
-        self.y_line = pg.PlotCurveItem(
+        self.y_line = StepPlotWidget.make_curve(
             self.x_data, y_centered,
             pen=pg.mkPen(210, 70, 70, width=1),
             name="当前序列", **curve_opts,
         )
-        self.baseline_line = pg.PlotCurveItem(
+        self.baseline_line = StepPlotWidget.make_curve(
             self.x_data, y_centered,
             pen=pg.mkPen(60, 150, 60, width=1),
             name="拟合基线", **curve_opts,
         )
-        self.corrected_line = pg.PlotCurveItem(
+        self.corrected_line = StepPlotWidget.make_curve(
             self.x_data, y_centered,
             pen=pg.mkPen(40, 90, 200, width=1),
             name="校正后序列", **curve_opts,
@@ -222,7 +222,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         self.signal_plot_item.addItem(self.baseline_line)
         self.signal_plot_item.addItem(self.corrected_line)
 
-        self.correction_line = pg.PlotCurveItem(
+        self.correction_line = StepPlotWidget.make_curve(
             self.x_data, np.zeros_like(self.y_data),
             pen=pg.mkPen(130, 60, 170, width=1),
             name="校正项", **curve_opts,

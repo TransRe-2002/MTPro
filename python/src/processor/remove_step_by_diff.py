@@ -212,12 +212,12 @@ class RemoveStepByDiff(BaseProcessorWidget):
             autoDownsample=True, downsampleMethod='peak',
             clipToView=True, useOpenGL=True, connect='finite',
         )
-        self.origin_line = pg.PlotCurveItem(
+        self.origin_line = StepPlotWidget.make_curve(
             self.x_data, origin_centered,
             pen=pg.mkPen(120, 120, 120, width=1, style=Qt.PenStyle.DashLine),
             name="原始序列", **curve_opts,
         )
-        self.y_line = pg.PlotCurveItem(
+        self.y_line = StepPlotWidget.make_curve(
             self.x_data, y_centered,
             pen=pg.mkPen(255, 0, 0, width=1),
             name="当前序列", **curve_opts,

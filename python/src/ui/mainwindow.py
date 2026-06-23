@@ -21,6 +21,9 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QLabel,
+    QLineEdit,
+    QPushButton,
+    QTextEdit,
     QToolBar,
     QSizePolicy, QHBoxLayout,
 )
@@ -354,6 +357,10 @@ class MainWindow(QMainWindow):
         save_as_action.setShortcut("Ctrl+Shift+S")
         save_as_action.setStatusTip("将当前数据集另存为新文件")
         save_as_action.triggered.connect(self.save_file_as)
+        batch_save_action = QAction("批量保存(&M)...", self)
+        batch_save_action.setShortcut("Ctrl+Shift+M")
+        batch_save_action.setStatusTip("将所有已打开数据集批量保存到指定文件夹")
+        batch_save_action.triggered.connect(self.batch_save)
         exit_action = QAction("退出(&X)", self)
         exit_action.triggered.connect(self.close)
         exit_action.setShortcut("Ctrl+Q")
@@ -365,6 +372,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(save_action)
         file_menu.addAction(save_as_action)
+        file_menu.addAction(batch_save_action)
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
         self._refresh_recent_file_menu()
@@ -693,6 +701,125 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "另存为失败", f"无法保存到:\n{filename}")
         else:
             return
+
+    def batch_save(self):
+        """批量保存 DataManager 中所有数据集到指定文件夹。"""
+        from io_utils.mat_io import MatSaver
+
+        items = list(self.data_manager.items())
+        if not items:
+            QMessageBox.information(self, "提示", "没有已加载的数据集。")
+            return
+
+        dlg = _BatchSaveDialog(items, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        folder = dlg.folder_path.text()
+        suffix = dlg.suffix_edit.text().strip()
+
+        def _unique_path(folder: str, name: str, suffix: str) -> str:
+            base = f"{name}{suffix}"
+            path = os.path.join(folder, f"{base}.mat")
+            if not os.path.exists(path):
+                return path
+            n = 1
+            while True:
+                path = os.path.join(folder, f"{base}({n}).mat")
+                if not os.path.exists(path):
+                    return path
+                n += 1
+
+        saved, failed, skipped = 0, 0, 0
+        for data_id, data in items:
+            name = data.name if data.name else f"dataset_{data_id}"
+            path = _unique_path(folder, name, suffix)
+            try:
+                MatSaver.save(data, path)
+                self.logger.info("Batch saved #%s to %s", data_id, path)
+                saved += 1
+            except Exception:
+                self.logger.exception("Batch save failed for #%s", data_id)
+                failed += 1
+
+        msg = f"成功: {saved} 个\n失败: {failed} 个"
+        if skipped:
+            msg += f"\n跳过: {skipped} 个"
+        QMessageBox.information(self, "批量保存完成", msg)
+
+
+class _BatchSaveDialog(QDialog):
+    """批量保存对话框：文件夹选择 + 后缀 + 预览。"""
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("批量保存")
+        self.resize(550, 350)
+
+        layout = QVBoxLayout(self)
+
+        # 文件夹选择
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("目标文件夹:"))
+        self.folder_path = QLineEdit()
+        self.folder_path.setReadOnly(True)
+        folder_row.addWidget(self.folder_path, 1)
+        browse_btn = QPushButton("浏览...")
+        browse_btn.clicked.connect(self._browse)
+        folder_row.addWidget(browse_btn)
+        layout.addLayout(folder_row)
+
+        # 后缀
+        suffix_row = QHBoxLayout()
+        suffix_row.addWidget(QLabel("文件名后缀:"))
+        self.suffix_edit = QLineEdit()
+        self.suffix_edit.setPlaceholderText("如 _fixed")
+        suffix_row.addWidget(self.suffix_edit, 1)
+        layout.addLayout(suffix_row)
+
+        # 预览
+        layout.addWidget(QLabel("保存预览（最多显示前 5 个）:"))
+        self.preview = QTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setMaximumHeight(120)
+        layout.addWidget(self.preview)
+
+        # 按钮
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        save_btn = QPushButton("批量保存")
+        save_btn.clicked.connect(self.accept)
+        save_btn.setDefault(True)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+        self._items = items
+        self._update_preview()
+
+        self.suffix_edit.textChanged.connect(self._update_preview)
+
+    def _browse(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择批量保存的目标文件夹",
+            options=QFileDialog.Option.ShowDirsOnly,
+        )
+        if folder:
+            self.folder_path.setText(folder)
+            self._update_preview()
+
+    def _update_preview(self):
+        folder = self.folder_path.text() or "<未选择>"
+        suffix = self.suffix_edit.text().strip()
+        lines = []
+        for i, (_, data) in enumerate(self._items):
+            if i >= 5:
+                lines.append(f"  ... 共 {len(self._items)} 个文件")
+                break
+            name = data.name if data.name else f"dataset_{i}"
+            lines.append(f"  {name}{suffix}.mat")
+        self.preview.setPlainText(f"目标: {folder}\n\n" + "\n".join(lines))
 
     def on_data_added(self, key: int):
         data = self.data_manager.get(key)

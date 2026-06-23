@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 import pyqtgraph as pg
-
+from typing import Optional
 
 from processor._base_processor import BaseProcessorWidget
 from processor.step_algorithms import (
@@ -145,13 +145,13 @@ class RemoveStepByWindow(BaseProcessorWidget):
     def _init_plot(self):
         """初始化主图中的原始序列和一阶差分曲线。"""
         y_centered = self.y_data - np.nanmean(self.y_data)
-        self.y_line = pg.PlotCurveItem(
+        self.y_line = StepPlotWidget.make_curve(
             self.x_data, y_centered,
             pen=pg.mkPen(255, 0, 0, width=1), name="序列数值",
             autoDownsample=True, downsampleMethod='peak',
             clipToView=True, useOpenGL=True, connect='finite',
         )
-        self.dy_line = pg.PlotCurveItem(
+        self.dy_line = StepPlotWidget.make_curve(
             self.x_data[1:], self.diff_y_data,
             pen=pg.mkPen(0, 0, 255, width=1), name="序列一阶差分",
             autoDownsample=True, downsampleMethod='peak',

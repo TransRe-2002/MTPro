@@ -258,17 +258,17 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
             autoDownsample=True, downsampleMethod='peak',
             clipToView=True, useOpenGL=True, connect='finite',
         )
-        self.origin_line = pg.PlotCurveItem(
+        self.origin_line = StepPlotWidget.make_curve(
             self.x_data, self._display_values(self.origin_y_data),
             pen=pg.mkPen(120, 120, 120, width=1, style=Qt.PenStyle.DashLine),
             name="原始序列", **curve_opts,
         )
-        self.current_line = pg.PlotCurveItem(
+        self.current_line = StepPlotWidget.make_curve(
             self.x_data, self._display_values(self.y_data),
             pen=pg.mkPen(215, 48, 39, width=1),
             name="当前序列", **curve_opts,
         )
-        self.preview_line = pg.PlotCurveItem(
+        self.preview_line = StepPlotWidget.make_curve(
             pen=pg.mkPen(0, 114, 178, width=1),
             name="预览结果", **curve_opts,
         )
@@ -281,11 +281,11 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         self.signal_plot_item.addItem(self.current_line)
         self.signal_plot_item.addItem(self.preview_line)
 
-        self.current_noise_line = pg.PlotCurveItem(
+        self.current_noise_line = StepPlotWidget.make_curve(
             pen=pg.mkPen(215, 48, 39, width=1),
             name="当前拟合噪声", **curve_opts,
         )
-        self.preview_noise_line = pg.PlotCurveItem(
+        self.preview_noise_line = StepPlotWidget.make_curve(
             pen=pg.mkPen(0, 114, 178, width=1),
             name="预览拟合噪声", **curve_opts,
         )

@@ -405,10 +405,13 @@ class DataProcessLegacyWidget(QWidget):
             _log.info("_on_region_sync: no matching datasets")
             return
 
-        # ── Phase 2: 线程池并行修改 ────────────────────
+        # ── Phase 2: 线程池并行修改 + 预计算显示数据 ─────
+        from processor._display_utils import decimate_for_display
+
         def _modify(task):
             data_id, em_data, intervals = task
             results = []
+            x = em_data.datetime_index
             for ch in em_data.channel_names():
                 vals = em_data.data[ch].values.copy()
                 for left, right in intervals:
@@ -416,7 +419,9 @@ class DataProcessLegacyWidget(QWidget):
                 em_data.set_channel_series(ch, pd.Series(
                     vals, index=em_data.get_channel_series(ch).index, name=ch,
                 ))
-                results.append((data_id, ch, vals))
+                # 预计算显示降采样（worker 线程并行）
+                dx, dy = decimate_for_display(x, vals)
+                results.append((data_id, ch, vals, dx, dy))
             return results
 
         # ── 进度弹窗 ────────────────────────────────
@@ -447,13 +452,11 @@ class DataProcessLegacyWidget(QWidget):
         progress.setValue(total)
         QTimer.singleShot(5000, progress.close)
 
-        # ── Phase 3: 通过 Broker 排队刷新 UI（Broker 后台线程处理）──
-        for data_id, ch, vals in all_changes:
+        # ── Phase 3: 逐通道快速刷新（display 数据已预计算）──
+        for data_id, ch, vals, dx, dy in all_changes:
             self.broker.data_changed.emit(data_id, ch, vals)
         _log.info("_on_region_sync DONE: %d datasets, %d channels",
                   total, len(all_changes))
-        _log.info("_on_region_sync DONE: %d datasets, %d channels (%d workers)",
-                  total, len(changes), workers)
 
     def _on_tool_result_applied(self, data_id: int, channel: str) -> None:
         """Broker 确认结果写入后，关闭对应工具的子窗口。"""

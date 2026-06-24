@@ -165,6 +165,8 @@ class ProcessingBroker(QObject):
 
         不持锁遍历匹配，逐通道修改并实时 emit data_changed 驱动进度条。
         """
+        logger.info("Broker: apply_region_to_all START params=%s",
+                     {k: params.get(k) for k in ('npts', 'start_time', 'dt', 'source_data_id')})
         ref_npts: int = params["npts"]
         ref_start: float = params["start_time"]
         ref_dt: float = params["dt"]
@@ -176,12 +178,16 @@ class ProcessingBroker(QObject):
         locker = QMutexLocker(self._mutex)
         for data_id, em_data in list(self._data_manager.items()):
             if data_id == source_id:
+                logger.debug("Broker: skip source #%d", data_id)
                 continue
             if em_data.npts != ref_npts:
+                logger.debug("Broker: skip #%d npts mismatch %d != %d", data_id, em_data.npts, ref_npts)
                 continue
             if abs(em_data.start_time.timestamp() - ref_start) > ref_dt:
+                logger.debug("Broker: skip #%d start_time mismatch", data_id)
                 continue
             if abs(em_data.dt.total_seconds() - ref_dt) > 1e-9:
+                logger.debug("Broker: skip #%d dt mismatch", data_id)
                 continue
             for ch in em_data.channel_names():
                 da = em_data.data[ch]
@@ -190,6 +196,8 @@ class ProcessingBroker(QObject):
                 matched.append((data_id, ch, da.values.copy()))
         locker.unlock()
 
+        logger.info("Broker: matched %d channels across %d datasets",
+                     len(matched), len(set(d for d, _, _ in matched)))
         if not matched:
             return
 

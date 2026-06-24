@@ -613,7 +613,8 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             if widget is None:
                 continue
             widget.clear_curves()
-            y_vals = np.asarray(y_data.values - np.nanmean(y_data.values), dtype=np.float64)
+            mean = np.nanmean(y_data.values)
+            y_vals = np.asarray(y_data.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
             widget.add_curve(
                 x_data=x_vals,
                 y_data=y_vals,
@@ -702,7 +703,8 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         ch = self.em_data.get_channel_series(channel)
         widget = self.plot_rows[channel].widget
-        y_vals = np.asarray(ch.values - np.nanmean(ch.values), dtype=np.float64)
+        mean = np.nanmean(ch.values)
+        y_vals = np.asarray(ch.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
         if widget is not None:
             widget.clear_curves()
             widget.add_curve(x_vals, y_vals, channel, graph_type='plot')

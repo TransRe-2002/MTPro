@@ -407,12 +407,9 @@ class DataProcessLegacyWidget(QWidget):
             return
 
         # ── Phase 2: 线程池并行修改 ────────────────────
-        from processor._display_utils import decimate_for_display
-
         def _modify(task):
             data_id, em_data, intervals = task
             results = []
-            x = em_data.datetime_index
             for ch in em_data.channel_names():
                 vals = em_data.data[ch].values.copy()
                 for left, right in intervals:
@@ -420,8 +417,7 @@ class DataProcessLegacyWidget(QWidget):
                 em_data.set_channel_series(ch, pd.Series(
                     vals, index=em_data.get_channel_series(ch).index, name=ch,
                 ))
-                dx, dy = decimate_for_display(x, vals)
-                results.append((data_id, ch, vals, dx, dy))
+                results.append((data_id, ch))
             return results
 
         # ── 进度弹窗 ────────────────────────────────
@@ -434,12 +430,14 @@ class DataProcessLegacyWidget(QWidget):
         progress.show()
 
         # 按空闲内存动态限制并发数
-        mem_per_worker = tasks[0][1].npts * 8 * 2  # vals 拷贝 + 开销估算
+        # worker 逐通道顺序处理，同一时刻只持有一份 vals.copy()
+        em = tasks[0][1]
+        mem_per_worker = em.npts * 8
         avail_bytes = psutil.virtual_memory().available
         max_by_mem = max(1, int(avail_bytes / mem_per_worker / 2))
         workers = max(1, min((os.cpu_count() or 4) // 2, max_by_mem, total))
-        _log.info("_on_region_sync: %d workers (cpu=%d, mem_limit=%d)",
-                  workers, os.cpu_count() or 4, max_by_mem)
+        _log.info("_on_region_sync: %d workers (cpu=%d, mem=%.0fMB/ds, limit=%d)",
+                  workers, os.cpu_count() or 4, mem_per_worker / 1024 / 1024, max_by_mem)
         all_changes = []
         completed = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -459,8 +457,8 @@ class DataProcessLegacyWidget(QWidget):
         QTimer.singleShot(5000, progress.close)
 
         # ── Phase 3: 逐通道刷新 ────────────────────────
-        for data_id, ch, vals, _dx, _dy in all_changes:
-            self.broker.data_changed.emit(data_id, ch, vals)
+        for data_id, ch in all_changes:
+            self.change_finished_signal.emit(data_id, ch)
         _log.info("_on_region_sync DONE: %d datasets, %d channels",
                   total, len(all_changes))
 

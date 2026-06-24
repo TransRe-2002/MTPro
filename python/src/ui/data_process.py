@@ -301,7 +301,7 @@ class DataProcessLegacyWidget(QWidget):
             content_widget = RemoveRegion(data_id, channel_name)
             self._wire_tool(content_widget, data_id, channel_name)
             content_widget.channel_sync_requested.connect(self.broker.apply_result_all_channels)
-            content_widget.region_sync_requested.connect(self.broker.apply_region_to_all)
+            content_widget.region_sync_requested.connect(self._on_region_sync)
         elif tool_key == "remove spike":
             content_widget = RemoveSpike(data_id, channel_name)
             self._wire_tool(content_widget, data_id, channel_name)
@@ -368,6 +368,47 @@ class DataProcessLegacyWidget(QWidget):
         else:
             data.set_channel_data(channel, result)
         self.change_finished_signal.emit(data_id, channel)
+
+    def _on_region_sync(self, params: dict) -> None:
+        """RemoveRegion 跨数据集同步——由 data_process 做修改，Broker 只搬运数据。"""
+        time_ranges: list[tuple[float, float]] = params["time_ranges"]
+        source_id: int = params.get("source_data_id", -1)
+
+        synced = 0
+        for data_id, em_data in self.data_manager.items():
+            if data_id == source_id:
+                continue
+
+            npts = em_data.npts
+            start_ts = em_data.start_time.timestamp()
+            dt_sec = em_data.dt.total_seconds()
+
+            intervals = []
+            for t_start, t_end in time_ranges:
+                left = int((t_start - start_ts) / dt_sec)
+                right = int((t_end - start_ts) / dt_sec)
+                left = max(0, min(left, npts))
+                right = max(0, min(right, npts))
+                if right > left:
+                    intervals.append((left, right))
+
+            if not intervals:
+                continue
+
+            for ch in em_data.channel_names():
+                vals = em_data.data[ch].values.copy()
+                for left, right in intervals:
+                    vals[left:right] = np.nan
+                em_data.set_channel_series(ch, pd.Series(
+                    vals,
+                    index=em_data.get_channel_series(ch).index,
+                    name=ch,
+                ))
+            synced += 1
+
+        if synced > 0:
+            logger = __import__('logging').getLogger(__name__)
+            logger.info("Region synced to %d other datasets", synced)
 
     def _on_tool_result_applied(self, data_id: int, channel: str) -> None:
         """Broker 确认结果写入后，关闭对应工具的子窗口。"""

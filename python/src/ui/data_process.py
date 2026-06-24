@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QMessageBox,
-    QProgressDialog,
 )
 
 from base.data_manager import DataManager
@@ -302,9 +301,6 @@ class DataProcessLegacyWidget(QWidget):
             content_widget = RemoveRegion(data_id, channel_name)
             self._wire_tool(content_widget, data_id, channel_name)
             content_widget.channel_sync_requested.connect(self.broker.apply_result_all_channels)
-            content_widget.region_sync_requested.connect(
-                lambda params: self._on_region_sync_begin(params)
-            )
             content_widget.region_sync_requested.connect(self.broker.apply_region_to_all)
         elif tool_key == "remove spike":
             content_widget = RemoveSpike(data_id, channel_name)
@@ -372,30 +368,6 @@ class DataProcessLegacyWidget(QWidget):
         else:
             data.set_channel_data(channel, result)
         self.change_finished_signal.emit(data_id, channel)
-
-    def _on_region_sync_begin(self, params: dict) -> None:
-        """跨数据集同步开始时显示进度弹窗（Broker 信号驱动计数）。"""
-        progress = QProgressDialog("正在同步到其他数据集...", None, 0, 0, self)
-        progress.setWindowTitle("批量同步")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        progress.show()
-
-        count = [0]
-
-        def _on_changed(did, ch, _vals):
-            count[0] += 1
-            progress.setLabelText(f"已同步 {count[0]} 个通道...")
-
-        self.broker.data_changed.connect(_on_changed)
-
-        def _on_done(did, ch):
-            self.broker.data_changed.disconnect(_on_changed)
-            self.broker.result_applied.disconnect(_on_done)
-            progress.close()
-
-        self.broker.result_applied.connect(_on_done)
 
     def _on_tool_result_applied(self, data_id: int, channel: str) -> None:
         """Broker 确认结果写入后，关闭对应工具的子窗口。"""

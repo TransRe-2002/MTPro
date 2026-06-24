@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import sys
 from typing import Callable, Optional
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 

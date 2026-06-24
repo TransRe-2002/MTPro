@@ -406,9 +406,12 @@ class DataProcessLegacyWidget(QWidget):
             return
 
         # ── Phase 2: 线程池并行修改 ────────────────────
+        from processor._display_utils import decimate_for_display
+
         def _modify(task):
             data_id, em_data, intervals = task
             results = []
+            x = em_data.datetime_index
             for ch in em_data.channel_names():
                 vals = em_data.data[ch].values.copy()
                 for left, right in intervals:
@@ -416,7 +419,8 @@ class DataProcessLegacyWidget(QWidget):
                 em_data.set_channel_series(ch, pd.Series(
                     vals, index=em_data.get_channel_series(ch).index, name=ch,
                 ))
-                results.append((data_id, ch, vals))
+                dx, dy = decimate_for_display(x, vals)
+                results.append((data_id, ch, vals, dx, dy))
             return results
 
         # ── 进度弹窗 ────────────────────────────────
@@ -448,7 +452,7 @@ class DataProcessLegacyWidget(QWidget):
         QTimer.singleShot(5000, progress.close)
 
         # ── Phase 3: 逐通道刷新 ────────────────────────
-        for data_id, ch, vals in all_changes:
+        for data_id, ch, vals, _dx, _dy in all_changes:
             self.broker.data_changed.emit(data_id, ch, vals)
         _log.info("_on_region_sync DONE: %d datasets, %d channels",
                   total, len(all_changes))

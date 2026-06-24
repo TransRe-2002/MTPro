@@ -8,4 +8,5 @@ h5py>=3.13
 pytz>=2026.1
 xarray>=2026.4
 pyqtgraph>=0.14
+psutil>=7.0
 # rust_lib (optional, local Rust extension — built via: cd rust_lib && maturin build --release && pip install target/wheels/*.whl)

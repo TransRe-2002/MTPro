@@ -416,7 +416,7 @@ class DataProcessLegacyWidget(QWidget):
                 em_data.set_channel_series(ch, pd.Series(
                     vals, index=em_data.get_channel_series(ch).index, name=ch,
                 ))
-                results.append((data_id, ch))
+                results.append((data_id, ch, vals))
             return results
 
         # ── 进度弹窗 ────────────────────────────────
@@ -428,14 +428,14 @@ class DataProcessLegacyWidget(QWidget):
         progress.setValue(0)
         progress.show()
 
-        workers = 1  # 逐个处理，进度条逐步推进
-        changes = []
+        workers = max(1, min(os.cpu_count() or 4, total))
+        all_changes = []
         completed = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_modify, t): t for t in tasks}
             for future in as_completed(futures):
                 try:
-                    changes.extend(future.result())
+                    all_changes.extend(future.result())
                 except Exception:
                     data_id = futures[future][0]
                     _log.exception("_on_region_sync: failed for dataset #%d", data_id)
@@ -447,9 +447,11 @@ class DataProcessLegacyWidget(QWidget):
         progress.setValue(total)
         QTimer.singleShot(5000, progress.close)
 
-        # ── Phase 3: 主线程发信号 ──────────────────────
-        for data_id, ch in changes:
-            self.change_finished_signal.emit(data_id, ch)
+        # ── Phase 3: 通过 Broker 排队刷新 UI（Broker 后台线程处理）──
+        for data_id, ch, vals in all_changes:
+            self.broker.data_changed.emit(data_id, ch, vals)
+        _log.info("_on_region_sync DONE: %d datasets, %d channels",
+                  total, len(all_changes))
         _log.info("_on_region_sync DONE: %d datasets, %d channels (%d workers)",
                   total, len(changes), workers)
 

@@ -186,6 +186,17 @@ class RegionPlotWidget(pg.PlotWidget):
         self._regions.clear()
         self._on_region_changed()
 
+    def get_region_time_ranges(self) -> List[Tuple[float, float]]:
+        """返回所有蓝色区域的时间范围列表 [(start_ts, end_ts), ...]。"""
+        ranges = []
+        for region in self._regions:
+            try:
+                xmin, xmax = region.getRegion()
+                ranges.append((float(xmin), float(xmax)))
+            except Exception as e:
+                logger.warning("获取区域时间范围出错: %s", e)
+        return ranges
+
     # ─── 区间计算 ────────────────────────────────────────────────
 
     def _get_selected_intervals(self) -> List[Tuple[int, int]]:
@@ -738,17 +749,12 @@ class RemoveRegion(QtWidgets.QWidget):
 
         logger.info("RemoveRegion confirmed, returning %s points", len(result))
 
-        # "应用到所有数据" → 信号
+        # "应用到所有数据" → 发送时间范围
         if self.all_data_checkbox.isChecked():
-            origin = self.origin_all_channels[self.ch_name]
-            deleted_mask = np.isnan(result) & ~np.isnan(origin)
-            sync_indices = np.where(deleted_mask)[0]
-            if len(sync_indices) > 0:
+            time_ranges = self.plot_widget.get_region_time_ranges()
+            if time_ranges:
                 self.region_sync_requested.emit({
-                    "deleted_indices": sync_indices,
-                    "npts": self._pkg['npts'],
-                    "start_time": self._pkg['start_time'],
-                    "dt": self._pkg['dt'],
+                    "time_ranges": time_ranges,
                     "source_data_id": self.data_id,
                 })
 

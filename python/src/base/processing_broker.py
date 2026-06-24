@@ -163,58 +163,51 @@ class ProcessingBroker(QObject):
     def apply_region_to_all(self, params: dict) -> None:
         """RemoveRegion 跨数据集同步。
 
-        不持锁遍历匹配，逐通道修改并实时 emit data_changed 驱动进度条。
+        接收时间范围列表，对 DataManager 中每个数据集独立计算索引并置 NaN。
+        不再依赖 npts/dt/startTime 匹配——每个 EMData 用自身参数。
         """
-        logger.info("Broker: apply_region_to_all START params=%s",
-                     {k: params.get(k) for k in ('npts', 'start_time', 'dt', 'source_data_id')})
-        ref_npts: int = params["npts"]
-        ref_start: float = params["start_time"]
-        ref_dt: float = params["dt"]
-        indices: np.ndarray = params["deleted_indices"]
+        time_ranges: list[tuple[float, float]] = params["time_ranges"]
         source_id: int = params.get("source_data_id", -1)
 
-        # ── Phase 1: 收集匹配的数据集 + 通道 ──────────────
-        matched: list[tuple[int, str, np.ndarray]] = []  # (data_id, ch, vals_copy)
+        synced = 0
         locker = QMutexLocker(self._mutex)
         for data_id, em_data in list(self._data_manager.items()):
             if data_id == source_id:
-                logger.debug("Broker: skip source #%d", data_id)
                 continue
-            if em_data.npts != ref_npts:
-                logger.debug("Broker: skip #%d npts mismatch %d != %d", data_id, em_data.npts, ref_npts)
+            npts = em_data.npts
+            start_ts = em_data.start_time.timestamp()
+            dt_sec = em_data.dt.total_seconds()
+
+            # 根据时间范围计算索引
+            indices_list = []
+            for t_start, t_end in time_ranges:
+                left = int((t_start - start_ts) / dt_sec)
+                right = int((t_end - start_ts) / dt_sec)
+                left = max(0, min(left, npts))
+                right = max(0, min(right, npts))
+                if right > left:
+                    indices_list.append((left, right))
+
+            if not indices_list:
                 continue
-            if abs(em_data.start_time.timestamp() - ref_start) > ref_dt:
-                logger.debug("Broker: skip #%d start_time mismatch", data_id)
-                continue
-            if abs(em_data.dt.total_seconds() - ref_dt) > 1e-9:
-                logger.debug("Broker: skip #%d dt mismatch", data_id)
-                continue
+
             for ch in em_data.channel_names():
                 da = em_data.data[ch]
-                if len(da.values) != ref_npts:
+                if len(da.values) != npts:
                     continue
-                matched.append((data_id, ch, da.values.copy()))
+                vals = da.values.copy()
+                for left, right in indices_list:
+                    vals[left:right] = np.nan
+                em_data.data[ch] = xr.DataArray(
+                    vals, dims=da.dims, coords=da.coords,
+                )
+                self.data_changed.emit(data_id, ch, vals)
+            synced += 1
         locker.unlock()
 
-        logger.info("Broker: matched %d channels across %d datasets",
-                     len(matched), len(set(d for d, _, _ in matched)))
-        if not matched:
-            return
-
-        # ── Phase 2: 逐通道修改 + 写回 + 发信号 ───────────
-        synced = set()
-        for data_id, ch, vals in matched:
-            vals[indices] = np.nan
-            em = self._safe_get(data_id)
-            if em is not None:
-                em.data[ch] = xr.DataArray(
-                    vals, dims=em.data[ch].dims, coords=em.data[ch].coords,
-                )
-            self.data_changed.emit(data_id, ch, vals)
-            synced.add(data_id)
-
-        logger.info("Broker: synced region deletion to %d datasets (%d channels)",
-                     len(synced), len(matched))
+        if synced > 0:
+            logger.info("Broker: synced region deletion to %d datasets (time ranges: %s)",
+                         synced, time_ranges)
 
     # ─── 内部 ────────────────────────────────────────────────────
 

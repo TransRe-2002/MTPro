@@ -30,7 +30,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QMessageBox,
+    QProgressDialog,
 )
+from PySide6.QtCore import QTimer
 
 from base.data_manager import DataManager
 from core.em_data import EMData
@@ -417,8 +419,18 @@ class DataProcessLegacyWidget(QWidget):
                 results.append((data_id, ch))
             return results
 
-        workers = max(1, min(os.cpu_count() or 4, len(tasks)))
+        # ── 进度弹窗 ────────────────────────────────
+        total = len(tasks)
+        progress = QProgressDialog("正在同步到其他数据集...", None, 0, total, self)
+        progress.setWindowTitle("批量同步")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+
+        workers = max(1, min(os.cpu_count() or 4, total))
         changes = []
+        completed = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_modify, t): t for t in tasks}
             for future in as_completed(futures):
@@ -427,12 +439,19 @@ class DataProcessLegacyWidget(QWidget):
                 except Exception:
                     data_id = futures[future][0]
                     _log.exception("_on_region_sync: failed for dataset #%d", data_id)
+                completed += 1
+                progress.setValue(completed)
+                progress.setLabelText(f"已完成 {completed}/{total} 个数据集")
+
+        progress.setLabelText(f"全部完成 ({total} 个数据集)")
+        progress.setValue(total)
+        QTimer.singleShot(5000, progress.close)
 
         # ── Phase 3: 主线程发信号 ──────────────────────
         for data_id, ch in changes:
             self.change_finished_signal.emit(data_id, ch)
         _log.info("_on_region_sync DONE: %d datasets, %d channels (%d workers)",
-                  len(tasks), len(changes), workers)
+                  total, len(changes), workers)
 
     def _on_tool_result_applied(self, data_id: int, channel: str) -> None:
         """Broker 确认结果写入后，关闭对应工具的子窗口。"""

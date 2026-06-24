@@ -54,6 +54,7 @@ class RegionPlotWidget(pg.PlotWidget):
         self._display_x: Optional[np.ndarray] = None
         self._display_y: Optional[np.ndarray] = None
         self.deletion_history: List[np.ndarray] = []
+        self._last_deleted_time_ranges: List[Tuple[float, float]] = []
 
         # 区域管理
         self._regions: List[pg.LinearRegionItem] = []
@@ -108,6 +109,7 @@ class RegionPlotWidget(pg.PlotWidget):
         self._display_x = None
         self._display_y = None
         self.deletion_history.clear()
+        self._last_deleted_time_ranges = []
         self._last_emitted_count = -1
 
     def revert_to_original_data(self) -> None:
@@ -391,6 +393,9 @@ class RegionPlotWidget(pg.PlotWidget):
         if not intervals:
             return
 
+        # 保存时间范围（供 _confirm_and_close 跨数据集同步使用）
+        self._last_deleted_time_ranges = self.get_region_time_ranges()
+
         idx_arrays = [np.arange(start, end, dtype=np.int64) for start, end in intervals]
         all_indices = np.concatenate(idx_arrays) if idx_arrays else np.array([], dtype=np.int64)
 
@@ -419,6 +424,7 @@ class RegionPlotWidget(pg.PlotWidget):
         for region in self._regions:
             self.removeItem(region)
         self._regions.clear()
+        self._last_deleted_time_ranges = []
 
         self._refresh_display_data()
         self._on_region_changed()
@@ -749,9 +755,9 @@ class RemoveRegion(QtWidgets.QWidget):
 
         logger.info("RemoveRegion confirmed, returning %s points", len(result))
 
-        # "应用到所有数据" → 发送时间范围
+        # "应用到所有数据" → 发送时间范围（从上次删除操作保存）
         if self.all_data_checkbox.isChecked():
-            time_ranges = self.plot_widget.get_region_time_ranges()
+            time_ranges = self.plot_widget._last_deleted_time_ranges
             if time_ranges:
                 self.region_sync_requested.emit({
                     "time_ranges": time_ranges,

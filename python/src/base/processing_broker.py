@@ -13,7 +13,6 @@
 """
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import numpy as np
@@ -162,11 +161,9 @@ class ProcessingBroker(QObject):
 
     @Slot(object)
     def apply_region_to_all(self, params: dict) -> None:
-        """RemoveRegion 跨数据集同步（两阶段 + 并行修改）。
+        """RemoveRegion 跨数据集同步。
 
-        Phase 1: 持锁遍历 DataManager，筛选匹配的数据集。
-        Phase 2: 线程池并行修改各数据集的通道数据（各 EMData 独立，无需加锁）。
-        Phase 3: 回到主线程逐条 emit data_changed。
+        不持锁遍历匹配，逐通道修改并实时 emit data_changed 驱动进度条。
         """
         ref_npts: int = params["npts"]
         ref_start: float = params["start_time"]
@@ -174,8 +171,8 @@ class ProcessingBroker(QObject):
         indices: np.ndarray = params["deleted_indices"]
         source_id: int = params.get("source_data_id", -1)
 
-        # ── Phase 1: 匹配 ──────────────────────────────────────
-        matched: list[tuple[int, object]] = []  # (data_id, em_data)
+        # ── Phase 1: 收集匹配的数据集 + 通道 ──────────────
+        matched: list[tuple[int, str, np.ndarray]] = []  # (data_id, ch, vals_copy)
         locker = QMutexLocker(self._mutex)
         for data_id, em_data in list(self._data_manager.items()):
             if data_id == source_id:
@@ -186,46 +183,30 @@ class ProcessingBroker(QObject):
                 continue
             if abs(em_data.dt.total_seconds() - ref_dt) > 1e-9:
                 continue
-            matched.append((data_id, em_data))
+            for ch in em_data.channel_names():
+                da = em_data.data[ch]
+                if len(da.values) != ref_npts:
+                    continue
+                matched.append((data_id, ch, da.values.copy()))
         locker.unlock()
 
         if not matched:
             return
 
-        # ── Phase 2: 并行修改（展平到通道级别）─────────────────
-        tasks: list[tuple[int, str, np.ndarray]] = []
-        for data_id, em_data in matched:
-            for ch in em_data.channel_names():
-                da = em_data.data[ch]
-                if len(da.values) != ref_npts:
-                    continue
-                tasks.append((data_id, ch, da.values.copy()))
-
-        if not tasks:
-            return
-
-        def _modify_channel(task):
-            data_id, ch, vals = task
+        # ── Phase 2: 逐通道修改 + 写回 + 发信号 ───────────
+        synced = set()
+        for data_id, ch, vals in matched:
             vals[indices] = np.nan
-            return (data_id, ch, vals)
-
-        changes = []
-        with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as pool:
-            futures = [pool.submit(_modify_channel, t) for t in tasks]
-            for future in as_completed(futures):
-                changes.append(future.result())
-
-        # ── Phase 3: 写回 + 发信号 ─────────────────────────────
-        for data_id, ch, vals in changes:
             em = self._safe_get(data_id)
             if em is not None:
                 em.data[ch] = xr.DataArray(
                     vals, dims=em.data[ch].dims, coords=em.data[ch].coords,
                 )
             self.data_changed.emit(data_id, ch, vals)
+            synced.add(data_id)
 
         logger.info("Broker: synced region deletion to %d datasets (%d channels)",
-                     len(matched), len(changes))
+                     len(synced), len(matched))
 
     # ─── 内部 ────────────────────────────────────────────────────
 

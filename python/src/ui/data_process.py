@@ -406,10 +406,14 @@ class DataProcessLegacyWidget(QWidget):
             _log.info("_on_region_sync: no matching datasets")
             return
 
-        # ── Phase 2: 线程池并行修改 ────────────────────
+        # ── Phase 2: 线程池并行修改 + 预计算显示数据 ────
+        from processor._display_utils import decimate_for_display
+        from utils.series import dti_to_numpy
+
         def _modify(task):
             data_id, em_data, intervals = task
-            results = []
+            x = dti_to_numpy(em_data.datetime_index)
+            display = {}
             for ch in em_data.channel_names():
                 vals = em_data.data[ch].values.copy()
                 for left, right in intervals:
@@ -417,10 +421,13 @@ class DataProcessLegacyWidget(QWidget):
                 em_data.set_channel_series(ch, pd.Series(
                     vals, index=em_data.get_channel_series(ch).index, name=ch,
                 ))
-                results.append((data_id, ch))
-            return results
+                m = np.nanmean(vals)
+                dy = vals - (m if np.isfinite(m) else 0.0)
+                dx, dy_d = decimate_for_display(x, dy)
+                display[ch] = (dx, dy_d)
+            return (data_id, display)
 
-        # ── 进度弹窗 ────────────────────────────────
+        # ── 进度弹窗：Phase 2 ────────────────────────
         total = len(tasks)
         progress = QProgressDialog("正在同步到其他数据集...", None, 0, total, self)
         progress.setWindowTitle("批量同步")
@@ -429,21 +436,21 @@ class DataProcessLegacyWidget(QWidget):
         progress.setValue(0)
         progress.show()
 
-        # 按空闲内存动态限制并发数（每个 worker 预留至少 1GB）
         em = tasks[0][1]
         mem_per_worker = max(em.npts * 8, 1024**3)
         avail_bytes = psutil.virtual_memory().available
         max_by_mem = max(1, int(avail_bytes / mem_per_worker / 2))
         workers = max(1, min((os.cpu_count() or 4) // 2, max_by_mem, total))
-        _log.info("_on_region_sync: %d workers (cpu=%d, mem=%.0fMB/ds, limit=%d)",
-                  workers, os.cpu_count() or 4, mem_per_worker / 1024 / 1024, max_by_mem)
-        all_changes = []
+        _log.info("_on_region_sync: %d workers", workers)
+
+        displays: dict[int, dict] = {}  # data_id → {ch: (dx, dy)}
         completed = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_modify, t): t for t in tasks}
             for future in as_completed(futures):
                 try:
-                    all_changes.extend(future.result())
+                    data_id, display = future.result()
+                    displays[data_id] = display
                 except Exception:
                     data_id = futures[future][0]
                     _log.exception("_on_region_sync: failed for dataset #%d", data_id)
@@ -454,17 +461,34 @@ class DataProcessLegacyWidget(QWidget):
         progress.setLabelText(f"全部完成 ({total} 个数据集)")
         progress.setValue(total)
 
-        # Phase 3: 延迟到进度条关闭后，按数据集批量刷新
-        synced_ids = list(set(d for d, _ in all_changes))
-        def _refresh_next(idx=0):
-            if idx == 0:
-                progress.close()
-            if idx >= len(synced_ids):
-                return
-            self.change_finished_signal.emit(synced_ids[idx], "")  # 空 channel = 全刷新
-            QTimer.singleShot(100, lambda: _refresh_next(idx + 1))
+        # ── Phase 3: 主线程快速应用显示数据 ────────────
+        self._apply_displays(displays, progress)
+        QTimer.singleShot(5000, progress.close)
 
-        QTimer.singleShot(2000, lambda: _refresh_next(0))
+    def _apply_displays(self, displays: dict, progress) -> None:
+        """在主线程应用预计算的显示数据。"""
+        from PySide6.QtWidgets import QApplication
+        mainwindow = None
+        for widget in QApplication.instance().topLevelWidgets():
+            if hasattr(widget, 'data_viewers'):
+                mainwindow = widget
+                break
+        if mainwindow is None:
+            return
+
+        applied = 0
+        for data_id, channels in displays.items():
+            viewer = mainwindow.data_viewers.get(data_id)
+            if viewer is None:
+                continue
+            for ch, (dx, dy) in channels.items():
+                if ch in viewer.plot_rows:
+                    widget = viewer.plot_rows[ch].widget
+                    if ch in widget.curves:
+                        widget.curves[ch].setData(dx, dy)
+            applied += 1
+            progress.setLabelText(f"正在刷新波形 {applied}/{len(displays)} 个数据集")
+        progress.setLabelText(f"刷新完成 ({len(displays)} 个数据集)")
 
         QTimer.singleShot(2000, _refresh)
         _log.info("_on_region_sync DONE: %d datasets, %d channels",

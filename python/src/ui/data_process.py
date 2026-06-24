@@ -371,12 +371,17 @@ class DataProcessLegacyWidget(QWidget):
 
     def _on_region_sync(self, params: dict) -> None:
         """RemoveRegion 跨数据集同步——由 data_process 做修改，Broker 只搬运数据。"""
+        import logging
+        _log = logging.getLogger(__name__)
         time_ranges: list[tuple[float, float]] = params["time_ranges"]
         source_id: int = params.get("source_data_id", -1)
+        _log.info("_on_region_sync START: source=#%d, ranges=%s", source_id, time_ranges)
 
         synced = 0
+        _log.info("_on_region_sync: iterating %d datasets", len(list(self.data_manager.items())))
         for data_id, em_data in self.data_manager.items():
             if data_id == source_id:
+                _log.debug("_on_region_sync: skip source #%d", data_id)
                 continue
 
             npts = em_data.npts
@@ -404,11 +409,11 @@ class DataProcessLegacyWidget(QWidget):
                     index=em_data.get_channel_series(ch).index,
                     name=ch,
                 ))
+                self.change_finished_signal.emit(data_id, ch)
             synced += 1
+            _log.info("_on_region_sync: modified #%d (%d channels)", data_id, len(em_data.channel_names()))
 
-        if synced > 0:
-            logger = __import__('logging').getLogger(__name__)
-            logger.info("Region synced to %d other datasets", synced)
+        _log.info("_on_region_sync DONE: %d datasets", synced)
 
     def _on_tool_result_applied(self, data_id: int, channel: str) -> None:
         """Broker 确认结果写入后，关闭对应工具的子窗口。"""

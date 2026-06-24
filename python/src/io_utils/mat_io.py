@@ -258,7 +258,7 @@ class MatSaver(EMDataSaver):
             em_data.update_meta()
             if hasattr(em_data, "mat_meta"):
                 key = em_data._struct_key
-                _save_mat_v73(path, {key: em_data.mat_meta[key]})
+                savemat(path, {key: em_data.mat_meta[key]})
             else:
                 raise TypeError(f"{type(em_data).__name__} is missing 'mat_meta' attribute")
         else:

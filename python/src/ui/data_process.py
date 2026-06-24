@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import sys
 from typing import Callable, Optional
@@ -371,24 +373,21 @@ class DataProcessLegacyWidget(QWidget):
         self.change_finished_signal.emit(data_id, channel)
 
     def _on_region_sync(self, params: dict) -> None:
-        """RemoveRegion 跨数据集同步——由 data_process 做修改，Broker 只搬运数据。"""
+        """RemoveRegion 跨数据集同步——线程池并行，每个数据集一个 worker。"""
         import logging
         _log = logging.getLogger(__name__)
         time_ranges: list[tuple[float, float]] = params["time_ranges"]
         source_id: int = params.get("source_data_id", -1)
         _log.info("_on_region_sync START: source=#%d, ranges=%s", source_id, time_ranges)
 
-        synced = 0
-        _log.info("_on_region_sync: iterating %d datasets", len(list(self.data_manager.items())))
+        # ── Phase 1: 准备任务 ──────────────────────────
+        tasks = []
         for data_id, em_data in self.data_manager.items():
             if data_id == source_id:
-                _log.debug("_on_region_sync: skip source #%d", data_id)
                 continue
-
             npts = em_data.npts
             start_ts = em_data.start_time.timestamp()
             dt_sec = em_data.dt.total_seconds()
-
             intervals = []
             for t_start, t_end in time_ranges:
                 left = int((t_start - start_ts) / dt_sec)
@@ -397,24 +396,43 @@ class DataProcessLegacyWidget(QWidget):
                 right = max(0, min(right, npts))
                 if right > left:
                     intervals.append((left, right))
+            if intervals:
+                tasks.append((data_id, em_data, intervals))
 
-            if not intervals:
-                continue
+        if not tasks:
+            _log.info("_on_region_sync: no matching datasets")
+            return
 
+        # ── Phase 2: 线程池并行修改 ────────────────────
+        def _modify(task):
+            data_id, em_data, intervals = task
+            results = []
             for ch in em_data.channel_names():
                 vals = em_data.data[ch].values.copy()
                 for left, right in intervals:
                     vals[left:right] = np.nan
                 em_data.set_channel_series(ch, pd.Series(
-                    vals,
-                    index=em_data.get_channel_series(ch).index,
-                    name=ch,
+                    vals, index=em_data.get_channel_series(ch).index, name=ch,
                 ))
-                self.change_finished_signal.emit(data_id, ch)
-            synced += 1
-            _log.info("_on_region_sync: modified #%d (%d channels)", data_id, len(em_data.channel_names()))
+                results.append((data_id, ch))
+            return results
 
-        _log.info("_on_region_sync DONE: %d datasets", synced)
+        workers = max(1, min(os.cpu_count() or 4, len(tasks)))
+        changes = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_modify, t): t for t in tasks}
+            for future in as_completed(futures):
+                try:
+                    changes.extend(future.result())
+                except Exception:
+                    data_id = futures[future][0]
+                    _log.exception("_on_region_sync: failed for dataset #%d", data_id)
+
+        # ── Phase 3: 主线程发信号 ──────────────────────
+        for data_id, ch in changes:
+            self.change_finished_signal.emit(data_id, ch)
+        _log.info("_on_region_sync DONE: %d datasets, %d channels (%d workers)",
+                  len(tasks), len(changes), workers)
 
     def _on_tool_result_applied(self, data_id: int, channel: str) -> None:
         """Broker 确认结果写入后，关闭对应工具的子窗口。"""

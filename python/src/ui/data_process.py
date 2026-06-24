@@ -453,11 +453,20 @@ class DataProcessLegacyWidget(QWidget):
 
         progress.setLabelText(f"全部完成 ({total} 个数据集)")
         progress.setValue(total)
-        QTimer.singleShot(5000, progress.close)
 
-        # ── Phase 3: 逐通道刷新 ────────────────────────
-        for data_id, ch in all_changes:
-            self.change_finished_signal.emit(data_id, ch)
+        # Phase 3: 延迟到进度条关闭后，按数据集批量刷新
+        synced_ids = list(set(d for d, _ in all_changes))
+        def _refresh_next(idx=0):
+            if idx == 0:
+                progress.close()
+            if idx >= len(synced_ids):
+                return
+            self.change_finished_signal.emit(synced_ids[idx], "")  # 空 channel = 全刷新
+            QTimer.singleShot(100, lambda: _refresh_next(idx + 1))
+
+        QTimer.singleShot(2000, lambda: _refresh_next(0))
+
+        QTimer.singleShot(2000, _refresh)
         _log.info("_on_region_sync DONE: %d datasets, %d channels",
                   total, len(all_changes))
 

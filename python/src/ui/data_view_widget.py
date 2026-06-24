@@ -690,8 +690,11 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         self._apply_jump(start_duration, end_duration)                      # Mixin
 
     def on_change_data_finished(self, channel: str) -> None:
-        """外部通知某通道数据已更新，刷新对应通道的 BriefPlot。"""
+        """外部通知某通道（或全部通道）数据已更新。"""
         if self.em_data is None:
+            return
+        if channel == "":
+            self._refresh_plots()
             return
         x_vals = dti_to_numpy(self.em_data.datetime_index)
 

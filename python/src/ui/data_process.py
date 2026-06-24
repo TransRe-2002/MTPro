@@ -429,10 +429,9 @@ class DataProcessLegacyWidget(QWidget):
         progress.setValue(0)
         progress.show()
 
-        # 按空闲内存动态限制并发数
-        # worker 逐通道顺序处理，同一时刻只持有一份 vals.copy()
+        # 按空闲内存动态限制并发数（每个 worker 预留至少 1GB）
         em = tasks[0][1]
-        mem_per_worker = em.npts * 8
+        mem_per_worker = max(em.npts * 8, 1024**3)
         avail_bytes = psutil.virtual_memory().available
         max_by_mem = max(1, int(avail_bytes / mem_per_worker / 2))
         workers = max(1, min((os.cpu_count() or 4) // 2, max_by_mem, total))

@@ -428,7 +428,7 @@ class DataProcessLegacyWidget(QWidget):
         progress.setValue(0)
         progress.show()
 
-        workers = max(1, min(os.cpu_count() or 4, total))
+        workers = 1  # 逐个处理，进度条逐步推进
         changes = []
         completed = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:

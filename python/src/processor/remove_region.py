@@ -54,8 +54,7 @@ class RegionPlotWidget(pg.PlotWidget):
         self._display_x: Optional[np.ndarray] = None
         self._display_y: Optional[np.ndarray] = None
         self.deletion_history: List[np.ndarray] = []
-        self.deletion_history_regions: List[List[int]] = []  # 每次删除对应的 region 索引
-        self._last_region_count: int = 0
+        self.deletion_history_ranges: List[List[Tuple[float, float]]] = []  # 每次删除的时间范围
 
         # 区域管理
         self._regions: List[pg.LinearRegionItem] = []
@@ -110,8 +109,7 @@ class RegionPlotWidget(pg.PlotWidget):
         self._display_x = None
         self._display_y = None
         self.deletion_history.clear()
-        self.deletion_history_regions.clear()
-        self._last_region_count = 0
+        self.deletion_history_ranges.clear()
         self._last_emitted_count = -1
 
     def revert_to_original_data(self) -> None:
@@ -402,10 +400,11 @@ class RegionPlotWidget(pg.PlotWidget):
             self.y_data[start:end] = np.nan
 
         self.deletion_history.append(all_indices)
-        # 只记录本次新增的 region（自上次删除以来），撤销时才删这些
-        prev_count = self._last_region_count
-        self._last_region_count = len(self._regions)
-        self.deletion_history_regions.append(list(range(prev_count, self._last_region_count)))
+        # 保存时间范围，然后立刻清除区域
+        self.deletion_history_ranges.append(self.get_region_time_ranges())
+        for region in self._regions:
+            self.removeItem(region)
+        self._regions.clear()
 
         self._refresh_display_data()
         self._on_region_changed()
@@ -416,24 +415,30 @@ class RegionPlotWidget(pg.PlotWidget):
             return
 
         last_deletion = self.deletion_history.pop()
-        region_indices = self.deletion_history_regions.pop() if self.deletion_history_regions else []
+        ranges = self.deletion_history_ranges.pop() if self.deletion_history_ranges else []
 
         if self.origin_y_data is not None:
             self.y_data[last_deletion] = self.origin_y_data[last_deletion]
 
-        # 删掉本次操作新增的 region
-        for idx in sorted(region_indices, reverse=True):
-            if idx < len(self._regions):
-                self.removeItem(self._regions[idx])
-                del self._regions[idx]
-        # 回退 region 计数
-        self._last_region_count = (
-            self.deletion_history_regions[-1][0] if self.deletion_history_regions else 0
-        )
+        # 用保存的时间范围重建区域
+        for start_ts, end_ts in ranges:
+            self._add_region_at(start_ts, end_ts)
 
         self._refresh_display_data()
         self._on_region_changed()
         self.data_restored.emit(last_deletion)
+
+    def _add_region_at(self, start_x: float, end_x: float) -> None:
+        """用精确边界重建 LinearRegionItem。"""
+        region = pg.LinearRegionItem(values=[start_x, end_x], movable=True)
+        border_pen = pg.mkPen(color=(65, 105, 225), width=4)
+        region.lines[0].setPen(border_pen)
+        region.lines[1].setPen(border_pen)
+        region.setBrush(pg.mkBrush(135, 206, 250, 80))
+        self.addItem(region)
+        self._regions.append(region)
+        region.sigRegionChanged.connect(self._on_region_changed_lightweight)
+        region.sigRegionChangeFinished.connect(self._on_region_changed)
 
 
 class RemoveRegion(QtWidgets.QWidget):
@@ -760,9 +765,9 @@ class RemoveRegion(QtWidgets.QWidget):
 
         logger.info("RemoveRegion confirmed, returning %s points", len(result))
 
-        # "应用到所有数据" → 发送时间范围（region 已保留，直接获取）
+        # "应用到所有数据" → 发送本次删除的时间范围
         if self.all_data_checkbox.isChecked():
-            time_ranges = self.plot_widget.get_region_time_ranges()
+            time_ranges = self.plot_widget.deletion_history_ranges[-1] if self.plot_widget.deletion_history_ranges else []
             if time_ranges:
                 self.region_sync_requested.emit({
                     "time_ranges": time_ranges,

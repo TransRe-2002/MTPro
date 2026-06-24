@@ -55,6 +55,7 @@ class RegionPlotWidget(pg.PlotWidget):
         self._display_y: Optional[np.ndarray] = None
         self.deletion_history: List[np.ndarray] = []
         self.deletion_history_regions: List[List[int]] = []  # 每次删除对应的 region 索引
+        self._last_region_count: int = 0
 
         # 区域管理
         self._regions: List[pg.LinearRegionItem] = []
@@ -110,6 +111,7 @@ class RegionPlotWidget(pg.PlotWidget):
         self._display_y = None
         self.deletion_history.clear()
         self.deletion_history_regions.clear()
+        self._last_region_count = 0
         self._last_emitted_count = -1
 
     def revert_to_original_data(self) -> None:
@@ -400,8 +402,10 @@ class RegionPlotWidget(pg.PlotWidget):
             self.y_data[start:end] = np.nan
 
         self.deletion_history.append(all_indices)
-        # 记录本次使用的 region 索引（不删 region），撤销时才删
-        self.deletion_history_regions.append(list(range(len(self._regions))))
+        # 只记录本次新增的 region（自上次删除以来），撤销时才删这些
+        prev_count = self._last_region_count
+        self._last_region_count = len(self._regions)
+        self.deletion_history_regions.append(list(range(prev_count, self._last_region_count)))
 
         self._refresh_display_data()
         self._on_region_changed()
@@ -417,11 +421,15 @@ class RegionPlotWidget(pg.PlotWidget):
         if self.origin_y_data is not None:
             self.y_data[last_deletion] = self.origin_y_data[last_deletion]
 
-        # 删掉本次操作对应的 region
+        # 删掉本次操作新增的 region
         for idx in sorted(region_indices, reverse=True):
             if idx < len(self._regions):
                 self.removeItem(self._regions[idx])
                 del self._regions[idx]
+        # 回退 region 计数
+        self._last_region_count = (
+            self.deletion_history_regions[-1][0] if self.deletion_history_regions else 0
+        )
 
         self._refresh_display_data()
         self._on_region_changed()

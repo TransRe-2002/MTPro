@@ -197,91 +197,60 @@ class MatLoader(EMDataLoader):
         return MatEMData(mat_data, path, tz=tz)
 
 def _save_mat_v73(path: str, mdict: dict) -> None:
-    """将 scipy 格式 dict 写入 MATLAB v7.3 (HDF5) 文件。
+    """将 scipy 格式 dict 写入 HDF5 文件（MTPro 内部格式，非 MATLAB 兼容）。"""
+    import h5py
 
-    MATLAB v7.3 格式 = 128 字节文本头 + 384 字节填充 + HDF5 数据。
-    先写 HDF5 到临时文件，再拼装最终文件。
-    """
-    import struct, datetime, tempfile, h5py, shutil
+    def _write_item(h5f, name, value):
+        if isinstance(value, np.ndarray) and value.dtype.names:
+            grp = h5f.create_group(name)
+            val_flat = value[0, 0]
+            for fname in value.dtype.names:
+                _write_item(grp, fname, val_flat[fname])
+        elif isinstance(value, np.ndarray) and value.dtype == object and value.ndim == 2:
+            rows, cols = value.shape[1], value.shape[0]
+            dt = h5py.special_dtype(ref=h5py.Reference)
+            ds = h5f.create_dataset(name, shape=(rows, cols), dtype=dt)
+            for r in range(rows):
+                for c in range(cols):
+                    cell_val = value[c, r]
+                    ref_name = f"{name}_r{r}_c{c}"
+                    _write_item(h5f, ref_name, cell_val)
+                    ds[r, c] = h5f[ref_name].ref
+        elif isinstance(value, np.ndarray) and value.ndim == 2 and value.shape[0] == 1:
+            if value.dtype == object and value.size == 1:
+                inner = value[0]
+                if isinstance(inner, str):
+                    h5f.create_dataset(name, data=np.frombuffer(inner.encode('utf-16-le'), dtype=np.uint16))
+                    return
+                if isinstance(inner, np.ndarray) and inner.dtype.kind in ('U', 'S'):
+                    s = str(inner[0]) if inner.size > 0 else ''
+                    h5f.create_dataset(name, data=np.frombuffer(s.encode('utf-16-le'), dtype=np.uint16))
+                    return
+            _write_array(h5f, name, value)
+        elif isinstance(value, np.ndarray):
+            _write_array(h5f, name, value)
+        elif isinstance(value, str):
+            h5f.create_dataset(name, data=np.frombuffer(value.encode('utf-16-le'), dtype=np.uint16))
+        elif isinstance(value, (int, float, np.integer, np.floating)):
+            h5f.create_dataset(name, data=np.array([value]))
 
-    # ── Phase 1: 写 HDF5 到临时文件 ────────────────────
-    tmp = tempfile.NamedTemporaryFile(suffix='.h5', delete=False)
-    tmp.close()
-    try:
-        def _write_item(h5f, name, value):
-            if isinstance(value, np.ndarray) and value.dtype.names:
-                grp = h5f.create_group(name)
-                val_flat = value[0, 0]
-                for fname in value.dtype.names:
-                    _write_item(grp, fname, val_flat[fname])
-            elif isinstance(value, np.ndarray) and value.dtype == object and value.ndim == 2:
-                rows, cols = value.shape[1], value.shape[0]
-                dt = h5py.special_dtype(ref=h5py.Reference)
-                ds = h5f.create_dataset(name, shape=(rows, cols), dtype=dt)
-                for r in range(rows):
-                    for c in range(cols):
-                        cell_val = value[c, r]
-                        ref_name = f"{name}_r{r}_c{c}"
-                        _write_item(h5f, ref_name, cell_val)
-                        ds[r, c] = h5f[ref_name].ref
-            elif isinstance(value, np.ndarray) and value.ndim == 2 and value.shape[0] == 1:
-                if value.dtype == object and value.size == 1:
-                    inner = value[0]
-                    if isinstance(inner, str):
-                        encoded = np.frombuffer(inner.encode('utf-16-le'), dtype=np.uint16)
-                        h5f.create_dataset(name, data=encoded)
-                        return
-                    if isinstance(inner, np.ndarray) and inner.dtype.kind in ('U', 'S'):
-                        s = str(inner[0]) if inner.size > 0 else ''
-                        encoded = np.frombuffer(s.encode('utf-16-le'), dtype=np.uint16)
-                        h5f.create_dataset(name, data=encoded)
-                        return
-                _write_array(h5f, name, value)
-            elif isinstance(value, np.ndarray):
-                _write_array(h5f, name, value)
-            elif isinstance(value, str):
-                encoded = np.frombuffer(value.encode('utf-16-le'), dtype=np.uint16)
-                h5f.create_dataset(name, data=encoded)
-            elif isinstance(value, (int, float, np.integer, np.floating)):
-                h5f.create_dataset(name, data=np.array([value]))
+    def _write_array(h5f, name, arr):
+        if arr.size == 0:
+            h5f.create_dataset(name, data=np.zeros((0, 0), dtype=np.float64))
+            return
+        if arr.dtype.kind == 'U':
+            s = str(arr.flat[0]) if arr.size > 0 else ''
+            h5f.create_dataset(name, data=np.frombuffer(s.encode('utf-16-le'), dtype=np.uint16))
+            return
+        if arr.ndim == 2:
+            arr = arr.T
+        if arr.dtype == np.int64:
+            arr = arr.astype(np.float64)
+        h5f.create_dataset(name, data=arr)
 
-        def _write_array(h5f, name, arr):
-            if arr.size == 0:
-                h5f.create_dataset(name, data=np.zeros((0, 0), dtype=np.float64))
-                return
-            if arr.dtype.kind == 'U':
-                s = str(arr.flat[0]) if arr.size > 0 else ''
-                encoded = np.frombuffer(s.encode('utf-16-le'), dtype=np.uint16)
-                h5f.create_dataset(name, data=encoded)
-                return
-            if arr.ndim == 2:
-                arr = arr.T
-            if arr.dtype == np.int64:
-                arr = arr.astype(np.float64)
-            h5f.create_dataset(name, data=arr)
-
-        with h5py.File(tmp.name, 'w') as h5f:
-            for var_name, value in mdict.items():
-                _write_item(h5f, var_name, value)
-
-        with open(tmp.name, 'rb') as f:
-            hdf5_bytes = f.read()
-    finally:
-        import os; os.unlink(tmp.name)
-
-    # ── Phase 2: 拼装 MATLAB v7.3 文件 ────────────────
-    # 128-byte header + 384-byte zero-pad → HDF5 at offset 512
-    now = datetime.datetime.now().strftime("%a %b %d %H:%M:%S %Y")
-    header_text = f"MATLAB 7.3 MAT-file, Platform: GLNXA64, Created on: {now}"
-    header = header_text.encode('ascii').ljust(116, b' ')[:116]
-    header += struct.pack('<Q', 0)   # subsystem data offset
-    header += b'\x00\x01'             # version 1.0
-    header += b'IM'                   # little-endian
-
-    with open(path, 'wb') as fh:
-        fh.write(header.ljust(128, b'\x00'))
-        fh.write(b'\x00' * 384)       # padding to offset 512
-        fh.write(hdf5_bytes)
+    with h5py.File(path, 'w') as h5f:
+        for var_name, value in mdict.items():
+            _write_item(h5f, var_name, value)
 class MatSaver(EMDataSaver):
     @staticmethod
     def save(em_data: MatEMData, path: str):

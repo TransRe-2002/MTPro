@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import psutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import sys
@@ -439,12 +438,8 @@ class DataProcessLegacyWidget(QWidget):
         progress.setValue(0)
         progress.show()
 
-        em = tasks[0][1]
-        mem_per_worker = max(em.npts * 8, 1024**3)
-        avail_bytes = psutil.virtual_memory().available
-        max_by_mem = max(1, int(avail_bytes / mem_per_worker / 2))
-        workers = max(1, min((os.cpu_count() or 4) // 2, max_by_mem, total))
-        _log.info("_on_region_sync: %d workers", workers)
+        workers = max(1, min((os.cpu_count() or 4) // 2, total))
+        _log.info("_on_region_sync: %d workers (cpu=%d)", workers, os.cpu_count() or 4)
 
         displays: dict[int, dict] = {}  # data_id → {ch: (dx, dy)}
         completed = 0

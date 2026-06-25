@@ -484,7 +484,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             required.add('Kp')
         return required
 
-    def _ensure_plot_row(self, ch: str):
+    def _ensure_plot_row(self, ch: str) -> None:
         """为通道创建 BriefPlot、工作线程和容器（若尚不存在）。"""
         if ch not in self.plot_rows:
             self.plot_rows[ch] = PlotResources()
@@ -511,7 +511,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         else:
             resources.widget.set_label(ch)
 
-    def _teardown_plot_row(self, ch: str):
+    def _teardown_plot_row(self, ch: str) -> None:
         """安全销毁通道的工作线程、容器和绘图控件。"""
         resources = self.plot_rows.pop(ch, None)
         if resources is None:
@@ -534,7 +534,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         if resources.widget is not None:
             resources.widget.deleteLater()
 
-    def _sync_plot_rows(self):
+    def _sync_plot_rows(self) -> None:
         """增量同步：为新增通道创建控件，移除已删除通道，并重排序。"""
         required = self._required_channels()
         current = set(self.plot_rows.keys())
@@ -613,7 +613,8 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             if widget is None:
                 continue
             widget.clear_curves()
-            mean = np.nanmean(y_data.values)
+            with np.errstate(all='ignore'):
+                mean = np.nanmean(y_data.values)
             y_vals = np.asarray(y_data.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
             widget.add_curve(
                 x_data=x_vals,
@@ -677,7 +678,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             self._viewport_debounce.stop()
         self._on_viewport_changed()
 
-    def on_btn_plot_clicked(self):
+    def on_btn_plot_clicked(self) -> None:
         """跳转到指定时间范围。"""
         start = qdt_to_pts(self.start_time.dateTime())
         end = qdt_to_pts(self.end_time.dateTime())
@@ -706,7 +707,8 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         ch = self.em_data.get_channel_series(channel)
         widget = self.plot_rows[channel].widget
-        mean = np.nanmean(ch.values)
+        with np.errstate(all='ignore'):
+            mean = np.nanmean(ch.values)
         y_vals = np.asarray(ch.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
         if widget is not None:
             widget.clear_curves()
@@ -714,7 +716,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             widget.show()
         self._on_viewport_changed()
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         """安全关闭所有工作线程并释放 UI 资源。"""
         if self._shutdown_done:
             return
@@ -723,7 +725,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         for ch in list(self.plot_rows.keys()):
             self._teardown_plot_row(ch)
 
-    def closeEvent(self, event):
+    def closeEvent(self, event) -> None:
         """窗口关闭时自动清理所有后台线程。"""
         self.shutdown()
         super().closeEvent(event)

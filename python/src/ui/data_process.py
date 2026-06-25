@@ -12,9 +12,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from PySide6.QtCore import QPoint, Qt, Signal, QThread
-
-from base.processing_broker import ProcessingBroker
+from PySide6.QtCore import QPoint, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,6 +21,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMdiArea,
     QMdiSubWindow,
+    QMessageBox,
+    QProgressDialog,
     QStackedWidget,
     QTabBar,
     QTabWidget,
@@ -30,10 +30,9 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
-    QMessageBox,
-    QProgressDialog,
 )
-from PySide6.QtCore import QTimer
+
+from base.processing_broker import ProcessingBroker
 
 from base.data_manager import DataManager
 from core.em_data import EMData
@@ -489,10 +488,6 @@ class DataProcessLegacyWidget(QWidget):
             applied += 1
             progress.setLabelText(f"正在刷新波形 {applied}/{len(displays)} 个数据集")
         progress.setLabelText(f"刷新完成 ({len(displays)} 个数据集)")
-
-        QTimer.singleShot(2000, _refresh)
-        _log.info("_on_region_sync DONE: %d datasets, %d channels",
-                  total, len(all_changes))
 
     def _on_tool_result_applied(self, data_id: int, channel: str) -> None:
         """Broker 确认结果写入后，关闭对应工具的子窗口。"""
@@ -1077,11 +1072,22 @@ class DataProcessWidget(QWidget):
         self.classic_button.setObjectName("classicModeButton")
         self.pipeline_button.setObjectName("pipelineModeButton")
         self.classic_button.setStyleSheet(
-            "QToolButton { padding: 6px 16px; border: 1px solid #545454; border-right: none; border-radius: 6px 0 0 6px; background: #2b2b2b; }"
+            "QToolButton {"
+            " padding: 6px 16px;"
+            " border: 1px solid #545454;"
+            " border-right: none;"
+            " border-radius: 6px 0 0 6px;"
+            " background: #2b2b2b;"
+            " }"
             "QToolButton:checked { background: #3d7ea6; color: white; }"
         )
         self.pipeline_button.setStyleSheet(
-            "QToolButton { padding: 6px 16px; border: 1px solid #545454; border-radius: 0 6px 6px 0; background: #2b2b2b; }"
+            "QToolButton {"
+            " padding: 6px 16px;"
+            " border: 1px solid #545454;"
+            " border-radius: 0 6px 6px 0;"
+            " background: #2b2b2b;"
+            " }"
             "QToolButton:checked { background: #3d7ea6; color: white; }"
         )
         self.pipeline_button.setEnabled(self.PIPELINE_ENABLED)

@@ -400,9 +400,12 @@ class DataProcessLegacyWidget(QWidget):
                     intervals.append((left, right))
             if intervals:
                 tasks.append((data_id, em_data, intervals))
+            else:
+                _log.info("_on_region_sync: skip #%d (no time overlap)", data_id)
 
+        _log.info("_on_region_sync: %d/%d datasets have overlapping ranges",
+                  len(tasks), len(list(self.data_manager.items())) - 1)
         if not tasks:
-            _log.info("_on_region_sync: no matching datasets")
             return
 
         # ── Phase 2: 线程池并行修改 + 预计算显示数据 ────

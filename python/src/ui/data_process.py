@@ -420,7 +420,8 @@ class DataProcessLegacyWidget(QWidget):
                 em_data.set_channel_series(ch, pd.Series(
                     vals, index=em_data.get_channel_series(ch).index, name=ch,
                 ))
-                m = np.nanmean(vals)
+                with np.errstate(all='ignore'):
+                    m = np.nanmean(vals)
                 dy = vals - (m if np.isfinite(m) else 0.0)
                 dx, dy_d = decimate_for_display(x, dy)
                 display[ch] = (dx, dy_d)

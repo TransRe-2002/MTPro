@@ -112,7 +112,7 @@ CHANNEL_PRESETS: dict[str, dict] = {
 
 
 class ImportBinWizard(QWizard):
-    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
+    def __init__(self, data_manager: Optional[DataManager] = None, parent=None) -> None:
         super().__init__(parent)
         self._data_manager = data_manager
         self._imported_key: int | None = None
@@ -167,7 +167,7 @@ class ImportBinWizard(QWizard):
     def imported_key(self) -> int | None:
         return self._imported_key
 
-    def accept(self):
+    def accept(self) -> None:
         super().accept()
 
 
@@ -177,7 +177,7 @@ class ImportBinWizard(QWizard):
 
 
 class FileSelectPage(QWizardPage):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setTitle("选择数据文件")
         self.setSubTitle("选择要导入的二进制 .dat 文件，可同时关联 GPS 文件 (.inf)。")
@@ -234,7 +234,7 @@ class FileSelectPage(QWizardPage):
 
         self.registerField("dat_path*", self._dat_edit)
 
-    def _browse_dat(self):
+    def _browse_dat(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "选择数据文件", "",
             "二进制数据文件 (*.dat);;所有文件 (*)",
@@ -242,7 +242,7 @@ class FileSelectPage(QWizardPage):
         if path:
             self._dat_edit.setText(path)
 
-    def _browse_gps(self):
+    def _browse_gps(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "选择 GPS 文件", "",
             "GPS 文件 (*.inf);;所有文件 (*)",
@@ -250,7 +250,7 @@ class FileSelectPage(QWizardPage):
         if path:
             self._gps_edit.setText(path)
 
-    def _on_dat_changed(self, text: str):
+    def _on_dat_changed(self, text: str) -> None:
         text = text.strip()
         if not text or not os.path.exists(text):
             self._dat_info.setText("")
@@ -291,11 +291,11 @@ class FileSelectPage(QWizardPage):
         self._refresh_gps_info()
         self.completeChanged.emit()
 
-    def _on_auto_gps_toggled(self, checked: bool):
+    def _on_auto_gps_toggled(self, checked: bool) -> None:
         if checked and self._dat_edit.text().strip():
             self._on_dat_changed(self._dat_edit.text())
 
-    def _refresh_gps_info(self):
+    def _refresh_gps_info(self) -> None:
         gps_path = self._gps_edit.text().strip()
         if not gps_path:
             self._gps_info.setText("未选择 GPS 文件")
@@ -331,7 +331,7 @@ class FileSelectPage(QWizardPage):
 
 
 class ChannelConfigPage(QWizardPage):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setTitle("通道与仪器配置")
         self.setSubTitle("配置通道名称、电极对、缩放因子和偶极距。留空表示跳过该通道。")
@@ -374,6 +374,7 @@ class ChannelConfigPage(QWizardPage):
 
         self._name_edits: list[QLineEdit] = []
         self._pair_combos: list[QComboBox] = []
+        self._dir_combos: list[tuple[QComboBox, QLabel]] = []
 
         for i in range(8):
             row = i + 1
@@ -389,8 +390,19 @@ class ChannelConfigPage(QWizardPage):
             pair_combo = QComboBox()
             pair_combo.addItems(["—", "Ex", "Ey"])
             pair_combo.setMaximumWidth(72)
+            idx = len(self._pair_combos)
+            pair_combo.currentIndexChanged.connect(lambda _i, i=idx: self._update_dir_combo(self._dir_combos[i][0]))
             grid.addWidget(pair_combo, row, 2)
             self._pair_combos.append(pair_combo)
+
+            # 每通道独立方向（Ex=N/S, Ey=E/W），同步模式隐藏
+            dir_combo = QComboBox()
+            dir_label = QLabel("")
+            self._dir_combos.append((dir_combo, dir_label))
+            grid.addWidget(dir_combo, row, 3)
+            grid.addWidget(dir_label, row, 4)
+            dir_combo.hide()
+            dir_label.hide()
 
         grid_widget = QWidget()
         grid_widget.setLayout(grid)
@@ -426,6 +438,23 @@ class ChannelConfigPage(QWizardPage):
         self._ey_dist_spin.setValue(_DEFAULT_EY_DIST)
         self._ey_dist_spin.setSuffix(" m")
         param_row.addWidget(self._ey_dist_spin)
+        param_row.addSpacing(16)
+        self._dir_sync_cb = QCheckBox("电场方向同步")
+        self._dir_sync_cb.setChecked(True)
+        self._dir_sync_cb.setToolTip(
+            "勾选时所有 Ex 通道共用方向，Ey 通道共用方向；\n"
+            "取消后每个通道可独立设置电极方向，如 Ex1=N, Ex2=S 等。"
+        )
+        self._dir_sync_cb.toggled.connect(self._on_dir_sync_toggled)
+        param_row.addWidget(self._dir_sync_cb)
+        param_row.addWidget(QLabel("Ex:"))
+        self._ex_dir_combo = QComboBox()
+        self._ex_dir_combo.addItems(["N", "S"])
+        param_row.addWidget(self._ex_dir_combo)
+        param_row.addWidget(QLabel("Ey:"))
+        self._ey_dir_combo = QComboBox()
+        self._ey_dir_combo.addItems(["E", "W"])
+        param_row.addWidget(self._ey_dir_combo)
         param_row.addStretch()
         ch_layout.addLayout(param_row)
 
@@ -468,7 +497,33 @@ class ChannelConfigPage(QWizardPage):
 
     # -- channel name change → auto-disable electrode pair -----------------
 
-    def _on_name_changed(self, row: int):
+    def _on_dir_sync_toggled(self, checked: bool) -> None:
+        """同步模式：显示全局方向，隐藏每通道方向。"""
+        self._ex_dir_combo.setVisible(checked)
+        self._ey_dir_combo.setVisible(checked)
+        for _, label in self._dir_combos:
+            label.setVisible(not checked)
+        for combo, _ in self._dir_combos:
+            combo.setVisible(not checked)
+            if not checked:
+                self._update_dir_combo(combo)
+
+    def _update_dir_combo(self, combo: QComboBox) -> None:
+        """根据通道的电极对设置方向下拉选项。"""
+        for i, (dc, _) in enumerate(self._dir_combos):
+            if dc is combo:
+                pair = self._pair_combos[i].currentText()
+                break
+        else:
+            return
+        if pair == "Ex":
+            combo.clear(); combo.addItems(["N (正)", "S (反)"])
+        elif pair == "Ey":
+            combo.clear(); combo.addItems(["E (正)", "W (反)"])
+        else:
+            combo.clear(); combo.setEnabled(False)
+
+    def _on_name_changed(self, row: int) -> None:
         idx = row - 1
         name = self._name_edits[idx].text().strip()
         is_empty = not name or name.lower() == "empty"
@@ -478,10 +533,11 @@ class ChannelConfigPage(QWizardPage):
             self._pair_combos[idx].setDisabled(True)
         else:
             self._pair_combos[idx].setDisabled(False)
+        self._update_dir_combo(self._dir_combos[idx][0])
 
     # -- preset ------------------------------------------------------------
 
-    def _apply_preset(self, preset_name: str):
+    def _apply_preset(self, preset_name: str) -> None:
         preset = CHANNEL_PRESETS.get(preset_name)
         if preset is None:
             return
@@ -493,6 +549,7 @@ class ChannelConfigPage(QWizardPage):
             if p == "Ex":   self._pair_combos[i].setCurrentIndex(1)
             elif p == "Ey": self._pair_combos[i].setCurrentIndex(2)
             else:           self._pair_combos[i].setCurrentIndex(0)
+            self._update_dir_combo(self._dir_combos[i][0])
         ms = preset.get("mag_scale")
         if ms is not None: self._mag_scale_spin.setValue(ms)
         exd = preset.get("ex_distance")
@@ -506,18 +563,35 @@ class ChannelConfigPage(QWizardPage):
 
     def _collect_configs(self) -> list[dict]:
         mag_scale = self._mag_scale_spin.value()
+        sync = self._dir_sync_cb.isChecked()
+        ex_global = self._ex_dir_combo.currentText()
+        ey_global = self._ey_dir_combo.currentText()
         result = []
         for i in range(8):
             name = self._name_edits[i].text().strip()
             scale = mag_scale if (name and name[0] in "HhBb") else 1.0
             idx = self._pair_combos[i].currentIndex()
             pair = ["", "Ex", "Ey"][idx] if 0 <= idx <= 2 else ""
-            result.append({"name": name, "scale": scale, "electrode_pair": pair})
+            # 方向
+            direction = ""
+            if sync:
+                if pair == "Ex": direction = ex_global
+                elif pair == "Ey": direction = ey_global
+            else:
+                t = self._dir_combos[i][0].currentText()
+                if t and pair == "Ex" and t.startswith("S"): direction = "S"
+                elif t and pair == "Ex": direction = "N"
+                elif t and pair == "Ey" and t.startswith("W"): direction = "W"
+                elif t and pair == "Ey": direction = "E"
+            result.append({
+                "name": name, "scale": scale,
+                "electrode_pair": pair, "direction": direction,
+            })
         return result
 
     # -- dt override -------------------------------------------------------
 
-    def _on_sr_mode_changed(self, button, checked):
+    def _on_sr_mode_changed(self, button, checked: bool) -> None:
         if not checked: return
         self._sr_manual_spin.setEnabled(self._sr_manual_radio.isChecked())
 
@@ -526,7 +600,7 @@ class ChannelConfigPage(QWizardPage):
 
     # -- initialize --------------------------------------------------------
 
-    def initializePage(self):
+    def initializePage(self) -> None:
         dat = self.wizard().dat_path()
         try:
             info = read_bin_header(dat)
@@ -550,7 +624,7 @@ class ChannelConfigPage(QWizardPage):
 
 
 class GpsTimezonePage(QWizardPage):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setTitle("测点与时区")
         self.setSubTitle("选择 GPS 坐标来源和采集站所在时区。")
@@ -617,7 +691,7 @@ class GpsTimezonePage(QWizardPage):
 
         layout.addStretch()
 
-    def _on_gps_mode_changed(self, button, checked):
+    def _on_gps_mode_changed(self, button, checked: bool) -> None:
         if not checked: return
         self._manual_lat.setEnabled(self._gps_manual_radio.isChecked())
         self._manual_lon.setEnabled(self._gps_manual_radio.isChecked())
@@ -635,7 +709,7 @@ class GpsTimezonePage(QWizardPage):
                _try_float(self._manual_lon.text()), \
                _try_float(self._manual_alt.text())
 
-    def initializePage(self):
+    def initializePage(self) -> None:
         wiz = self.wizard()
         gps_path = wiz.gps_path()
         if gps_path and os.path.exists(gps_path):
@@ -670,7 +744,7 @@ class GpsTimezonePage(QWizardPage):
 
 
 class ConfirmPage(QWizardPage):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setTitle("确认导入")
         self.setSubTitle("检查导入信息，点击「完成」开始导入。")
@@ -685,7 +759,7 @@ class ConfirmPage(QWizardPage):
         layout.addWidget(self._status_label)
         layout.addStretch()
 
-    def initializePage(self):
+    def initializePage(self) -> None:
         from io_utils.bin_io import _is_empty_channel
 
         wiz: ImportBinWizard = self.wizard()
@@ -741,6 +815,8 @@ class ConfirmPage(QWizardPage):
                 if scale != 1.0: ops.append(f"×{scale:.6g}")
                 if pair == "Ex" and exd: ops.append(f"÷{exd:.0f}m")
                 elif pair == "Ey" and eyd: ops.append(f"÷{eyd:.0f}m")
+                direction = cfg.get("direction", "")
+                if direction in ("S", "W"): ops.append("×(–1)")
                 conv = " ".join(ops) if ops else "—"
                 ch_rows.append(
                     f"<tr><td>{DAT_CH_FIELDS[i]}</td>"

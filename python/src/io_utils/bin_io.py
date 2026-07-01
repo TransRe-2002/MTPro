@@ -322,6 +322,11 @@ class BinLoader(EMDataLoader):
             elif pair == "Ey":
                 scaled *= ey_factor
 
+            # 电极方向翻转 (Ex: S→反, Ey: W→反)
+            direction = cfg.get("direction", "")
+            if (pair == "Ex" and direction == "S") or (pair == "Ey" and direction == "W"):
+                scaled *= -1.0
+
             channel_series[ch_name] = pd.Series(
                 scaled, index=ts_index, name=ch_name,
             )

@@ -1,5 +1,7 @@
 mod decimate;
+mod diurnal;
 mod mat_loader;
+mod step;
 
 use pyo3::prelude::*;
 
@@ -17,4 +19,13 @@ mod rust_lib {
 
     #[pymodule_export]
     use super::mat_loader::probe_mat_v73;
+
+    #[pymodule_export]
+    use super::step::detect_step_indices_rs;
+
+    #[pymodule_export]
+    use super::step::windowed_mean_destep_rs;
+
+    #[pymodule_export]
+    use super::diurnal::subtract_periodic_signal_series_rs;
 }

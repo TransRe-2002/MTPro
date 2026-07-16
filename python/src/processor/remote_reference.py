@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import logging
+import importlib.util
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
+import pandas as pd
 import matplotlib
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from scipy.signal import detrend
 
-matplotlib.rcParams["font.sans-serif"] = [
-    "FZHei-B01", "Microsoft YaHei", "Noto Sans CJK JP", "Sarasa UI SC",
-] + matplotlib.rcParams["font.sans-serif"]
-matplotlib.rcParams["axes.unicode_minus"] = False
+from base.processing_broker import StationMetadata
+from core.em_data import EMData
+from emtf.io.zfile import emtf_phase_deg
+
+from ui.theme import configure_matplotlib_canvas, configure_matplotlib_fonts, configure_pyqtgraph_theme
+
+configure_matplotlib_fonts()
+configure_pyqtgraph_theme()
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
@@ -21,68 +28,43 @@ from PySide6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QLabel, QMenu, QMessageBox, QSplitter, QFrame,
     QDateTimeEdit, QApplication, QStackedWidget, QDialog,
 )
-from PySide6.QtCore import Qt, Signal, QDateTime
+from PySide6.QtCore import Qt, Signal, QDateTime, QTimer
 
+from processor._mt_common import (
+    BACKEND_EMTF_PYWRAP,
+    BACKEND_EMTF_RS,
+    CH_COLOURS,
+    DEFAULT_OPTION,
+    FFT_WINDOW_VALUES,
+    WINDOW_VALUES,
+    build_band_configs,
+    build_spectrum_kwargs,
+    detect_channels,
+    emtf_period_grid,
+    has_electric_channel,
+    has_magnetic_channel,
+    is_e_channel,
+    is_h_channel,
+    native_emtf_rs_available,
+    preprocess_channel,
+    set_form_row_visible,
+)
 from processor.step_plot_widget import StepPlotWidget
+from ui.dialogs.figure_export import default_export_name, export_matplotlib_figure_with_dialog
+from utils.decimate import LODPyramid
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from utils.geo import station_distance
 
-pg.setConfigOptions(antialias=True)
-pg.setConfigOption('background', 'w')
-pg.setConfigOption('foreground', 'k')
-
 logger = logging.getLogger(__name__)
 
-DEFAULT_OPTION = {
-    "window_size": 1024,
-    "step_pct": 50.0,
-    "huber_threshold": 1.5,
-    "max_iterations": 25,
-    "tolerance": 1e-8,
-}
-
-CH_COLOURS = {
-    "Ex": (220, 50, 50),
-    "Ey": (200, 120, 0),
-    "Hx": (30, 80, 220),
-    "Hy": (30, 160, 80),
-    "Hz": (140, 40, 180),
-}
-
-
-def _detect_channels(channel_names: list[str]) -> dict[str, Optional[str]]:
-    mapping: dict[str, Optional[str]] = {
-        "Ex": None, "Ey": None, "Hx": None, "Hy": None, "Hz": None,
-    }
-    for ch in channel_names:
-        lower = ch.lower()
-        if lower.startswith("e") and "x" in lower and mapping["Ex"] is None:
-            mapping["Ex"] = ch
-        elif lower.startswith("e") and "y" in lower and mapping["Ey"] is None:
-            mapping["Ey"] = ch
-        elif (lower.startswith("h") or lower.startswith("b")) and "x" in lower and mapping["Hx"] is None:
-            mapping["Hx"] = ch
-        elif (lower.startswith("h") or lower.startswith("b")) and "y" in lower and mapping["Hy"] is None:
-            mapping["Hy"] = ch
-        elif (lower.startswith("h") or lower.startswith("b")) and "z" in lower and mapping["Hz"] is None:
-            mapping["Hz"] = ch
-    return mapping
-
-
-def _is_e_channel(name: str) -> bool:
-    return name.lower().startswith("e")
-
-
-def _is_h_channel(name: str) -> bool:
-    return name.lower().startswith(("h", "b"))
-
-
-def _has_magnetic_channel(data: EMData) -> bool:
-    return any(ch.lower().startswith(("h", "b")) for ch in data.channel_names())
-
-
-def _has_electric_channel(data: EMData) -> bool:
-    return any(ch.lower().startswith("e") for ch in data.channel_names())
+# ─── 供本文件内部代码使用的短别名（保持向后兼容）──────────────────
+_detect_channels = detect_channels
+_is_e_channel = is_e_channel
+_is_h_channel = is_h_channel
+_has_magnetic_channel = has_magnetic_channel
+_has_electric_channel = has_electric_channel
+_set_form_row_visible = set_form_row_visible
+_native_emtf_rs_available = native_emtf_rs_available
 
 
 class RemoteReferenceControlDialog(QDialog):
@@ -159,11 +141,15 @@ class _PkgWrapper:
     @property
     def datetime_index(self): return self._pkg.get('datetime_index')
     @property
-    def name(self) -> str: return self._pkg.get('name', '')
+    def station_metadata(self) -> StationMetadata: return self._pkg['station_metadata']
     @property
-    def latitude(self): return self._pkg.get('latitude')
+    def name(self) -> str: return self.station_metadata.name
     @property
-    def longitude(self): return self._pkg.get('longitude')
+    def latitude(self): return self.station_metadata.latitude
+    @property
+    def longitude(self): return self.station_metadata.longitude
+    @property
+    def elevation(self): return self.station_metadata.elevation
     def channel_names(self) -> list[str]: return self._pkg.get('channel_names', [])
     def get_channel_series(self, ch: str) -> pd.Series:
         arr = self._pkg.get('all_y', {}).get(ch, np.array([]))
@@ -189,6 +175,15 @@ class RemoteReferenceWidget(QWidget):
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
+        self.setObjectName("RemoteReferenceWidget")
+        self.setStyleSheet(
+            "QWidget#RemoteReferenceWidget, "
+            "QWidget#remotePlotRowWidget, "
+            "QSplitter#remoteMainSplitter, "
+            "QStackedWidget#remoteResultStack { background: palette(window); }"
+            "QTabWidget::pane, QTableWidget { background: palette(base); }"
+            "QLabel#remotePlaceholder { background: palette(window); color: palette(text); }"
+        )
         self._data_id = data_id
         self._local_pkg: dict = {}
         self._remote_pkg: dict = {}
@@ -197,12 +192,20 @@ class RemoteReferenceWidget(QWidget):
         self._bands = None     # to_bands 聚合后的 BandedResult
         self._curves_local: dict[str, pg.PlotDataItem] = {}
         self._curves_remote: dict[str, pg.PlotDataItem] = {}
+        self._lod_local: dict[str, LODPyramid] = {}   # 本地站每通道 LOD 金字塔
+        self._lod_remote: dict[str, LODPyramid] = {}  # 远参考站每通道 LOD 金字塔
         self._updating_range = False
         self._syncing_region = False  # 防止两个 LinearRegionItem 递归同步
         self._syncing_xrange = False  # 防止两个图 X 轴递归同步
         self._ts_array: Optional[np.ndarray] = None
         self._ts_remote_array: Optional[np.ndarray] = None
         self._control_dialog: Optional[RemoteReferenceControlDialog] = None
+
+        # LOD 视口刷新防抖定时器（60fps）
+        self._lod_timer = QTimer(self)
+        self._lod_timer.setSingleShot(True)
+        self._lod_timer.setInterval(16)
+        self._lod_timer.timeout.connect(self._lod_update_curves)
 
         # ── 本地站波形预览（双 Y 轴） ──
         self.local_plot = StepPlotWidget()
@@ -251,6 +254,10 @@ class RemoteReferenceWidget(QWidget):
         # X 轴双向同步
         self._local_plot_item.vb.sigRangeChanged.connect(self._on_local_xrange_changed)
         self._remote_plot_item.vb.sigRangeChanged.connect(self._on_remote_xrange_changed)
+
+        # LOD 视口刷新：任一图 X 范围变化 → 防抖批量查询两图所有曲线
+        self._local_plot_item.vb.sigXRangeChanged.connect(self._on_lod_viewport_changed)
+        self._remote_plot_item.vb.sigXRangeChanged.connect(self._on_lod_viewport_changed)
 
         # ── 本地站选择器 ──
         self._local_station_widget = QWidget()
@@ -351,17 +358,30 @@ class RemoteReferenceWidget(QWidget):
         # ── 估计参数 ──
         self._param_group = QGroupBox("估计参数")
         param_form = QFormLayout(self._param_group)
+        self._param_form = param_form
+
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItem("EMTF pywrap", BACKEND_EMTF_PYWRAP)
+        self.backend_combo.addItem("emtf-rs", BACKEND_EMTF_RS)
+        if not _native_emtf_rs_available():
+            self.backend_combo.setItemText(1, "emtf-rs（未安装）")
+            self.backend_combo.model().item(1).setEnabled(False)
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+        param_form.addRow("估计后端:", self.backend_combo)
 
         self.sample_rate_label = QLabel("—")
         param_form.addRow("采样率 (Hz):", self.sample_rate_label)
 
         self.window_combo = QComboBox()
-        self._window_values = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
-        for v in self._window_values:
-            self.window_combo.addItem(str(v), v)
-        self.window_combo.setCurrentIndex(0)
         self.window_combo.currentIndexChanged.connect(self._update_warning)
-        param_form.addRow("窗口大小 (样点):", self.window_combo)
+        param_form.addRow("目标周期窗样点数:", self.window_combo)
+
+        self.fft_window_combo = QComboBox()
+        for value in FFT_WINDOW_VALUES:
+            self.fft_window_combo.addItem(str(value), value)
+        self.fft_window_combo.setCurrentIndex(FFT_WINDOW_VALUES.index(128))
+        self.fft_window_combo.setToolTip("写入 EMTF decset.cfg 的 nwin，每段 FFT 短窗的样点数")
+        param_form.addRow("FFT短窗点数:", self.fft_window_combo)
 
         self.step_pct_spin = QDoubleSpinBox()
         self.step_pct_spin.setRange(1.0, 100.0)
@@ -395,6 +415,14 @@ class RemoteReferenceWidget(QWidget):
         self.bands_spin.valueChanged.connect(self._on_bands_changed)
         param_form.addRow("频带数量:", self.bands_spin)
 
+        self._rs_only_fields = [
+            self.step_pct_spin,
+            self.huber_spin,
+            self.max_iter_spin,
+            self.tol_spin,
+        ]
+        self._on_backend_changed()
+
         # ── 运行按钮 ──
         self._btn_widget = QWidget()
         btn_layout = QHBoxLayout(self._btn_widget)
@@ -421,6 +449,9 @@ class RemoteReferenceWidget(QWidget):
 
         self.export_edi_btn = QPushButton("输出阻抗")
         self.export_edi_btn.clicked.connect(self._export_edi)
+        self.export_figure_btn = QPushButton("输出图像")
+        self.export_figure_btn.clicked.connect(self._export_current_figure)
+        self.export_figure_btn.setVisible(False)
         self.tune_btn = QPushButton("参数调整")
         self.tune_btn.clicked.connect(self._show_control_dialog)
 
@@ -438,25 +469,49 @@ class RemoteReferenceWidget(QWidget):
         self.resistivity_table.customContextMenuRequested.connect(self._on_table_context_menu)
         self.resistivity_table.keyPressEvent = self._table_key_press_event
 
+        self.tipper_table = QTableWidget()
+        self.tipper_table.setColumnCount(6)
+        self.tipper_table.setHorizontalHeaderLabels([
+            "freq (Hz)", "period (s)",
+            "Tzx", "Tzy",
+            "Tzx SE", "Tzy SE",
+        ])
+        self.tipper_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.tipper_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tipper_table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self.tipper_table.keyPressEvent = self._table_key_press_event
+        self._tipper_tab_index: Optional[int] = None
+
+        self.tipper_fig = Figure(figsize=(6, 4), tight_layout=True)
+        self.tipper_canvas = FigureCanvas(self.tipper_fig)
+        self.tipper_canvas.setParent(self)
+        configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
+        self._tipper_plot_tab_index: Optional[int] = None
+
         self.result_tabs = QTabWidget()
         tab_corner = QWidget()
         tab_corner_layout = QHBoxLayout(tab_corner)
         tab_corner_layout.setContentsMargins(0, 0, 4, 0)
+        tab_corner_layout.addWidget(self.export_figure_btn)
         tab_corner_layout.addWidget(self.tune_btn)
         tab_corner_layout.addWidget(self.export_edi_btn)
         self.result_tabs.setCornerWidget(tab_corner)
+        self.result_tabs.currentChanged.connect(self._sync_result_actions)
         self.result_tabs.addTab(self.table, "阻抗结果")
         self.result_tabs.addTab(self.resistivity_table, "视电阻率与相位")
 
         self.mpl_fig = Figure(figsize=(6, 5), tight_layout=True)
         self.mpl_canvas = FigureCanvas(self.mpl_fig)
         self.mpl_canvas.setParent(self)
-        self.result_tabs.addTab(self.mpl_canvas, "对比图")
+        configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
+        self.result_tabs.addTab(self.mpl_canvas, "视电阻率与相位图")
 
         self._placeholder = QLabel("此处显示计算结果信息")
+        self._placeholder.setObjectName("remotePlaceholder")
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._placeholder.setStyleSheet("color: #888; font-size: 14px;")
+        self._placeholder.setStyleSheet("font-size: 14px;")
         self._result_stack = QStackedWidget()
+        self._result_stack.setObjectName("remoteResultStack")
         self._result_stack.addWidget(self._placeholder)
         self._result_stack.addWidget(self.result_tabs)
         self._result_stack.setCurrentIndex(0)
@@ -470,10 +525,12 @@ class RemoteReferenceWidget(QWidget):
         plot_row.addWidget(self.local_plot)
         plot_row.addWidget(self.remote_plot)
         plot_widget = QWidget()
+        plot_widget.setObjectName("remotePlotRowWidget")
         plot_widget.setLayout(plot_row)
 
         # 下方：结果 TabWidget
         main_splitter = QSplitter(Qt.Orientation.Vertical)
+        main_splitter.setObjectName("remoteMainSplitter")
         main_splitter.addWidget(plot_widget)
         main_splitter.addWidget(self._result_stack)
         main_splitter.setSizes([360, 600])
@@ -481,6 +538,7 @@ class RemoteReferenceWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(main_splitter)
+        self._sync_result_actions()
 
         # ── 控制面板（独立浮窗） ──
         self._control_dialog = RemoteReferenceControlDialog(self)
@@ -750,7 +808,63 @@ class RemoteReferenceWidget(QWidget):
         self._refresh_plots()
 
     def _on_channel_changed(self):
+        self._sync_tipper_tab_visibility()
         self._refresh_plots()
+
+    def _hz_channel_selected(self) -> bool:
+        return self.ch_combo_hz.currentData() is not None
+
+    def _sync_tipper_tab_visibility(self) -> None:
+        should_show = self._hz_channel_selected()
+        table_index = self.result_tabs.indexOf(self.tipper_table)
+        plot_index = self.result_tabs.indexOf(self.tipper_canvas)
+        if should_show:
+            if table_index < 0:
+                self._tipper_tab_index = self.result_tabs.addTab(self.tipper_table, "倾子响应")
+            if plot_index < 0:
+                self._tipper_plot_tab_index = self.result_tabs.addTab(self.tipper_canvas, "倾子响应图")
+        else:
+            if plot_index >= 0:
+                self.result_tabs.removeTab(plot_index)
+                self._tipper_plot_tab_index = None
+            table_index = self.result_tabs.indexOf(self.tipper_table)
+            if table_index >= 0:
+                self.result_tabs.removeTab(table_index)
+            self._tipper_tab_index = None
+            self.tipper_table.setRowCount(0)
+            self.tipper_fig.clear()
+            self.tipper_canvas.draw()
+        self._sync_result_actions()
+
+    def _current_matplotlib_export_target(self):
+        current = self.result_tabs.currentWidget()
+        mpl_canvas = getattr(self, "mpl_canvas", None)
+        tipper_canvas = getattr(self, "tipper_canvas", None)
+        if current is mpl_canvas:
+            return self.mpl_fig, self.mpl_canvas, "resistivity_phase"
+        if current is tipper_canvas:
+            return self.tipper_fig, self.tipper_canvas, "tipper"
+        return None
+
+    def _sync_result_actions(self, _index: int = -1) -> None:
+        self.export_figure_btn.setVisible(self._current_matplotlib_export_target() is not None)
+
+    def _export_current_figure(self) -> None:
+        target = self._current_matplotlib_export_target()
+        if target is None:
+            return
+        figure, canvas, plot_slug = target
+        local = self._current_local_data()
+        station = local.name if local is not None else "station"
+        path = export_matplotlib_figure_with_dialog(
+            self,
+            figure,
+            canvas,
+            default_directory=Path.home(),
+            default_name=default_export_name(station, plot_slug),
+        )
+        if path is not None:
+            self.status_label.setText(f"已输出图像到 {path}")
 
     # ─── 波形图 ────────────────────────────────────────────────────
 
@@ -776,6 +890,7 @@ class RemoteReferenceWidget(QWidget):
             else:
                 self._local_plot_item.vb.removeItem(curve)
         self._curves_local.clear()
+        self._lod_local.clear()
         self._local_legend.clear()
 
         if data is None:
@@ -783,26 +898,33 @@ class RemoteReferenceWidget(QWidget):
 
         t = np.array([ts.timestamp() for ts in data.datetime_index])
         self._ts_array = t
+        pw = max(self.local_plot.width(), 800)
 
         for tag, ch_name in self._selected_local_channels().items():
             if ch_name is None:
                 continue
             y = data.get_channel_series(ch_name).to_numpy()
             y = y - np.nanmean(y)
+
+            # 构建 LOD 金字塔（Rust build_lod_pyramid_rs 加速）
+            pyramid = LODPyramid(t, y)
+            self._lod_local[tag] = pyramid
+            ox, oy = pyramid.get_full_overview(pw)
+
             colour = CH_COLOURS.get(tag, (100, 100, 100))
             pen = pg.mkPen(color=colour, width=1)
             label = f"{tag} ({ch_name})"
 
             if _is_e_channel(ch_name):
-                curve = pg.PlotDataItem(t, y, pen=pen, name=label,
-                                        autoDownsample=True, clipToView=True,
+                curve = pg.PlotDataItem(ox, oy, pen=pen, name=label,
+                                        autoDownsample=False, clipToView=False,
                                         connect='finite')
                 curve.setParentItem(self._local_plot_item.vb)
                 curve.forgetViewBox()
                 self._local_plot_item.vb.addItem(curve)
             else:
-                curve = pg.PlotDataItem(t, y, pen=pen, name=label,
-                                        autoDownsample=True, clipToView=True,
+                curve = pg.PlotDataItem(ox, oy, pen=pen, name=label,
+                                        autoDownsample=False, clipToView=False,
                                         connect='finite')
                 curve.setParentItem(self._local_b_viewbox)
                 curve.forgetViewBox()
@@ -826,6 +948,7 @@ class RemoteReferenceWidget(QWidget):
         for curve in list(self._curves_remote.values()):
             self._remote_plot_item.vb.removeItem(curve)
         self._curves_remote.clear()
+        self._lod_remote.clear()
         self._remote_legend.clear()
 
         if data is None:
@@ -833,23 +956,62 @@ class RemoteReferenceWidget(QWidget):
 
         t = np.array([ts.timestamp() for ts in data.datetime_index])
         self._ts_remote_array = t
+        pw = max(self.remote_plot.width(), 800)
 
         for tag, ch_name in self._selected_remote_channels().items():
             if ch_name is None:
                 continue
             y = data.get_channel_series(ch_name).to_numpy()
             y = y - np.nanmean(y)
+
+            # 构建 LOD 金字塔
+            pyramid = LODPyramid(t, y)
+            self._lod_remote[tag] = pyramid
+            ox, oy = pyramid.get_full_overview(pw)
+
             colour = CH_COLOURS.get(tag, (100, 100, 100))
             pen = pg.mkPen(color=colour, width=1)
             label = f"{tag} ({ch_name})"
-            curve = pg.PlotDataItem(t, y, pen=pen, name=label,
-                                    autoDownsample=True, clipToView=True,
+            curve = pg.PlotDataItem(ox, oy, pen=pen, name=label,
+                                    autoDownsample=False, clipToView=False,
                                     connect='finite')
             curve.setParentItem(self._remote_plot_item.vb)
             curve.forgetViewBox()
             self._remote_plot_item.vb.addItem(curve)
             self._remote_legend.addItem(curve, label)
             self._curves_remote[tag] = curve
+
+    # ─── LOD 视口刷新 ──────────────────────────────────────────────
+
+    def _on_lod_viewport_changed(self):
+        """任一 ViewBox X 范围变化 → 启动防抖定时器，16ms 后批量刷新两图所有曲线。"""
+        self._lod_timer.start()
+
+    def _lod_update_curves(self):
+        """从各通道的 LODPyramid 查询当前视口适配分辨率的数据并 setData。"""
+        # 本地站
+        if self._lod_local:
+            vb = self._local_plot_item.vb
+            x_start, x_end = vb.viewRange()[0]
+            pw = max(self.local_plot.width(), 200)
+            for tag, pyramid in self._lod_local.items():
+                curve = self._curves_local.get(tag)
+                if curve is None:
+                    continue
+                lx, ly = pyramid.get(x_start, x_end, pw)
+                curve.setData(lx, ly)
+
+        # 远参考站
+        if self._lod_remote:
+            vb = self._remote_plot_item.vb
+            x_start, x_end = vb.viewRange()[0]
+            pw = max(self.remote_plot.width(), 200)
+            for tag, pyramid in self._lod_remote.items():
+                curve = self._curves_remote.get(tag)
+                if curve is None:
+                    continue
+                lx, ly = pyramid.get(x_start, x_end, pw)
+                curve.setData(lx, ly)
 
     # ─── 区域 / 范围选择 ──────────────────────────────────────────
 
@@ -1034,6 +1196,9 @@ class RemoteReferenceWidget(QWidget):
         self.range_info.setText(f"选中 {n} 样点 ({start}:{end}), 时长 {duration:.0f}s")
 
     def _update_warning(self):
+        if self._current_backend() == BACKEND_EMTF_PYWRAP:
+            self.warning_label.setText("")
+            return
         window_size = self.window_combo.currentData()
         min_required = 26 * window_size
         start = self.start_spin.value()
@@ -1047,6 +1212,36 @@ class RemoteReferenceWidget(QWidget):
         else:
             self.warning_label.setText("")
 
+    def _current_backend(self) -> str:
+        return str(self.backend_combo.currentData())
+
+    def _on_backend_changed(self):
+        backend = self._current_backend()
+        self._set_window_values(WINDOW_VALUES)
+        rs_visible = backend == BACKEND_EMTF_RS
+        for field in self._rs_only_fields:
+            _set_form_row_visible(self._param_form, field, rs_visible)
+        _set_form_row_visible(self._param_form, self.fft_window_combo, not rs_visible)
+        if backend == BACKEND_EMTF_PYWRAP:
+            self.warning_label.setText("")
+        else:
+            self.bands_spin.setToolTip("对数均分频带数量，影响视电阻率/相位图的频点密度")
+
+    def _set_window_values(self, values: list[int]) -> None:
+        current = self.window_combo.currentData()
+        if current in values and self.window_combo.count() == len(values):
+            return
+        self.window_combo.blockSignals(True)
+        self.window_combo.clear()
+        for value in values:
+            self.window_combo.addItem(str(value), value)
+        if current in values:
+            self.window_combo.setCurrentIndex(values.index(current))
+        else:
+            self.window_combo.setCurrentIndex(1 if len(values) > 1 else 0)
+        self.window_combo.blockSignals(False)
+        self._update_warning()
+
     # ─── 远参考估计 ──────────────────────────────────────────────
 
     def _run_estimation(self):
@@ -1058,6 +1253,7 @@ class RemoteReferenceWidget(QWidget):
         if remote is None:
             QMessageBox.warning(self, "错误", "请选择一个远参考站。")
             return
+        backend = self._current_backend()
 
         local_sr = 1.0 / local.dt.total_seconds()
         remote_sr = 1.0 / remote.dt.total_seconds()
@@ -1086,7 +1282,10 @@ class RemoteReferenceWidget(QWidget):
             return
 
         try:
-            import emtf_rs
+            if backend == BACKEND_EMTF_RS:
+                import emtf_rs
+            else:
+                import emtf as emtf_rs
 
             start = self.start_spin.value()
             end = self.end_spin.value()
@@ -1133,23 +1332,14 @@ class RemoteReferenceWidget(QWidget):
                 remote_hx_arr = remote_hx_arr[:min_len]
                 remote_hy_arr = remote_hy_arr[:min_len]
 
-            def _preprocess(arr: np.ndarray, name: str) -> np.ndarray:
-                n_nan = np.sum(~np.isfinite(arr))
-                if n_nan > 0:
-                    logger.warning("%s: %d NaN in selected range (%.2f%%), "
-                                   "detrend skipped", name, n_nan,
-                                   100 * n_nan / len(arr))
-                    return arr
-                return detrend(arr)
-
-            ex_arr = _preprocess(ex_arr, ch_ex)
-            ey_arr = _preprocess(ey_arr, ch_ey)
-            local_hx_arr = _preprocess(local_hx_arr, ch_hx_local)
-            local_hy_arr = _preprocess(local_hy_arr, ch_hy_local)
-            remote_hx_arr = _preprocess(remote_hx_arr, ch_hx_remote)
-            remote_hy_arr = _preprocess(remote_hy_arr, ch_hy_remote)
+            ex_arr = preprocess_channel(ex_arr, ch_ex)
+            ey_arr = preprocess_channel(ey_arr, ch_ey)
+            local_hx_arr = preprocess_channel(local_hx_arr, ch_hx_local)
+            local_hy_arr = preprocess_channel(local_hy_arr, ch_hy_local)
+            remote_hx_arr = preprocess_channel(remote_hx_arr, ch_hx_remote)
+            remote_hy_arr = preprocess_channel(remote_hy_arr, ch_hy_remote)
             if hz_arr is not None:
-                hz_arr = _preprocess(hz_arr, str(ch_hz))
+                hz_arr = preprocess_channel(hz_arr, str(ch_hz))
 
             sample_rate = local_sr
             window_size = self.window_combo.currentData()
@@ -1161,26 +1351,29 @@ class RemoteReferenceWidget(QWidget):
                     f"请减小窗口大小或扩大数据范围。"
                 )
                 return
-            step_size = max(1, int(window_size * self.step_pct_spin.value() / 100.0))
-            huber = self.huber_spin.value()
-            max_iter = self.max_iter_spin.value()
-            tolerance = self.tol_spin.value()
 
             self.status_label.setText("正在计算...")
             self.run_button.setEnabled(False)
             QApplication.processEvents()
 
+            kwargs = build_spectrum_kwargs(
+                sample_rate=sample_rate,
+                window_size=window_size,
+                step_pct=self.step_pct_spin.value(),
+                huber_threshold=self.huber_spin.value(),
+                max_iterations=self.max_iter_spin.value(),
+                tolerance=self.tol_spin.value(),
+                hz_arr=hz_arr,
+                backend=backend,
+                fft_window_size=self.fft_window_combo.currentData() if backend == BACKEND_EMTF_PYWRAP else None,
+                n_bands=self.bands_spin.value(),
+                station_name=local.name,
+            )
             result = emtf_rs.estimate_remote_reference_spectrum(
                 ex_arr, ey_arr,
                 local_hx_arr, local_hy_arr,
                 remote_hx_arr, remote_hy_arr,
-                sample_rate_hz=sample_rate,
-                window_size=window_size,
-                hz=hz_arr,
-                step_size=step_size,
-                huber_threshold=huber,
-                max_iterations=max_iter,
-                tolerance=tolerance,
+                **kwargs,
             )
 
             self._spectrum = result
@@ -1201,10 +1394,13 @@ class RemoteReferenceWidget(QWidget):
 
     def _build_bands(self):
         """从 spectrum 构建 BandedResult，period 范围 2*dt ~ w*dt 对数均分。"""
-        import emtf_rs
-
         if self._spectrum is None:
             self._bands = None
+            return
+        if self._current_backend() == BACKEND_EMTF_PYWRAP:
+            from emtf.io import from_result
+
+            self._bands = from_result(self._spectrum, station_name=self._spectrum.station_name, mode="rr")
             return
         data = self._current_local_data()
         if data is None:
@@ -1214,22 +1410,125 @@ class RemoteReferenceWidget(QWidget):
         w = self.window_combo.currentData()
         n_bands = self.bands_spin.value()
         periods = np.logspace(np.log10(2 * dt), np.log10(w * dt), n_bands)
-        band_configs = [
-            emtf_rs.BandConfig(
-                name=f"band_{i+1}",
-                min_period=float(periods[i]),
-                max_period=float(periods[i+1]),
-            )
-            for i in range(len(periods) - 1)
-        ]
+        band_configs = build_band_configs(periods)
         self._bands = self._spectrum.to_bands(band_configs)
+
+    def _emtf_period_grid(self, sample_rate: float, window_size: int, fft_window_size: int):
+        return emtf_period_grid(sample_rate, window_size, fft_window_size, self.bands_spin.value())
 
     def _on_bands_changed(self):
         """频带数量变更时重建 bands 并刷新对比图。"""
         if self._spectrum is None:
             return
         self._build_bands()
+        self._display_tipper_result()
         self._draw_comparison_plot()
+
+    def _display_tipper_result(self):
+        """Fill the tipper table from the banded result used by EDI/Z-file export."""
+        self._sync_tipper_tab_visibility()
+        bands = self._bands
+        if bands is None or not self._hz_channel_selected():
+            self.tipper_table.setRowCount(0)
+            self._draw_tipper_plot()
+            return
+
+        tzx = getattr(bands, "tzx", None)
+        tzy = getattr(bands, "tzy", None)
+        tzx_se = getattr(bands, "tzx_se", None)
+        tzy_se = getattr(bands, "tzy_se", None)
+        if tzx is None or tzy is None or tzx_se is None or tzy_se is None:
+            self.tipper_table.setRowCount(0)
+            self._draw_tipper_plot()
+            return
+
+        freqs = np.asarray(getattr(bands, "center_frequencies_hz", []), dtype=float)
+        periods = np.asarray(getattr(bands, "periods", []), dtype=float)
+        tzx = np.asarray(tzx)
+        tzy = np.asarray(tzy)
+        tzx_se = np.asarray(tzx_se, dtype=float)
+        tzy_se = np.asarray(tzy_se, dtype=float)
+        n = min(len(freqs), len(periods), len(tzx), len(tzy), len(tzx_se), len(tzy_se))
+
+        def _c2s(c: complex) -> str:
+            return f"{c.real:.4e}{c.imag:+.4e}j"
+
+        self.tipper_table.setRowCount(n)
+        for i in range(n):
+            self.tipper_table.setItem(i, 0, QTableWidgetItem(f"{freqs[i]:.6f}"))
+            self.tipper_table.setItem(i, 1, QTableWidgetItem(f"{periods[i]:.3f}"))
+            self.tipper_table.setItem(i, 2, QTableWidgetItem(_c2s(tzx[i])))
+            self.tipper_table.setItem(i, 3, QTableWidgetItem(_c2s(tzy[i])))
+            self.tipper_table.setItem(i, 4, QTableWidgetItem(f"{tzx_se[i]:.4e}"))
+            self.tipper_table.setItem(i, 5, QTableWidgetItem(f"{tzy_se[i]:.4e}"))
+        self._draw_tipper_plot()
+
+    def _draw_tipper_plot(self):
+        """Draw Tzx/Tzy real and imaginary components with error bars."""
+        result = self._bands
+        if result is None or not self._hz_channel_selected():
+            self.tipper_fig.clear()
+            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
+            self.tipper_canvas.draw()
+            return
+
+        tzx = getattr(result, "tzx", None)
+        tzy = getattr(result, "tzy", None)
+        tzx_se = getattr(result, "tzx_se", None)
+        tzy_se = getattr(result, "tzy_se", None)
+        if tzx is None or tzy is None or tzx_se is None or tzy_se is None:
+            self.tipper_fig.clear()
+            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
+            self.tipper_canvas.draw()
+            return
+
+        p = np.asarray(result.periods, dtype=float)
+        tzx = np.asarray(tzx, dtype=np.complex128)
+        tzy = np.asarray(tzy, dtype=np.complex128)
+        tzx_se = np.asarray(tzx_se, dtype=float)
+        tzy_se = np.asarray(tzy_se, dtype=float)
+        n = min(len(p), len(tzx), len(tzy), len(tzx_se), len(tzy_se))
+        finite = (
+            np.isfinite(p[:n]) & (p[:n] > 0)
+            & np.isfinite(tzx[:n].real) & np.isfinite(tzx[:n].imag)
+            & np.isfinite(tzy[:n].real) & np.isfinite(tzy[:n].imag)
+        )
+        if not finite.any():
+            self.tipper_fig.clear()
+            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
+            self.tipper_canvas.draw()
+            return
+
+        p = p[:n][finite]
+        tzx = tzx[:n][finite]
+        tzy = tzy[:n][finite]
+        tzx_se = tzx_se[:n][finite]
+        tzy_se = tzy_se[:n][finite]
+
+        self.tipper_fig.clear()
+        ax1, ax2 = self.tipper_fig.subplots(2, 1)
+        ax1.errorbar(p, tzx.real, yerr=tzx_se, fmt='o', color='purple',
+                     capsize=3, markersize=5, label='Re(Tzx)')
+        ax1.errorbar(p, tzy.real, yerr=tzy_se, fmt='s', color='green',
+                     capsize=3, markersize=5, label='Re(Tzy)')
+        ax1.set_xscale('log')
+        ax1.set_ylabel('Real')
+        ax1.set_title('倾子响应实部')
+        ax1.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
+        ax1.grid(True, alpha=0.3)
+
+        ax2.errorbar(p, tzx.imag, yerr=tzx_se, fmt='o', color='purple',
+                     capsize=3, markersize=5, label='Im(Tzx)')
+        ax2.errorbar(p, tzy.imag, yerr=tzy_se, fmt='s', color='green',
+                     capsize=3, markersize=5, label='Im(Tzy)')
+        ax2.set_xscale('log')
+        ax2.set_xlabel('Period (s)')
+        ax2.set_ylabel('Imaginary')
+        ax2.set_title('倾子响应虚部')
+        ax2.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
+        ax2.grid(True, alpha=0.3)
+        configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
+        self.tipper_canvas.draw()
 
     # ─── 结果展示 ──────────────────────────────────────────────────
 
@@ -1258,6 +1557,8 @@ class RemoteReferenceWidget(QWidget):
             self.table.setItem(i, 9, QTableWidgetItem(f"{result.zyy_se[i]:.4e}"))
 
         self.resistivity_table.setRowCount(n)
+        phi_xy_values = emtf_phase_deg(np.asarray(result.zxy))
+        phi_yx_values = emtf_phase_deg(np.asarray(result.zyx))
         for i in range(n):
             f = freqs[i]
             period = 1.0 / f if f > 0 else float("inf")
@@ -1265,12 +1566,14 @@ class RemoteReferenceWidget(QWidget):
             self.resistivity_table.setItem(i, 1, QTableWidgetItem(f"{period:.3f}"))
             self.resistivity_table.setItem(i, 2, QTableWidgetItem(f"{result.rho_xy[i]:.4e}"))
             self.resistivity_table.setItem(i, 3, QTableWidgetItem(f"{result.rho_yx[i]:.4e}"))
-            self.resistivity_table.setItem(i, 4, QTableWidgetItem(f"{result.phi_xy[i]:.4f}"))
-            self.resistivity_table.setItem(i, 5, QTableWidgetItem(f"{result.phi_yx[i]:.4f}"))
+            self.resistivity_table.setItem(i, 4, QTableWidgetItem(f"{phi_xy_values[i]:.4f}"))
+            self.resistivity_table.setItem(i, 5, QTableWidgetItem(f"{phi_yx_values[i]:.4f}"))
             self.resistivity_table.setItem(i, 6, QTableWidgetItem(f"{result.rho_xy_se[i]:.4e}"))
             self.resistivity_table.setItem(i, 7, QTableWidgetItem(f"{result.rho_yx_se[i]:.4e}"))
             self.resistivity_table.setItem(i, 8, QTableWidgetItem(f"{result.phi_xy_se[i]:.4f}"))
             self.resistivity_table.setItem(i, 9, QTableWidgetItem(f"{result.phi_yx_se[i]:.4f}"))
+
+        self._display_tipper_result()
 
         self._draw_comparison_plot()
 
@@ -1278,6 +1581,7 @@ class RemoteReferenceWidget(QWidget):
         """用 matplotlib 绘制视电阻率和相位的误差棒对比图。"""
         if self._bands is None:
             self.mpl_fig.clear()
+            configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
             self.mpl_canvas.draw()
             return
 
@@ -1287,17 +1591,18 @@ class RemoteReferenceWidget(QWidget):
         finite = np.isfinite(p) & (p > 0)
         if not finite.any():
             self.mpl_fig.clear()
+            configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
             self.mpl_canvas.draw()
             return
 
         p = p[finite]
         rho_xy = np.array(result.rho_xy)[finite]
         rho_xy_se = np.array(result.rho_xy_se)[finite]
-        phi_xy = np.array(result.phi_xy)[finite]
+        phi_xy = emtf_phase_deg(np.asarray(result.zxy))[finite]
         phi_xy_se = np.array(result.phi_xy_se)[finite]
         rho_yx = np.array(result.rho_yx)[finite]
         rho_yx_se = np.array(result.rho_yx_se)[finite]
-        phi_yx = np.array(result.phi_yx)[finite]
+        phi_yx = emtf_phase_deg(np.asarray(result.zyx))[finite]
         phi_yx_se = np.array(result.phi_yx_se)[finite]
 
         self.mpl_fig.clear()
@@ -1314,7 +1619,7 @@ class RemoteReferenceWidget(QWidget):
         ax1.set_ylabel('Apparent Resistivity (Ω·m)')
         ax1.set_xlabel('Period (s)')
         ax1.set_title('视电阻率')
-        ax1.legend(loc='upper right', fontsize=7, framealpha=0.4, edgecolor='none')
+        ax1.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
         ax1.grid(True, alpha=0.3)
 
         ax2.errorbar(p, phi_xy, yerr=phi_xy_se,
@@ -1327,9 +1632,10 @@ class RemoteReferenceWidget(QWidget):
         ax2.set_xlabel('Period (s)')
         ax2.set_ylabel('Phase (°)')
         ax2.set_title('相位')
-        ax2.legend(loc='upper right', fontsize=7, framealpha=0.4, edgecolor='none')
+        ax2.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
         ax2.grid(True, alpha=0.3)
 
+        configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
         self.mpl_canvas.draw()
 
     def result(self):
@@ -1345,10 +1651,13 @@ class RemoteReferenceWidget(QWidget):
 
     def _on_table_context_menu(self, pos):
         """右键菜单：复制 / 输出阻抗。"""
+        table = self.sender()
+        if not isinstance(table, QTableWidget):
+            table = self.table
         menu = QMenu()
         copy_action = menu.addAction("复制")
         edi_action = menu.addAction("输出阻抗...")
-        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        action = menu.exec(table.viewport().mapToGlobal(pos))
         if action is copy_action:
             self._copy_selection()
         elif action is edi_action:
@@ -1379,20 +1688,63 @@ class RemoteReferenceWidget(QWidget):
         QApplication.clipboard().setText("\n".join(lines))
 
     def _export_edi(self):
-        """将当前结果聚合为频带后导出 EDI + Z-file 到指定文件夹。"""
+        """将当前频带结果导出为用户指定路径的 EDI 文件。"""
         from PySide6.QtWidgets import QFileDialog
+        from pathlib import Path
 
         if self._bands is None:
             QMessageBox.warning(self, "无结果", "请先运行估计。")
             return
 
-        folder = QFileDialog.getExistingDirectory(self, "选择导出文件夹")
-        if not folder:
+        local = self._current_local_data()
+        if local is None:
+            QMessageBox.warning(self, "无数据", "当前没有本地台站数据。")
             return
 
-        self._bands.export_to_folder(
-            folder,
-            station_name=self._current_local_data().name,
-            mode="rr",
+        station_meta = local.station_metadata
+        station_name = station_meta.name.strip() or "unknown"
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 EDI 阻抗文件",
+            f"{station_name}.edi",
+            "EDI 文件 (*.edi);;所有文件 (*)",
         )
-        self.status_label.setText(f"已导出到 {folder}")
+        if not filename:
+            return
+
+        path = Path(filename)
+        if path.suffix.lower() != ".edi":
+            path = path.with_suffix(".edi")
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lat = station_meta.latitude if station_meta.latitude is not None else 0.0
+            lon = station_meta.longitude if station_meta.longitude is not None else 0.0
+            elev = station_meta.elevation if station_meta.elevation is not None else 0.0
+            if self._current_backend() == BACKEND_EMTF_RS:
+                import emtf_rs
+
+                meta = emtf_rs.PyStationMetadata(
+                    station_name=station_name,
+                    project_name=station_name,
+                    latitude=lat,
+                    longitude=lon,
+                    elevation=elev,
+                    processing_mode="rr",
+                    sample_rate_hz=1.0 / local.dt.total_seconds(),
+                )
+                edi_text = self._bands.format_edi_str(meta)
+            else:
+                edi_text = self._bands.format_edi_str(
+                    station_name=station_name,
+                    mode="rr",
+                    lat=lat,
+                    lon=lon,
+                    elev=elev,
+                )
+            path.write_text(edi_text, encoding="ascii")
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", f"无法导出 EDI 文件：{exc}")
+            return
+
+        self.status_label.setText(f"已导出 EDI 到 {path}")

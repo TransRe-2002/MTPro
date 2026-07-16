@@ -35,15 +35,6 @@ from base.processing_broker import ProcessingBroker
 
 from base.data_manager import DataManager
 from core.em_data import EMData
-from processor.remove_region import RemoveRegion
-from processor.remove_spike import RemoveSpike
-from processor.remove_wavelet_denoise import RemoveWaveletDenoise
-from processor.remove_diurnal_sinusoid import RemoveDiurnalSinusoid
-from processor.remove_step_by_baseline import RemoveStepByBaseline
-from processor.remove_step_by_diff import RemoveStepByDiff
-from processor.remove_step_by_window import RemoveStepByWindow
-from processor.robust_estimate import RobustEstimateWidget
-from processor.remote_reference import RemoteReferenceWidget
 from ui.data_process_pipeline import DataProcessPipelineWidget
 from ui.data_process_shared import (
     CLASSIC_TOOL_MIME,
@@ -51,6 +42,7 @@ from ui.data_process_shared import (
     PIPELINE_TOOL_MIME,
     create_classic_tool_model,
 )
+from ui.tools import registry as tool_registry
 
 
 @dataclass(frozen=True)
@@ -91,9 +83,8 @@ class ClassicMdiArea(QMdiArea):
 
         widget_type = event.mimeData().data(CLASSIC_TOOL_MIME).data().decode()
         position = event.position().toPoint()
-        STATION_TOOLS = {"robust estimate", "remote reference"}
 
-        if widget_type in STATION_TOOLS:
+        if tool_registry.is_station_tool(widget_type):
             # Station tools do NOT require channel context — use dataset directly.
             if self.parent_widget.data_id != 0 and self.parent_widget.em_data is not None:
                 data_id = self.parent_widget.data_id
@@ -249,8 +240,10 @@ class DataProcessLegacyWidget(QWidget):
         channel_name: Optional[str] = None,
         position: Optional[QPoint] = None,
     ) -> Optional[QMdiSubWindow]:
-        STATION_TOOLS = {"robust estimate", "remote reference"}
-        is_station_tool = tool_type in STATION_TOOLS or self._canonical_tool_type(tool_type) in STATION_TOOLS
+        is_station_tool = (
+            tool_registry.is_station_tool(tool_type)
+            or tool_registry.is_station_tool(self._canonical_tool_type(tool_type))
+        )
 
         if isinstance(data_id, str) and channel_name is None:
             channel_name = data_id
@@ -301,36 +294,18 @@ class DataProcessLegacyWidget(QWidget):
         self._apply_subwindow_size(sub_window, position)
 
         # ─── 创建工具并接线到 Broker ───────────────────────
-        if tool_key == "remove region":
-            content_widget = RemoveRegion(data_id, channel_name)
-            self._wire_tool(content_widget, data_id, channel_name)
-            content_widget.channel_sync_requested.connect(self.broker.apply_result_all_channels)
-            content_widget.region_sync_requested.connect(self._on_region_sync)
-        elif tool_key == "remove spike":
-            content_widget = RemoveSpike(data_id, channel_name)
-            self._wire_tool(content_widget, data_id, channel_name)
-            content_widget.channel_sync_requested.connect(self.broker.apply_result_all_channels)
-        elif tool_key in ("remove step diff", "remove step window",
-                          "remove step baseline", "remove wavelet denoise",
-                          "remove diurnal sinusoid"):
-            tool_cls = {
-                "remove step diff": RemoveStepByDiff,
-                "remove step window": RemoveStepByWindow,
-                "remove step baseline": RemoveStepByBaseline,
-                "remove wavelet denoise": RemoveWaveletDenoise,
-                "remove diurnal sinusoid": RemoveDiurnalSinusoid,
-            }[tool_key]
-            content_widget = tool_cls(data_id, channel_name)
-            self._wire_tool(content_widget, data_id, channel_name)
-        elif tool_key == "robust estimate":
-            content_widget = RobustEstimateWidget(data_id)
-            self._wire_tool(content_widget, data_id, "")
-        elif tool_key == "remote reference":
-            content_widget = RemoteReferenceWidget(data_id)
-            self._wire_tool(content_widget, data_id, "")
-        else:
+        spec = tool_registry.get(tool_key)
+        content_widget = tool_registry.create_classic_widget(tool_key, data_id, channel_name)
+        if content_widget is None:
             content_widget = QTextEdit()
             content_widget.setPlainText(f"未知工具类型: {tool_type}")
+        else:
+            wire_channel = "" if is_station_tool else (channel_name or "")
+            self._wire_tool(content_widget, data_id, wire_channel)
+            if spec is not None and getattr(content_widget, "channel_sync_requested", None) is not None and spec.has_channel_sync:
+                content_widget.channel_sync_requested.connect(self.broker.apply_result_all_channels)
+            if spec is not None and getattr(content_widget, "region_sync_requested", None) is not None and spec.has_region_sync:
+                content_widget.region_sync_requested.connect(self._on_region_sync)
 
         sub_window.setWidget(content_widget)
         self.mdi_area.addSubWindow(sub_window)
@@ -376,6 +351,7 @@ class DataProcessLegacyWidget(QWidget):
     def _on_region_sync(self, params: dict) -> None:
         """RemoveRegion 跨数据集同步——线程池并行，每个数据集一个 worker。"""
         import logging
+        from core.region_sync import compute_time_range_intervals
         _log = logging.getLogger(__name__)
         time_ranges: list[tuple[float, float]] = params["time_ranges"]
         source_id: int = params.get("source_data_id", -1)
@@ -389,14 +365,7 @@ class DataProcessLegacyWidget(QWidget):
             npts = em_data.npts
             start_ts = em_data.start_time.timestamp()
             dt_sec = em_data.dt.total_seconds()
-            intervals = []
-            for t_start, t_end in time_ranges:
-                left = int((t_start - start_ts) / dt_sec)
-                right = int((t_end - start_ts) / dt_sec)
-                left = max(0, min(left, npts))
-                right = max(0, min(right, npts))
-                if right > left:
-                    intervals.append((left, right))
+            intervals = compute_time_range_intervals(time_ranges, npts, start_ts, dt_sec)
             if intervals:
                 tasks.append((data_id, em_data, intervals))
             else:
@@ -523,11 +492,7 @@ class DataProcessLegacyWidget(QWidget):
                 self._dispose_sub_window(sub_window)
 
     def _canonical_tool_type(self, tool_type: str) -> str:
-        if tool_type == "remove step":
-            return "remove step diff"
-        if tool_type == "remove pulse wavelet":
-            return "remove wavelet denoise"
-        return tool_type
+        return tool_registry.canonical_display_name(tool_type)
 
     def _close_invalid_tool_windows(self):
         if self.mdi_area is None:
@@ -678,8 +643,7 @@ class WorkspaceMdiArea(QMdiArea):
 
         if self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
             widget_type = event.mimeData().data(CLASSIC_TOOL_MIME).data().decode()
-            STATION_TOOLS = {"robust estimate", "remote reference"}
-            if widget_type in STATION_TOOLS:
+            if tool_registry.is_station_tool(widget_type):
                 if self.classic_host.em_data is not None and self.classic_host.data_id != 0:
                     data_id = self.classic_host.data_id
                     channel_name = ""
@@ -1073,21 +1037,23 @@ class DataProcessWidget(QWidget):
         self.classic_button.setStyleSheet(
             "QToolButton {"
             " padding: 6px 16px;"
-            " border: 1px solid #545454;"
+            " border: 1px solid palette(mid);"
             " border-right: none;"
             " border-radius: 6px 0 0 6px;"
-            " background: #2b2b2b;"
+            " background: palette(button);"
+            " color: palette(button-text);"
             " }"
-            "QToolButton:checked { background: #3d7ea6; color: white; }"
+            "QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
         )
         self.pipeline_button.setStyleSheet(
             "QToolButton {"
             " padding: 6px 16px;"
-            " border: 1px solid #545454;"
+            " border: 1px solid palette(mid);"
             " border-radius: 0 6px 6px 0;"
-            " background: #2b2b2b;"
+            " background: palette(button);"
+            " color: palette(button-text);"
             " }"
-            "QToolButton:checked { background: #3d7ea6; color: white; }"
+            "QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
         )
         self.pipeline_button.setEnabled(self.PIPELINE_ENABLED)
         self.pipeline_button.setToolTip("Pipeline 功能暂时屏蔽" if not self.PIPELINE_ENABLED else "")

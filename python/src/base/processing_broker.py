@@ -13,6 +13,7 @@
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -21,9 +22,18 @@ import xarray as xr
 from PySide6.QtCore import QObject, Signal, Slot, QMutex, QMutexLocker
 
 from base.data_manager import DataManager
+from core.region_sync import apply_nan_intervals, compute_time_range_intervals
 from utils.series import dti_to_numpy
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StationMetadata:
+    name: str
+    latitude: Optional[float]
+    longitude: Optional[float]
+    elevation: Optional[float]
 
 
 class ProcessingBroker(QObject):
@@ -77,8 +87,9 @@ class ProcessingBroker(QObject):
                     'name': edata.name,
                     'has_magnetic': any(c.startswith(('H', 'B')) for c in chs),
                     'has_electric': any(c.startswith('E') for c in chs),
-                    'latitude': getattr(edata, 'latitude', None),
-                    'longitude': getattr(edata, 'longitude', None),
+                    'latitude': edata.latitude,
+                    'longitude': edata.longitude,
+                    'elevation': edata.elevation,
                 })
             pkg = {
                 'x': x,
@@ -95,8 +106,15 @@ class ProcessingBroker(QObject):
                 'stations': stations,
                 'datetime_index': em_data.datetime_index,
                 'name': em_data.name,
-                'latitude': getattr(em_data, 'latitude', None),
-                'longitude': getattr(em_data, 'longitude', None),
+                'latitude': em_data.latitude,
+                'longitude': em_data.longitude,
+                'elevation': em_data.elevation,
+                'station_metadata': StationMetadata(
+                    name=em_data.name,
+                    latitude=em_data.latitude,
+                    longitude=em_data.longitude,
+                    elevation=em_data.elevation,
+                ),
             }
         else:
             series = em_data.get_channel_series(channel)
@@ -113,6 +131,7 @@ class ProcessingBroker(QObject):
                 'npts': em_data.npts,
                 'start_time': em_data.start_time.timestamp(),
                 'dt': em_data.dt.total_seconds(),
+                'datetime_index': em_data.datetime_index,
                 'kp_data': em_data.kp_data,
             }
         self.data_ready.emit(data_id, channel, pkg)
@@ -178,26 +197,15 @@ class ProcessingBroker(QObject):
             start_ts = em_data.start_time.timestamp()
             dt_sec = em_data.dt.total_seconds()
 
-            # 根据时间范围计算索引
-            indices_list = []
-            for t_start, t_end in time_ranges:
-                left = int((t_start - start_ts) / dt_sec)
-                right = int((t_end - start_ts) / dt_sec)
-                left = max(0, min(left, npts))
-                right = max(0, min(right, npts))
-                if right > left:
-                    indices_list.append((left, right))
-
-            if not indices_list:
+            intervals = compute_time_range_intervals(time_ranges, npts, start_ts, dt_sec)
+            if not intervals:
                 continue
 
             for ch in em_data.channel_names():
                 da = em_data.data[ch]
                 if len(da.values) != npts:
                     continue
-                vals = da.values.copy()
-                for left, right in indices_list:
-                    vals[left:right] = np.nan
+                vals = apply_nan_intervals(da.values, intervals)
                 em_data.data[ch] = xr.DataArray(
                     vals, dims=da.dims, coords=da.coords,
                 )

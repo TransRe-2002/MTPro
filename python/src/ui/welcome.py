@@ -1,18 +1,28 @@
-import sys
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QGroupBox, QTreeView, QAbstractItemView
+    QAbstractItemView,
+    QApplication,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTreeView,
+    QVBoxLayout,
+    QWidget,
 )
 
 
 class Welcome(QWidget):
     recent_file_requested = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("MTPro - 欢迎")
         self.setObjectName("WelcomeRoot")
@@ -157,15 +167,6 @@ class Welcome(QWidget):
         if not index.isValid():
             return
         path_index = self.recent_model.index(index.row(), 0)
-        path = path_index.data(Qt.ItemDataRole.UserRole)
+        path: Optional[str] = path_index.data(Qt.ItemDataRole.UserRole)
         if path:
             self.recent_file_requested.emit(str(path))
-
-
-import pytest
-@pytest.mark.parametrize("title", ["欢迎！"])
-def test_welcome(title):
-    app = QApplication(sys.argv)
-    window = Welcome()
-    window.show()
-    assert app.exec() == 0

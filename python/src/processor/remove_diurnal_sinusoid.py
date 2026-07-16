@@ -46,6 +46,7 @@ from processor.diurnal_sinusoid_subtraction import (
     subtract_diurnal_signal_series,
 )
 from processor.step_plot_widget import StepPlotWidget
+from utils.theme import subtle_pen, transparent_legend_brush
 from utils.validators import read_nonnegative_int, read_positive_float, read_positive_int
 
 
@@ -82,6 +83,7 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         super().__init__(data_id, channel_name, parent)
 
         self.preview_result: Optional[PeriodicSubtractionResult] = None
+        self.datetime_index: Optional[pd.DatetimeIndex] = None
         self._syncing_x_range = False
 
         self.signal_plot_widget = StepPlotWidget()
@@ -165,8 +167,15 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
 
     def _on_data_loaded(self):
         # 日变工具使用 time+linear 双重插值（覆写基类的 linear-only）
-        series = pd.Series(self._pkg['y'])
-        interpolated = series.interpolate(method="time").interpolate(method="linear")
+        index = self._pkg.get('datetime_index')
+        if isinstance(index, pd.DatetimeIndex) and len(index) == len(self._pkg['y']):
+            self.datetime_index = index
+            series = pd.Series(self._pkg['y'], index=index, name=self.ch_name)
+            interpolated = series.interpolate(method="time").interpolate(method="linear")
+        else:
+            self.datetime_index = None
+            series = pd.Series(self._pkg['y'], name=self.ch_name)
+            interpolated = series.interpolate(method="linear")
         self.y_data = interpolated.to_numpy(dtype=np.float64)
         self.origin_y_data = self.y_data.copy()
         self._init_plot()
@@ -269,30 +278,33 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
             name="当前序列", **curve_opts,
         )
         self.preview_line = StepPlotWidget.make_curve(
+            [], [],
             pen=pg.mkPen(0, 114, 178, width=1),
             name="预览结果", **curve_opts,
         )
         signal_legend = self.signal_plot_item.addLegend()
         signal_legend.anchor((1, 0), (1, 0))
-        signal_legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        signal_legend.setPen(pg.mkPen("k", width=1))
+        signal_legend.setBrush(transparent_legend_brush(self))
+        signal_legend.setPen(subtle_pen(self))
         self.signal_plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.signal_plot_item.addItem(self.origin_line)
         self.signal_plot_item.addItem(self.current_line)
         self.signal_plot_item.addItem(self.preview_line)
 
         self.current_noise_line = StepPlotWidget.make_curve(
+            [], [],
             pen=pg.mkPen(215, 48, 39, width=1),
             name="当前拟合噪声", **curve_opts,
         )
         self.preview_noise_line = StepPlotWidget.make_curve(
+            [], [],
             pen=pg.mkPen(0, 114, 178, width=1),
             name="预览拟合噪声", **curve_opts,
         )
         noise_legend = self.noise_plot_item.addLegend()
         noise_legend.anchor((1, 0), (1, 0))
-        noise_legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        noise_legend.setPen(pg.mkPen("k", width=1))
+        noise_legend.setBrush(transparent_legend_brush(self))
+        noise_legend.setPen(subtle_pen(self))
         self.noise_plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.noise_plot_item.addItem(self.current_noise_line)
         self.noise_plot_item.addItem(self.preview_noise_line)
@@ -344,7 +356,7 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         self._log("===== 日变正弦相减工具 =====")
         self._log(f"通道: {self.ch_name}")
         self._log(f"采样点数: {len(self.y_data)}")
-        self._log(f"采样间隔: {self.em_data.dt}")
+        self._log(f"采样间隔: {self._pkg['dt']} 秒")
         self._log("默认目标周期: 24h")
         self._log("")
 
@@ -422,7 +434,10 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         if min_valid_samples is None:
             return None
 
-        series = pd.Series(samples, index=self.em_data.datetime_index, name=self.ch_name)
+        if self.datetime_index is None:
+            self._log("当前数据缺少 DatetimeIndex，无法执行按时间窗口的日变拟合")
+            return None
+        series = pd.Series(samples, index=self.datetime_index, name=self.ch_name)
         try:
             return subtract_diurnal_signal_series(
                 series,

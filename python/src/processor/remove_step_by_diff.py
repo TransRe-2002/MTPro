@@ -42,6 +42,7 @@ from processor.step_algorithms import (
     zero_diff_indices,
 )
 from processor.step_plot_widget import StepPlotWidget
+from utils.theme import subtle_pen, transparent_legend_brush
 from utils.validators import read_positive_int
 
 
@@ -224,8 +225,8 @@ class RemoveStepByDiff(BaseProcessorWidget):
         )
         legend = self.signal_plot_item.addLegend()
         legend.anchor((1, 0), (1, 0))
-        legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        legend.setPen(pg.mkPen("k", width=1))
+        legend.setBrush(transparent_legend_brush(self))
+        legend.setPen(subtle_pen(self))
         self.signal_plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.signal_plot_item.addItem(self.origin_line)
         self.signal_plot_item.addItem(self.y_line)

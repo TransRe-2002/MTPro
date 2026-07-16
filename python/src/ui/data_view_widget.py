@@ -52,13 +52,15 @@ class PlotRowContainer(QFrame):
         # 拖拽把手（左侧竖条）
         handle = QFrame(self)
         handle.setFixedWidth(13)
-        handle.setStyleSheet("QFrame { background: #e8e8e8; border-right: 1px solid #c0c0c0; }")
+        handle.setStyleSheet(
+            "QFrame { background: palette(button); border-right: 1px solid palette(mid); }"
+        )
         handle_layout = QVBoxLayout(handle)
         handle_layout.setContentsMargins(0, 0, 0, 0)
         handle_layout.setSpacing(0)
         handle_label = QLabel(">>")
         handle_label.setFont(QFont("Arial", 9))
-        handle_label.setStyleSheet("color: #999;")
+        handle_label.setStyleSheet("color: palette(mid);")
         handle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         handle_layout.addWidget(handle_label)
         row_layout.addWidget(handle)
@@ -470,6 +472,15 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             return
         visible = state == Qt.CheckState.Checked.value
         resources.row_container.setVisible(visible)
+        self._sync_left_axes()
+
+    def _sync_left_axes(self) -> None:
+        """Restore waveform subplot axis sizing and labels."""
+        for resources in self.plot_rows.values():
+            widget = resources.widget
+            if widget is None:
+                continue
+            widget.sync_axis_layout()
 
     # -------------------------------------------------------------------------
     # 通道 / Plot 管理
@@ -548,6 +559,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         # 按 channel_order 排好 splitter 中的顺序
         self._reorder_splitter()
+        self._sync_left_axes()
 
     def _reorder_splitter(self) -> None:
         """确保 splitter 中 widget 的排列顺序与 _channel_order 一致。
@@ -646,6 +658,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         for resources in self.plot_rows.values():
             if resources.widget is not None:
                 resources.widget.update_plot(view_start, view_end)
+        self._sync_left_axes()
 
     # -------------------------------------------------------------------------
     # 视口更新（实现 Mixin 钩子）
@@ -660,6 +673,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         for resources in self.plot_rows.values():
             if resources.worker is not None:
                 resources.worker.range_change(start, end)
+        self._sync_left_axes()
         self.set_time(pts_to_qdt(start), pts_to_qdt(end))
 
     # -------------------------------------------------------------------------
@@ -714,6 +728,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             widget.clear_curves()
             widget.add_curve(x_vals, y_vals, channel, graph_type='plot')
             widget.show()
+        self._sync_left_axes()
         self._on_viewport_changed()
 
     def shutdown(self) -> None:

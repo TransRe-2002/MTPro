@@ -3,6 +3,8 @@ Map widget using Leaflet.js embedded in QWebEngineView.
 Default tile source: 高德卫星图 + 高德注记叠加 (GCJ-02).
 """
 
+from __future__ import annotations
+
 from enum import Enum, auto
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -123,7 +125,7 @@ class TileSource(Enum):
     NORMAL = auto()      # 高德矢量地图
     TERRAIN = auto()     # 天地图矢量 (等高线需 TK)
 
-    def _js_name(self):
+    def _js_name(self) -> str:
         return {TileSource.SATELLITE: "satellite",
                 TileSource.NORMAL: "normal",
                 TileSource.TERRAIN: "terrain"}[self]
@@ -136,19 +138,19 @@ class _MapHandler(QObject):
     switchTile = Signal(str)
 
     @Slot(str, float, float, str)
-    def add_marker(self, key, lat, lng, label=""):
+    def add_marker(self, key: str, lat: float, lng: float, label: str = "") -> None:
         self.addMarker.emit(key, lat, lng, label)
 
     @Slot()
-    def clear_markers(self):
+    def clear_markers(self) -> None:
         self.clearMarkers.emit()
 
     @Slot(float, float, int)
-    def set_view(self, lat, lng, zoom):
+    def set_view(self, lat: float, lng: float, zoom: int) -> None:
         self.setView.emit(lat, lng, zoom)
 
     @Slot(str)
-    def switch_tile(self, name):
+    def switch_tile(self, name: str) -> None:
         self.switchTile.emit(name)
 
 
@@ -161,7 +163,7 @@ class MapWidget(QWidget):
     calling add_marker().
     """
 
-    def __init__(self, tile_source=TileSource.SATELLITE, parent=None):
+    def __init__(self, tile_source: TileSource = TileSource.SATELLITE, parent=None) -> None:
         super().__init__(parent)
         self._handler = _MapHandler(self)
         self._counter = 0
@@ -181,23 +183,23 @@ class MapWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._view)
 
-    def add_marker(self, lat, lng, label=""):
+    def add_marker(self, lat: float, lng: float, label: str = "") -> str:
         """Add a marker at (lat, lng). Returns key for future reference."""
         self._counter += 1
         key = f"m{self._counter}"
         self._handler.add_marker(key, lat, lng, label)
         return key
 
-    def clear(self):
+    def clear(self) -> None:
         self._handler.clear_markers()
         self._counter = 0
 
-    def fly_to(self, lat, lng, zoom=None):
+    def fly_to(self, lat: float, lng: float, zoom=None) -> None:
         z = zoom if zoom is not None else self._current_zoom
         self._current_zoom = z
         self._handler.set_view(lat, lng, z)
 
-    def set_tile_source(self, source: TileSource):
+    def set_tile_source(self, source: TileSource) -> None:
         self._handler.switch_tile(source._js_name())
 
 

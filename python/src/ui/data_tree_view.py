@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import logging
 import json
 
 from PySide6.QtWidgets import (
     QTreeView, QVBoxLayout, QWidget, QSplitter,
-    QMenu, QPlainTextEdit, QLabel, QFrame, QGroupBox, QStackedWidget
+    QMenu, QPlainTextEdit, QLabel, QFrame, QGroupBox, QStackedWidget,
+    QMessageBox,
 )
 from PySide6.QtCore import QByteArray, QMimeData, Qt, QModelIndex, Signal
 from PySide6.QtGui import QDrag, QFont
@@ -393,6 +396,7 @@ class DataTreeViewer(QWidget):
             menu = QMenu(self)
             action_show = menu.addAction("显示曲线")
             action_compare = menu.addAction("序列对比")
+            action_edit_metadata = menu.addAction("编辑通道元数据")
             action = menu.exec(self.tree_view.viewport().mapToGlobal(pos))
             if action == action_show:
                 self.on_item_double_click(index)
@@ -408,6 +412,28 @@ class DataTreeViewer(QWidget):
                         return
                     channels = [(em_data, ch_name)]
                 self.open_compare_widget(channels)
+            elif action == action_edit_metadata:
+                self.open_channel_metadata_editor(index)
+
+    def open_channel_metadata_editor(self, index: QModelIndex) -> None:
+        if not self.model.is_channel_index(index):
+            return
+
+        key = self.model.dataset_key(index)
+        ch_name = self.model.channel_name(index)
+        if key is None or ch_name is None:
+            return
+
+        self.logger.info(
+            "Channel metadata editor requested for dataset #%s channel %s",
+            key,
+            ch_name,
+        )
+        QMessageBox.information(
+            self,
+            "编辑通道元数据",
+            f"通道 {ch_name} 的元数据编辑功能待实现。",
+        )
 
     def get_check_state(self) -> list[tuple[EMData, str]]:
         refs = self.model.checked_channel_refs()

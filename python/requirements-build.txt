@@ -1,0 +1,8 @@
+# Build and test tools. Install these into python/.venv only for development,
+# tests, Rust wheel builds, or Nuitka packaging.
+Nuitka>=4.1
+maturin>=1.14
+pytest>=9.0
+ordered-set>=4.1
+zstandard>=0.25
+pefile>=2024.8.26; platform_system == "Windows"

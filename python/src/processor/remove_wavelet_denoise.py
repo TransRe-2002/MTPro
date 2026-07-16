@@ -48,6 +48,7 @@ from processor._region_mixin import RegionManagementMixin
 from processor.step_algorithms import WaveletDenoiseResult, wavelet_multiscale_denoise
 from processor.step_plot_widget import StepPlotWidget
 from utils.series import dti_to_numpy
+from utils.theme import configure_pyqtgraph_theme, pg_background, subtle_pen, transparent_legend_brush
 
 
 class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
@@ -169,7 +170,8 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.signal_plot_widget.getAxis("bottom").setStyle(tickLength=0)
         self.detail_plot_widget.getAxis("left").setStyle(tickLength=0)
         self.detail_plot_widget.getAxis("bottom").setStyle(tickLength=0)
-        self.detail_plot_widget.setBackground("w")
+        configure_pyqtgraph_theme(self.detail_plot_widget)
+        self.detail_plot_widget.setBackground(pg_background(self.detail_plot_widget))
 
         self.wavelet_combo.addItems(["db4", "db6", "sym4", "sym6"])
         self.transform_combo.addItems(["DWT", "Wavelet Packet"])
@@ -658,8 +660,8 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         )
         legend = self.signal_plot_item.addLegend()
         legend.anchor((1, 0), (1, 0))
-        legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        legend.setPen(pg.mkPen("k", width=1))
+        legend.setBrush(transparent_legend_brush(self))
+        legend.setPen(subtle_pen(self))
         self.signal_plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.signal_plot_item.addItem(self.origin_line)
         self.signal_plot_item.addItem(self.y_line)
@@ -685,8 +687,8 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.detail_plot_item.setLabel("left", "能量")
         detail_legend = self.detail_plot_item.addLegend()
         detail_legend.anchor((1, 0), (1, 0))
-        detail_legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        detail_legend.setPen(pg.mkPen("k", width=1))
+        detail_legend.setBrush(transparent_legend_brush(self))
+        detail_legend.setPen(subtle_pen(self))
         self.detail_plot_item.showGrid(x=False, y=True, alpha=0.7)
         self.energy_before_bars = pg.BarGraphItem(
             x=np.array([1.0]),

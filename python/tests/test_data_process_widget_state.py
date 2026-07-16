@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from base.data_manager import DataManager
 from core.em_data import EMData
+from processor.remove_diurnal_sinusoid import RemoveDiurnalSinusoid
 from ui.data_process import DataProcessLegacyWidget, DataProcessWidget, ToolWindowState, WorkspaceMdiArea
 from ui.data_process_shared import DATA_TREE_SELECTION_MIME
 from ui.data_process_pipeline import DataProcessPipelineWidget, PipelineBlock
@@ -166,6 +167,29 @@ def test_data_process_widget_opens_diurnal_sinusoid_tool():
     assert sub_window is not None
     assert sub_window.property("tool_key") == "remove diurnal sinusoid"
     assert sub_window.widget().__class__.__name__ == "RemoveDiurnalSinusoid"
+
+    widget.close()
+
+
+def test_diurnal_sinusoid_widget_uses_broker_datetime_index():
+    _app()
+    data = DemoData("demo", ["Ex1"], values=[0.0, np.nan, 2.0, 3.0])
+    widget = RemoveDiurnalSinusoid(1, "Ex1")
+
+    widget._on_data_ready(1, "Ex1", {
+        "x": np.arange(data.npts, dtype=np.float64),
+        "y": data.get_channel_series("Ex1").to_numpy(dtype=np.float64),
+        "channel_names": ["Ex1"],
+        "all_y": {"Ex1": data.get_channel_series("Ex1").to_numpy(dtype=np.float64)},
+        "npts": data.npts,
+        "start_time": data.start_time.timestamp(),
+        "dt": data.dt.total_seconds(),
+        "datetime_index": data.datetime_index,
+        "kp_data": None,
+    })
+
+    assert widget.datetime_index.equals(data.datetime_index)
+    assert np.isfinite(widget.y_data).all()
 
     widget.close()
 

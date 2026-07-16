@@ -14,13 +14,13 @@ class DatabaseManager:
         if self.connection is not None:
             self.connection.close()
 
-    def execute_query(self, query: str, params=()) -> Optional[Any]:
+    def execute_query(self, query: str, params=()) -> sqlite3.Cursor:
         cursor = self.connection.cursor()
         cursor.execute(query, params)
         self.connection.commit()
         return cursor
 
-    def execute_read_query(self, query: str, params=()) -> Optional[Any]:
+    def execute_read_query(self, query: str, params=()) -> list[tuple]:
         cursor = self.connection.cursor()
         cursor.execute(query, params)
         return cursor.fetchall()

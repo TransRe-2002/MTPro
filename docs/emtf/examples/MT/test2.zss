@@ -1,0 +1,13 @@
+ **** IMPEDANCE IN MEASUREMENT COORDINATES ****
+ ********** WITH FULL ERROR COVARINCE**********
+Robust Single station                                                           
+station    :test2               
+coordinate    49.820   102.190  declination     0.00
+number of channels   5   number of frequencies    0
+ orientations and tilts of each channel 
+    1     0.00     0.00 tes  Hx    
+    2    90.00     0.00 tes  Hy    
+    3     0.00     0.00 tes  Hz    
+    4     0.00     0.00 tes  Ex    
+    5    90.00     0.00 tes  Ey    
+

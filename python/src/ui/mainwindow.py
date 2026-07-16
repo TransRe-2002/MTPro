@@ -1,41 +1,57 @@
+from __future__ import annotations
+
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Dict, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QFont, QIcon
-from collections.abc import Callable
-
 from PySide6.QtWidgets import (
     QDialog,
-    QFrame,
-    QMainWindow,
-    QMessageBox,
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
     QInputDialog,
-    QProgressDialog,
-    QTabWidget,
-    QSplitter,
-    QStackedWidget,
-    QWizard,
-    QWidget,
-    QVBoxLayout,
     QLabel,
     QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressDialog,
     QPushButton,
+    QSizePolicy,
+    QSplitter,
+    QStackedWidget,
+    QTabWidget,
     QTextEdit,
     QToolBar,
-    QSizePolicy, QHBoxLayout,
+    QVBoxLayout,
+    QWidget,
+    QWizard,
 )
-from typing import Dict, Optional
 
 from base.data_manager import DataManager
 from ui.data_process import DataProcessWidget
 from ui.data_tree_view import DataTreeViewer
 from ui.data_view_widget import DataViewWidget
-from ui.log_console import LogConsoleWidget, QtTextEditHandler, configure_application_logging, log_session_banner
+from ui.log_console import (
+    LogConsoleWidget,
+    QtTextEditHandler,
+    configure_application_logging,
+    log_session_banner,
+)
 from ui.welcome import Welcome
-from utils.app_state import AppState, load_app_state, remember_recent_file, remove_recent_file, save_app_state
+from ui.dialogs.batch_save_dialog import BatchSaveDialog
+from ui.tools import registry as tool_registry
+from io_utils import file_ops
+from utils.app_state import (
+    AppState,
+    load_app_state,
+    remember_recent_file,
+    remove_recent_file,
+    save_app_state,
+)
 
 FILTER_TYPE = [
     "Matlab数据文件 (*.mat)",
@@ -44,79 +60,6 @@ FILTER_TYPE = [
 DATA_MANAGER_INITIAL_WIDTH = 220
 WORKSPACE_INITIAL_WIDTH = 1260
 
-
-class _BatchSaveDialog(QDialog):
-    """批量保存对话框：文件夹选择 + 后缀 + 预览。"""
-    def __init__(self, items, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("批量保存")
-        self.resize(550, 350)
-
-        layout = QVBoxLayout(self)
-
-        # 文件夹选择
-        folder_row = QHBoxLayout()
-        folder_row.addWidget(QLabel("目标文件夹:"))
-        self.folder_path = QLineEdit()
-        self.folder_path.setReadOnly(True)
-        folder_row.addWidget(self.folder_path, 1)
-        browse_btn = QPushButton("浏览...")
-        browse_btn.clicked.connect(self._browse)
-        folder_row.addWidget(browse_btn)
-        layout.addLayout(folder_row)
-
-        # 后缀
-        suffix_row = QHBoxLayout()
-        suffix_row.addWidget(QLabel("文件名后缀:"))
-        self.suffix_edit = QLineEdit()
-        self.suffix_edit.setPlaceholderText("如 _fixed")
-        suffix_row.addWidget(self.suffix_edit, 1)
-        layout.addLayout(suffix_row)
-
-        # 预览
-        layout.addWidget(QLabel("保存预览（最多显示前 5 个）:"))
-        self.preview = QTextEdit()
-        self.preview.setReadOnly(True)
-        self.preview.setMaximumHeight(120)
-        layout.addWidget(self.preview)
-
-        # 按钮
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        save_btn = QPushButton("批量保存")
-        save_btn.clicked.connect(self.accept)
-        save_btn.setDefault(True)
-        btn_row.addWidget(save_btn)
-        layout.addLayout(btn_row)
-
-        self._items = items
-        self._update_preview()
-
-        self.suffix_edit.textChanged.connect(self._update_preview)
-
-    def _browse(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择批量保存的目标文件夹",
-            options=QFileDialog.Option.ShowDirsOnly,
-        )
-        if folder:
-            self.folder_path.setText(folder)
-            self._update_preview()
-
-    def _update_preview(self):
-        folder = self.folder_path.text() or "<未选择>"
-        suffix = self.suffix_edit.text().strip()
-        lines = []
-        for i, (_, data) in enumerate(self._items):
-            if i >= 5:
-                lines.append(f"  ... 共 {len(self._items)} 个文件")
-                break
-            name = data.name if data.name else f"dataset_{i}"
-            lines.append(f"  {name}{suffix}.mat")
-        self.preview.setPlainText(f"目标: {folder}\n\n" + "\n".join(lines))
 
 class MainWindow(QMainWindow):
     def __init__(self, data_manager: DataManager, parent=None):
@@ -603,7 +546,6 @@ class MainWindow(QMainWindow):
         own_progress = None
         is_batch = progress is not None
         try:
-            from io_utils.mat_io import MatLoader
             from PySide6.QtWidgets import QApplication
 
             if is_batch:
@@ -623,7 +565,7 @@ class MainWindow(QMainWindow):
                 own_progress.setValue(0)
                 progress = own_progress
 
-            em_data = MatLoader.load(normalized, tz=tz)
+            em_data = file_ops.load_mat(normalized, tz=tz)
 
             if not is_batch:
                 total_steps = 3 + em_data.NCh + (1 if em_data.kp_data is not None else 0)
@@ -722,9 +664,7 @@ class MainWindow(QMainWindow):
                 return
 
             try:
-                from io_utils.mat_io import MatSaver
-
-                MatSaver.save(data, data.path)
+                file_ops.save_mat(data, data.path)
                 self.logger.info("Saved dataset #%s to %s", data_id, data.path)
             except Exception:
                 self.logger.exception("Failed to save dataset #%s to %s", data_id, data.path)
@@ -765,9 +705,7 @@ class MainWindow(QMainWindow):
             filename += "." + m.group(1)
         if selected_filter == FILTER_TYPE[0]:
             try:
-                from io_utils.mat_io import MatSaver
-
-                MatSaver.save(data, filename)
+                file_ops.save_mat(data, filename)
                 self.logger.info("Saved dataset #%s as %s", data_id, filename)
             except Exception:
                 self.logger.exception("Failed to save dataset #%s as %s", data_id, filename)
@@ -777,50 +715,22 @@ class MainWindow(QMainWindow):
 
     def batch_save(self):
         """批量保存 DataManager 中所有数据集到指定文件夹。"""
-        from io_utils.mat_io import MatSaver
-
         items = list(self.data_manager.items())
         if not items:
             QMessageBox.information(self, "提示", "没有已加载的数据集。")
             return
 
-        dlg = _BatchSaveDialog(items, self)
+        dlg = BatchSaveDialog(items, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
         folder = dlg.folder_path.text()
         suffix = dlg.suffix_edit.text().strip()
 
-        def _unique_path(folder: str, name: str, suffix: str) -> str:
-            base = f"{name}{suffix}"
-            path = os.path.join(folder, f"{base}.mat")
-            if not os.path.exists(path):
-                return path
-            n = 1
-            while True:
-                path = os.path.join(folder, f"{base}({n}).mat")
-                if not os.path.exists(path):
-                    return path
-                n += 1
-
-        saved, failed, skipped = 0, 0, 0
-        for data_id, data in items:
-            name = data.name if data.name else f"dataset_{data_id}"
-            path = _unique_path(folder, name, suffix)
-            try:
-                MatSaver.save(data, path)
-                self.logger.info("Batch saved #%s to %s", data_id, path)
-                saved += 1
-            except Exception:
-                self.logger.exception("Batch save failed for #%s", data_id)
-                failed += 1
+        saved, failed = file_ops.batch_save_mat(items, folder, suffix)
 
         msg = f"成功: {saved} 个\n失败: {failed} 个"
-        if skipped:
-            msg += f"\n跳过: {skipped} 个"
         QMessageBox.information(self, "批量保存完成", msg)
-
-
 
     def on_data_added(self, key: int):
         data = self.data_manager.get(key)
@@ -903,12 +813,12 @@ class MainWindow(QMainWindow):
     def _resolve_processing_target(self, tool_type: str = "") -> Optional[tuple[int, str]]:
         # Station-level tools (robust estimate, remote reference) only need a
         # dataset, not a specific channel.
-        station_tools = {"robust estimate", "remote reference"}
+        is_station = tool_registry.is_station_tool(tool_type)
 
         current_channel = self.data_tree_viewer.current_channel_ref()
         if current_channel is not None:
             data_id, ch = current_channel
-            if tool_type in station_tools:
+            if is_station:
                 return data_id, ch
             return current_channel
 
@@ -917,7 +827,7 @@ class MainWindow(QMainWindow):
         if data is None or data_id is None:
             return None
 
-        if tool_type in station_tools:
+        if is_station:
             return data_id, data.first_channel_name() or ""
 
         channel_names = list(data.data.keys())

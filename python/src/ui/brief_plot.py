@@ -18,6 +18,10 @@ from PySide6.QtCore import Qt, QObject, Signal
 from typing import Optional
 
 from utils.series import dti_to_numpy
+from utils.theme import configure_pyqtgraph_theme, pg_background, subtle_pen, transparent_legend_brush
+
+LEFT_AXIS_WIDTH = 62
+BOTTOM_AXIS_HEIGHT = 34
 
 
 class BriefWorker(QObject):
@@ -28,16 +32,16 @@ class BriefWorker(QObject):
     # 曲线可见性变化时发出 (label, visible)
     visible = Signal(str, bool)
 
-    def __init__(self, label: str, parent=None):
+    def __init__(self, label: str, parent=None) -> None:
         super().__init__(parent)
         self.label = label
 
-    def range_change(self, start: pd.Timestamp, end: pd.Timestamp):
+    def range_change(self, start: pd.Timestamp, end: pd.Timestamp) -> None:
         """通知外部视口范围已变更。"""
         self.update.emit(start, end)
 
     # 预留信号：设置曲线可见性
-    def visible_curve(self, label: str, visible: bool):
+    def visible_curve(self, label: str, visible: bool) -> None:
         """切换指定曲线的可见性。"""
         self.visible.emit(label, visible)
 
@@ -52,8 +56,8 @@ class BriefPlot(PlotWidget):
     def __init__(
             self,
             parent=None,
-            label: str='example',
-        ):
+            label: str = "example",
+        ) -> None:
         """初始化 BriefPlot 控件。
 
         Args:
@@ -64,6 +68,8 @@ class BriefPlot(PlotWidget):
             parent,
             axisItems={'bottom': DateAxisItem(orientation='bottom', utcOffset=0)}
         )
+        configure_pyqtgraph_theme(self)
+        self.setBackground(pg_background(self))
         self.label = label
         self.curves: dict[str, pg.GraphicsObject] = {}
         self.show_curves: dict[str, bool] = {}
@@ -74,6 +80,27 @@ class BriefPlot(PlotWidget):
 
         # 禁用鼠标拖拽/缩放交互，由外部 ViewBox 统一控制
         self.setMouseEnabled(x=False, y=False)
+        self.sync_axis_layout()
+        self.hideButtons()
+
+    def sync_axis_layout(self) -> None:
+        """Restore axis sizing and labels after pyqtgraph item/layout updates."""
+        self.plot_item.showAxis('left', True)
+        self.plot_item.showAxis('bottom', True)
+        left_axis = self.getAxis('left')
+        left_axis.show()
+        left_axis.setStyle(tickLength=4)
+        left_axis.setTickFont(QFont('Arial', 8))
+        left_axis.setWidth(LEFT_AXIS_WIDTH)
+        bottom_axis = self.getAxis('bottom')
+        bottom_axis.show()
+        bottom_axis.setStyle(tickLength=4)
+        bottom_axis.setTickFont(QFont('Arial', 8))
+        bottom_axis.setHeight(BOTTOM_AXIS_HEIGHT)
+        if self.label is not None:
+            self.plot_item.setLabel('bottom', self.label)
+        self.plot_item.updateGeometry()
+        self.updateGeometry()
 
     def show_warning(self, msg: str) -> None:
         """非模态警告提示，2 秒后自动消失。"""
@@ -81,8 +108,8 @@ class BriefPlot(PlotWidget):
         from PySide6.QtWidgets import QLabel, QGraphicsProxyWidget
         label = QLabel(msg)
         label.setStyleSheet(
-            "background: #fff3cd; color: #856404; padding: 4px 8px; "
-            "border: 1px solid #ffc107; border-radius: 4px; font-size: 12px;"
+            "background: palette(base); color: palette(text); padding: 4px 8px; "
+            "border: 1px solid palette(mid); border-radius: 4px; font-size: 12px;"
         )
         proxy = QGraphicsProxyWidget()
         proxy.setWidget(label)
@@ -90,26 +117,12 @@ class BriefPlot(PlotWidget):
         self.plot_item.addItem(proxy)
         proxy.setPos(10, 10)
         QTimer.singleShot(2000, lambda: self.plot_item.removeItem(proxy) if proxy.scene() else None)
-        self.hideButtons()  # 隐藏默认的缩放按钮
-        # 自定义 Y 轴样式：无刻度线，向左偏移标签文字
-        self.getAxis('left').setStyle(
-            tickLength=0,
-            tickTextOffset=-25,
-        )
-        self.getAxis('left').setTickFont(QFont('Arial', 8))
-        self.getAxis('left').setWidth(0)
-        if self.label is not None:
-            self.plot_item.setLabel('bottom', self.label)
-        self.init_plot()
 
     def init_plot(self) -> None:
         """初始化绘图区域：设置网格线、图例样式及其锚定位置。"""
-        grid_pen = pg.mkPen(
-            color=pg.mkColor(100, 100, 100),
-            width=1,
-            antialiased=True,
-            style=Qt.PenStyle.DashLine
-        )
+        self.hideButtons()  # 隐藏默认的缩放按钮
+        grid_pen = subtle_pen(self, alpha=180, width=1)
+        grid_pen.setStyle(Qt.PenStyle.DashLine)
         # 开启 X/Y 方向网格，透明度 0.3
         self.plot_item.showGrid(x=True, y=True, alpha=0.3)
         self.plot_item.getAxis('bottom').setPen(grid_pen)
@@ -118,9 +131,8 @@ class BriefPlot(PlotWidget):
         legend = self.plot_item.legend
         # 锚定在右上角
         legend.anchor((1, 0), (1, 0))
-        # 设置背景框（半透明白色填充，黑色边框）
-        legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        legend.setPen(pg.mkPen('k', width=1))
+        legend.setBrush(transparent_legend_brush(self))
+        legend.setPen(subtle_pen(self))
 
         return None
 
@@ -145,6 +157,7 @@ class BriefPlot(PlotWidget):
             color: 可选，指定折线颜色 (RGB 字符串)
             pen: 可选，自定义 QPen 画笔
         """
+        self.sync_axis_layout()
         if x_data is None or y_data is None or len(x_data) == 0 or len(y_data) == 0:
             self.show_warning("数据为空，无法添加曲线")
             return None
@@ -228,14 +241,15 @@ class BriefPlot(PlotWidget):
     def update_plot(
             self,
             x_viewport_start: pd.Timestamp,
-            x_viewport_end: pd.Timestamp
-    ):
+            x_viewport_end: pd.Timestamp,
+    ) -> None:
         """根据外部给定的视口起止时间戳，更新 X 轴显示范围。
 
         Args:
             x_viewport_start: 视口起始时间戳
             x_viewport_end: 视口结束时间戳
         """
+        self.sync_axis_layout()
         x_start = x_viewport_start.timestamp()
         x_end = x_viewport_end.timestamp()
         # 确保 start < end
@@ -248,7 +262,7 @@ class BriefPlot(PlotWidget):
     def update_curve(self, label: str,
             x_data: Optional[pd.Series | pd.DatetimeIndex],
             y_data: Optional[pd.Series]
-        ):
+        ) -> None:
         """更新指定 label 曲线的数据，刷新显示。
 
         Args:
@@ -256,6 +270,7 @@ class BriefPlot(PlotWidget):
             x_data: 新的 X 轴时间序列
             y_data: 新的 Y 轴数值序列
         """
+        self.sync_axis_layout()
         if x_data is None or y_data is None or len(x_data) == 0 or len(y_data) == 0:
             self.show_warning("数据为空，无法更新曲线")
             return None
@@ -270,17 +285,18 @@ class BriefPlot(PlotWidget):
         self.curves[label].setData(x_values, y_values)
         return None
 
-    def hide_curve(self, label: str):
+    def hide_curve(self, label: str) -> None:
         """隐藏指定 label 的曲线（不删除数据，仅设置不可见）。"""
         self.curves[label].setVisible(False)
 
-    def set_label(self, label: str):
+    def set_label(self, label: str) -> None:
         """修改底部 X 轴标签文字。"""
         self.label = label
-        self.plot_item.setLabel('bottom', self.label)
+        self.sync_axis_layout()
 
-    def clear_curves(self):
+    def clear_curves(self) -> None:
         """清除所有曲线数据及可见性记录，恢复空白绘图区。"""
         self.clear()
         self.curves.clear()
         self.show_curves.clear()
+        self.sync_axis_layout()

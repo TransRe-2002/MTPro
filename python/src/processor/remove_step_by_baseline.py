@@ -41,6 +41,7 @@ from processor._demo_utils import DemoEMData, run_standalone_demo
 from processor._region_mixin import RegionManagementMixin
 from processor.step_algorithms import RobustBaselineStepResult, robust_baseline_destep
 from processor.step_plot_widget import StepPlotWidget
+from utils.theme import subtle_pen, transparent_legend_brush
 
 
 class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
@@ -214,8 +215,8 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         )
         legend = self.signal_plot_item.addLegend()
         legend.anchor((1, 0), (1, 0))
-        legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        legend.setPen(pg.mkPen("k", width=1))
+        legend.setBrush(transparent_legend_brush(self))
+        legend.setPen(subtle_pen(self))
         self.signal_plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.signal_plot_item.addItem(self.origin_line)
         self.signal_plot_item.addItem(self.y_line)
@@ -229,8 +230,8 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         )
         correction_legend = self.correction_plot_item.addLegend()
         correction_legend.anchor((1, 0), (1, 0))
-        correction_legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        correction_legend.setPen(pg.mkPen("k", width=1))
+        correction_legend.setBrush(transparent_legend_brush(self))
+        correction_legend.setPen(subtle_pen(self))
         self.correction_plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.correction_plot_item.addItem(self.correction_line)
         self.correction_plot_item.addItem(

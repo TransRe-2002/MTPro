@@ -40,6 +40,7 @@ from processor.step_algorithms import (
     windowed_mean_destep_with_diagnostics,
 )
 from processor.step_plot_widget import StepPlotWidget
+from utils.theme import subtle_pen, transparent_legend_brush
 from utils.validators import read_positive_int
 
 
@@ -159,8 +160,8 @@ class RemoveStepByWindow(BaseProcessorWidget):
         )
         legend = self.plot_item.addLegend()
         legend.anchor((1, 0), (1, 0))
-        legend.setBrush(pg.mkBrush(255, 255, 255, 255))
-        legend.setPen(pg.mkPen("k", width=1))
+        legend.setBrush(transparent_legend_brush(self))
+        legend.setPen(subtle_pen(self))
         self.plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.plot_item.addItem(self.y_line)
         self.plot_item.addItem(self.dy_line)

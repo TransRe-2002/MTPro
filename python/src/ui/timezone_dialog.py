@@ -5,6 +5,8 @@ MAT 格式的 tsStruct 中时间字段（startTime / endTime / zeroTime）
 用户在打开文件后必须先指定时区，才能正确解析时间戳。
 """
 
+from __future__ import annotations
+
 import datetime
 from pathlib import Path
 

@@ -17,6 +17,8 @@ time_slider_qslider.py
     pip install PySide6
 """
 
+from __future__ import annotations
+
 from PySide6.QtWidgets import (
     QSlider, QStyleOptionSlider, QStyle
 )

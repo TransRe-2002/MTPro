@@ -1,31 +1,70 @@
-# Repository Guidelines
+# AGENTS.md
 
-## Project Structure & Module Organization
-This repository has two active parts:
+Guidance for agents working in this repo. MTPro = PySide6 desktop app for magnetotelluric time-series processing, plus a small PyO3 Rust extension.
 
-- `python/`: the main desktop application. Source lives in `python/src/` with feature areas split into `ui/`, `core/`, `io_utils/`, `processor/`, `utils/`, and `base/`. Keep new runtime code in these packages, not in `python/scripts/` or `python/old/`.
-- `rust_lib/`: a small PyO3 extension built with `maturin`. Rust sources are in `rust_lib/src/`.
+## Environment (get this wrong and nothing runs)
 
-Tests currently live in `python/tests/`. Sample and local data files such as `*.mat`, `*.h5`, and `python/data/*.db` are used for development; avoid hard-coding new machine-specific paths.
+- **Use the project venv at `python/.venv`** (Anaconda Python 3.13) for every Python/pip/pytest command. Use `python/.venv/bin/python` / `bin/pip` / `bin/pytest` directly, or `source python/.venv/bin/activate` (does not persist across separate bash calls).
+- **`PYTHONPATH=python/src` is required** to run the app or tests — sources live in `python/src/` and are imported as top-level packages (`from ui.mainwindow import MainWindow`).
+- No linter/typecheck/codegen is configured. There is no formatter; match surrounding style.
 
-## Build, Test, and Development Commands
-- `python -m pip install -r python/requirements.txt`: install the Python GUI and data dependencies.
-- `PYTHONPATH=python/src python python/src/main.py`: launch the PySide6 application locally.
-- `PYTHONPATH=python/src pytest python/tests`: run the Python test suite.
-- `cd rust_lib && maturin develop`: build and install the Rust extension into the active Python environment.
-- `cd rust_lib && cargo test`: run Rust tests when Rust code changes.
+## Commands
 
-If you add a new developer command, document it here and prefer commands that work from a clean checkout.
+```bash
+# Install deps
+python/.venv/bin/pip install -r python/requirements.txt
 
-## Coding Style & Naming Conventions
-Use 4-space indentation in Python and follow the existing PEP 8-style module layout: `snake_case` for files, functions, and variables; `PascalCase` for Qt widgets, data objects, and other classes. Keep imports absolute from `python/src` packages, for example `from ui.mainwindow import MainWindow`.
+# Launch app
+PYTHONPATH=python/src python/.venv/bin/python python/src/main.py
 
-Rust should follow `rustfmt` defaults and standard snake_case naming. No formatter or linter is configured in-repo, so keep changes consistent with surrounding code and avoid unrelated cleanup.
+# Full test suite
+PYTHONPATH=python/src python/.venv/bin/pytest python/tests
 
-## Testing Guidelines
-Name Python tests `test_*.py` and keep them under `python/tests/`. Prefer deterministic unit tests over interactive GUI loops. Several existing tests depend on local MAT files or a running Qt event loop; when adding tests, use repository-local fixtures and state any external data requirements in the test docstring or PR.
+# Single test file / single test
+PYTHONPATH=python/src python/.venv/bin/pytest python/tests/test_save_mat.py
+PYTHONPATH=python/src python/.venv/bin/pytest python/tests/test_save_mat.py::test_name
 
-## Commit & Pull Request Guidelines
-Recent Git history uses short version-style subjects such as `0.0.1`, so there is no strong existing convention to preserve. For new commits, use concise imperative subjects that describe the change scope, for example `Add MAT save regression test`.
+# Synthetic hotspot profiling for Python/Rust migration candidates
+PYTHONPATH=python/src python/.venv/bin/python python/scripts/profile_hotspots.py
 
-PRs should include a clear summary, test notes, and linked issues when relevant. Include screenshots or a short screen recording for visible PySide6 UI changes.
+# Rust extension (release wheel, then install) — required before Nuitka build
+cd rust_lib && maturin build --release && pip install --force-reinstall target/wheels/*.whl
+# Or debug dev install:
+cd rust_lib && maturin develop
+# Rust tests:
+cd rust_lib && cargo test
+
+# Standalone desktop binary (Nuitka) -> outputs/mtpro-{linux,windows}-x86_64
+bash scripts/build_nuitka.sh linux     # native Linux
+bash scripts/build_nuitka.sh windows   # cross-compile from Linux (MinGW-w64 + Wine)
+```
+
+CI (`.github/workflows/`): `CI.yml` only builds/uploads `rust_lib` wheels via maturin (tagged pushes publish to PyPI). `build-executables.yml` builds Nuitka standalone binaries for Linux and Windows. CI does **not** run the Python test suite.
+
+## Architecture (not obvious from filenames)
+
+- **Data model**: `core/em_data.py` `EMData` stores channels as an `xarray.Dataset` keyed by channel name (`Ex`, `Hy`, ...). `pd.Series` with `DatetimeIndex` is the exchange format between `EMData` and processors — use `get_channel_series()` / `set_channel_series()`.
+- **Registry**: `base/data_manager.py` `DataManager(QObject)` owns `Dict[int, EMData]` and emits `data_added` / `data_removed` / `active_changed`. **Key `0` means "no active data"** — never use it for a dataset. All UI references datasets by integer key.
+- **MAT format**: `io_utils/mat_io.py` reads/writes the legacy `tsStruct` dict with nested `(1,1)` MATLAB cell arrays (see `TS_STRUCT_TEMPLATE`). `MatSaver.save()` calls `em_data.update_meta()` to sync changes back into the raw `mat_meta` dict before writing. `core/mat_data.py` auto-fetches Kp-index data on construction from a local HDF5 file (`utils/fetch_kp.py`).
+- **Signal-driven flow**: `DataManager` signals → `MainWindow` slots → viewer/processor updates. UI is MDI-based; tools open as `QMdiSubWindow` children.
+- **Processing tools** (`processor/_base_processor.py` `BaseProcessorWidget`) share a pattern: load channel → interpolate NaN → history stack for undo → `_confirm_and_close()` restores NaN positions and emits `result_signal(ch_name, ndarray)`.
+- **Pipeline mode is disabled**: `ui/data_process.py` has `PIPELINE_ENABLED = False`; Classic mode is the active path.
+- `core/db_data.py` `EMDBData` is a stub for future DB-backed loading.
+
+## Conventions
+
+- 4-space indent; `snake_case` for files/functions/vars, `PascalCase` for Qt widgets and data classes.
+- `from __future__ import annotations` at the top of files using forward references.
+- Default timezone is `Asia/Shanghai` (CST); timestamps are timezone-aware `pd.Timestamp`.
+- Rust: `rustfmt` defaults, snake_case; edition 2024, PyO3 0.28.
+- Keep new runtime code in `python/src/{ui,core,io_utils,processor,utils,base,emtf}` — not in `python/scripts/` or `python/old/`.
+
+## Testing quirks
+
+- Tests live in `python/tests/`; some require local `.mat` fixtures (e.g. `test1.mat`, `test2.mat`) or a running Qt event loop (`QApplication`).
+- Prefer deterministic unit tests over interactive GUI loops. When adding tests, use repo-local fixtures and note any external data needs in the docstring/PR.
+- The repo root contains sample data files (`*.mat`, `*.h5`, `*.csv`) — do not hard-code machine-specific paths.
+
+## Commits / PRs
+
+Git history mixes short version subjects (`0.0.1`) and imperative subjects. For new commits use concise imperative subjects describing scope (e.g. `Add MAT save regression test`). PRs: include summary, test notes, and screenshots/recordings for visible PySide6 UI changes.

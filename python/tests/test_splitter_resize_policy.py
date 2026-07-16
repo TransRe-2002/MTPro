@@ -3,10 +3,13 @@ import types
 import pandas as pd
 import xarray as xr
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QLabel
 
 from base.data_manager import DataManager
 from core.em_data import EMData
+from ui.brief_plot import BOTTOM_AXIS_HEIGHT, LEFT_AXIS_WIDTH
 from ui.data_tree_view import DataTreeViewer
 from ui.data_view_widget import DataViewWidget
 
@@ -18,14 +21,14 @@ from ui.mainwindow import DATA_MANAGER_INITIAL_WIDTH, MainWindow
 
 
 class DemoData(EMData):
-    def __init__(self, name: str, channels: list[str]):
+    def __init__(self, name: str, channels: list[str], npts: int = 3):
         super().__init__("/tmp/demo.mat")
         self.name = name
-        self.npts = 3
+        self.npts = npts
         self.start_time = pd.Timestamp("2024-01-01 00:00:00")
-        self.end_time = pd.Timestamp("2024-01-01 00:00:10")
         self.dt = pd.Timedelta(seconds=5)
-        self.datetime_index = pd.date_range(self.start_time, periods=3, freq="5s")
+        self.datetime_index = pd.date_range(self.start_time, periods=npts, freq="5s")
+        self.end_time = self.datetime_index[-1]
         self.kp_data = None
         self.latitude = 0.0
         self.longitude = 0.0
@@ -34,7 +37,7 @@ class DemoData(EMData):
         self.data = xr.Dataset(coords={"time": self.datetime_index})
         for ch_name in channels:
             self.data[ch_name] = xr.DataArray(
-                [1.0, 2.0, 3.0],
+                [float(i + 1) for i in range(npts)],
                 dims=("time",),
                 coords={"time": self.datetime_index},
             )
@@ -75,6 +78,54 @@ def test_data_view_widget_uses_non_opaque_resize_for_plot_splitter(qtbot):
     qtbot.addWidget(widget)
 
     assert widget.splitter.opaqueResize() is False
+
+
+def test_data_view_waveform_axes_and_labels_survive_refresh():
+    _app()
+    data = DemoData("demo", ["Ex", "Ey", "Bx", "By", "Bz"], npts=900)
+    widget = DataViewWidget()
+
+    try:
+        widget.init_data(data)
+        QApplication.processEvents()
+
+        for ch, resources in widget.plot_rows.items():
+            plot = resources.widget
+            container = resources.row_container
+            assert plot is not None
+            assert container is not None
+
+            assert plot.getAxis("left").width() == LEFT_AXIS_WIDTH
+            assert plot.getAxis("bottom").height() == BOTTOM_AXIS_HEIGHT
+            assert plot.getAxis("bottom").labelText == ch
+            direct_labels = container.findChildren(
+                QLabel,
+                options=Qt.FindChildOption.FindDirectChildrenOnly,
+            )
+            assert ch not in [label.text() for label in direct_labels]
+
+        for ch, resources in widget.plot_rows.items():
+            plot = resources.widget
+            assert plot is not None
+            series = data.get_channel_series(ch)
+            if ch == "Ex":
+                plot.plot_item.showAxis("left", False)
+                plot.plot_item.showAxis("bottom", False)
+            plot.clear_curves()
+            plot.add_curve(data.datetime_index, series.values, ch)
+            plot.update_plot(data.start_time, data.end_time)
+
+        for ch, resources in widget.plot_rows.items():
+            plot = resources.widget
+            assert plot is not None
+
+            assert plot.getAxis("left").width() == LEFT_AXIS_WIDTH
+            assert plot.getAxis("bottom").height() == BOTTOM_AXIS_HEIGHT
+            assert plot.getAxis("bottom").labelText == ch
+    finally:
+        widget.shutdown()
+        widget.close()
+        QApplication.processEvents()
 
 
 def test_main_window_switches_sidebar_between_summary_and_processing_tools(qtbot):

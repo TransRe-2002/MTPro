@@ -1,21 +1,31 @@
-from PySide6.QtWidgets import (
-    QWidget, QGridLayout, QToolBar,
-    QScrollBar, QSlider, QSizePolicy,
-    QLabel, QDateTimeEdit, QPushButton,
-    QApplication, QFrame
-)
-from PySide6.QtGui import QAction, QIcon, QFont
-from PySide6.QtCore import Qt
-import pyqtgraph as pg
-from pyqtgraph import DateAxisItem
-import numpy as np
-import pandas as pd
+from __future__ import annotations
+
 from typing import Optional
 
-from utils.time_convert import pts_to_qdt, qdt_to_pts
-from utils.series import dti_to_numpy
-from utils.decimate import LODPyramid
+import numpy as np
+import pandas as pd
+import pyqtgraph as pg
+from pyqtgraph import DateAxisItem
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtWidgets import (
+    QApplication,
+    QDateTimeEdit,
+    QFrame,
+    QGridLayout,
+    QLabel,
+    QPushButton,
+    QScrollBar,
+    QSizePolicy,
+    QSlider,
+    QToolBar,
+    QWidget,
+)
+
 from base.time_viewport_mixin import TimeViewportMixin
+from utils.decimate import LODPyramid
+from utils.series import dti_to_numpy
+from utils.time_convert import pts_to_qdt, qdt_to_pts
 
 
 class PlotPanel(TimeViewportMixin, QWidget):

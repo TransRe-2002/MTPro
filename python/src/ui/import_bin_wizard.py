@@ -371,10 +371,11 @@ class ChannelConfigPage(QWizardPage):
         grid.addWidget(QLabel("原始列"), 0, 0)
         grid.addWidget(QLabel("通道名称"), 0, 1)
         grid.addWidget(QLabel("电极对"), 0, 2)
+        grid.addWidget(QLabel("电极方向"), 0, 3)
 
         self._name_edits: list[QLineEdit] = []
         self._pair_combos: list[QComboBox] = []
-        self._dir_combos: list[tuple[QComboBox, QLabel]] = []
+        self._dir_combos: list[QComboBox] = []
 
         for i in range(8):
             row = i + 1
@@ -391,18 +392,14 @@ class ChannelConfigPage(QWizardPage):
             pair_combo.addItems(["—", "Ex", "Ey"])
             pair_combo.setMaximumWidth(72)
             idx = len(self._pair_combos)
-            pair_combo.currentIndexChanged.connect(lambda _i, i=idx: self._update_dir_combo(self._dir_combos[i][0]))
+            pair_combo.currentIndexChanged.connect(lambda _i, i=idx: self._update_dir_combo(self._dir_combos[i]))
             grid.addWidget(pair_combo, row, 2)
             self._pair_combos.append(pair_combo)
 
-            # 每通道独立方向（Ex=N/S, Ey=E/W），同步模式隐藏
+            # 同步模式下显示当前全局方向但不可编辑；取消同步后每通道可独立设置。
             dir_combo = QComboBox()
-            dir_label = QLabel("")
-            self._dir_combos.append((dir_combo, dir_label))
+            self._dir_combos.append(dir_combo)
             grid.addWidget(dir_combo, row, 3)
-            grid.addWidget(dir_label, row, 4)
-            dir_combo.hide()
-            dir_label.hide()
 
         grid_widget = QWidget()
         grid_widget.setLayout(grid)
@@ -438,7 +435,11 @@ class ChannelConfigPage(QWizardPage):
         self._ey_dist_spin.setValue(_DEFAULT_EY_DIST)
         self._ey_dist_spin.setSuffix(" m")
         param_row.addWidget(self._ey_dist_spin)
-        param_row.addSpacing(16)
+        param_row.addStretch()
+        ch_layout.addLayout(param_row)
+
+        direction_row = QHBoxLayout()
+        direction_row.addSpacing(2)
         self._dir_sync_cb = QCheckBox("电场方向同步")
         self._dir_sync_cb.setChecked(True)
         self._dir_sync_cb.setToolTip(
@@ -446,17 +447,21 @@ class ChannelConfigPage(QWizardPage):
             "取消后每个通道可独立设置电极方向，如 Ex1=N, Ex2=S 等。"
         )
         self._dir_sync_cb.toggled.connect(self._on_dir_sync_toggled)
-        param_row.addWidget(self._dir_sync_cb)
-        param_row.addWidget(QLabel("Ex:"))
+        direction_row.addWidget(self._dir_sync_cb)
+        self._ex_dir_label = QLabel("Ex:")
+        direction_row.addWidget(self._ex_dir_label)
         self._ex_dir_combo = QComboBox()
         self._ex_dir_combo.addItems(["N", "S"])
-        param_row.addWidget(self._ex_dir_combo)
-        param_row.addWidget(QLabel("Ey:"))
+        self._ex_dir_combo.currentIndexChanged.connect(self._refresh_dir_combos)
+        direction_row.addWidget(self._ex_dir_combo)
+        self._ey_dir_label = QLabel("Ey:")
+        direction_row.addWidget(self._ey_dir_label)
         self._ey_dir_combo = QComboBox()
         self._ey_dir_combo.addItems(["E", "W"])
-        param_row.addWidget(self._ey_dir_combo)
-        param_row.addStretch()
-        ch_layout.addLayout(param_row)
+        self._ey_dir_combo.currentIndexChanged.connect(self._refresh_dir_combos)
+        direction_row.addWidget(self._ey_dir_combo)
+        direction_row.addStretch()
+        ch_layout.addLayout(direction_row)
 
         layout.addWidget(ch_group)
 
@@ -498,30 +503,39 @@ class ChannelConfigPage(QWizardPage):
     # -- channel name change → auto-disable electrode pair -----------------
 
     def _on_dir_sync_toggled(self, checked: bool) -> None:
-        """同步模式：显示全局方向，隐藏每通道方向。"""
+        """同步模式：行内方向显示当前全局值，但不可编辑。"""
+        self._ex_dir_label.setVisible(checked)
         self._ex_dir_combo.setVisible(checked)
+        self._ey_dir_label.setVisible(checked)
         self._ey_dir_combo.setVisible(checked)
-        for _, label in self._dir_combos:
-            label.setVisible(not checked)
-        for combo, _ in self._dir_combos:
-            combo.setVisible(not checked)
-            if not checked:
-                self._update_dir_combo(combo)
+        self._refresh_dir_combos()
+
+    def _refresh_dir_combos(self) -> None:
+        for combo in self._dir_combos:
+            self._update_dir_combo(combo)
 
     def _update_dir_combo(self, combo: QComboBox) -> None:
         """根据通道的电极对设置方向下拉选项。"""
-        for i, (dc, _) in enumerate(self._dir_combos):
+        for i, dc in enumerate(self._dir_combos):
             if dc is combo:
                 pair = self._pair_combos[i].currentText()
                 break
         else:
             return
+        sync = self._dir_sync_cb.isChecked()
         if pair == "Ex":
-            combo.clear(); combo.addItems(["N (正)", "S (反)"])
+            combo.clear()
+            combo.addItems(["N (正)", "S (负)"])
+            combo.setCurrentIndex(1 if self._ex_dir_combo.currentText() == "S" else 0)
+            combo.setEnabled(not sync)
         elif pair == "Ey":
-            combo.clear(); combo.addItems(["E (正)", "W (反)"])
+            combo.clear()
+            combo.addItems(["E (正)", "W (负)"])
+            combo.setCurrentIndex(1 if self._ey_dir_combo.currentText() == "W" else 0)
+            combo.setEnabled(not sync)
         else:
-            combo.clear(); combo.setEnabled(False)
+            combo.clear()
+            combo.setEnabled(False)
 
     def _on_name_changed(self, row: int) -> None:
         idx = row - 1
@@ -533,7 +547,7 @@ class ChannelConfigPage(QWizardPage):
             self._pair_combos[idx].setDisabled(True)
         else:
             self._pair_combos[idx].setDisabled(False)
-        self._update_dir_combo(self._dir_combos[idx][0])
+        self._update_dir_combo(self._dir_combos[idx])
 
     # -- preset ------------------------------------------------------------
 
@@ -549,7 +563,7 @@ class ChannelConfigPage(QWizardPage):
             if p == "Ex":   self._pair_combos[i].setCurrentIndex(1)
             elif p == "Ey": self._pair_combos[i].setCurrentIndex(2)
             else:           self._pair_combos[i].setCurrentIndex(0)
-            self._update_dir_combo(self._dir_combos[i][0])
+            self._update_dir_combo(self._dir_combos[i])
         ms = preset.get("mag_scale")
         if ms is not None: self._mag_scale_spin.setValue(ms)
         exd = preset.get("ex_distance")
@@ -558,6 +572,7 @@ class ChannelConfigPage(QWizardPage):
         if eyd is not None: self._ey_dist_spin.setValue(eyd)
         for row in range(1, 9):
             self._on_name_changed(row)
+        self._refresh_dir_combos()
 
     # -- collect -----------------------------------------------------------
 
@@ -578,7 +593,7 @@ class ChannelConfigPage(QWizardPage):
                 if pair == "Ex": direction = ex_global
                 elif pair == "Ey": direction = ey_global
             else:
-                t = self._dir_combos[i][0].currentText()
+                t = self._dir_combos[i].currentText()
                 if t and pair == "Ex" and t.startswith("S"): direction = "S"
                 elif t and pair == "Ex": direction = "N"
                 elif t and pair == "Ey" and t.startswith("W"): direction = "W"

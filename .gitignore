@@ -21,6 +21,9 @@ venv/
 env/
 .python-version
 
+# Build outputs
+outputs/
+
 # Local data and logs
 *.log
 *.mat

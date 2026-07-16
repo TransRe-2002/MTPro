@@ -21,10 +21,9 @@ import pyqtgraph as pg
 
 from processor._display_utils import decimate_for_display
 from processor._modifier_constraint import apply_modifier_axis_constraint
+from utils.theme import configure_pyqtgraph_theme, pg_background
 
-pg.setConfigOptions(antialias=True)
-pg.setConfigOption("background", "w")
-pg.setConfigOption("foreground", "k")
+configure_pyqtgraph_theme()
 
 # PlotCurveItem 默认优化参数，所有处理器共用
 _CURVE_OPTS = dict(
@@ -72,7 +71,8 @@ class StepPlotWidget(pg.PlotWidget):
         """设置初始视图状态。"""
         self.getViewBox().setMouseMode(pg.ViewBox.PanMode)
         self.getViewBox().setMouseEnabled(x=True, y=True)
-        self.setBackground("w")
+        configure_pyqtgraph_theme(self)
+        self.setBackground(pg_background(self))
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 

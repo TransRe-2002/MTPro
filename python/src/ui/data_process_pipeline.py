@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import uuid
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 
-from PySide6.QtCore import QByteArray, QItemSelectionModel, QMimeData, QModelIndex, QPoint, QRect, Qt, Signal
+from PySide6.QtCore import (
+    QByteArray,
+    QItemSelectionModel,
+    QMimeData,
+    QModelIndex,
+    QPoint,
+    QRect,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QDrag,
@@ -42,9 +50,14 @@ from PySide6.QtWidgets import (
 
 from base.data_manager import DataManager
 from core.em_data import EMData
-from processor.remove_spike import RemoveSpike
-from processor.remove_step_by_diff import RemoveStepByDiff
-from processor.remove_step_by_window import RemoveStepByWindow
+from core.pipeline_model import (
+    ChannelPipeline,
+    PipelineBlock,
+    PipelineLayer,
+    SnapEngine,
+    uid,
+)
+from ui.tools import registry as tool_registry
 
 
 LAYER_H = 34
@@ -58,10 +71,6 @@ OVERVIEW_MAX_BUCKETS = 65536
 PIPELINE_TOOL_MIME = "application/x-pipeline-tool"
 
 
-def uid() -> str:
-    return uuid.uuid4().hex[:8]
-
-
 def px_per_point(zoom: float) -> float:
     return max(0.02, zoom * 8 / 1000)
 
@@ -70,35 +79,27 @@ def points_to_pixels(points: int, zoom: float) -> float:
     return points * px_per_point(zoom)
 
 
-TOOL_META: Dict[str, Dict[str, object]] = {
-    "remove_spike": {
-        "name": "remove spike",
-        "kind": "interactive",
-    },
-    "remove_step_diff": {
-        "name": "remove step diff",
-        "kind": "interactive",
-    },
-    "remove_step_window": {
-        "name": "remove step window",
-        "kind": "interactive",
-    },
-    "remote_reference": {
-        "name": "remote reference",
-        "kind": "param",
-        "fields": [
-            ("order", "order", int, 1),
-        ],
-    },
-    "robust_estimate": {
-        "name": "robust estimate",
-        "kind": "param",
-        "fields": [
-            ("low", "low", float, 0.01),
-            ("high", "high", float, 1.0),
-        ],
-    },
-}
+def _is_pipeline_capable(spec) -> bool:
+    if spec.kind == "interactive":
+        return spec.pipeline_editor_factory is not None
+    if spec.kind == "param":
+        return bool(spec.fields)
+    return False
+
+
+def _build_tool_meta() -> Dict[str, Dict[str, object]]:
+    meta: Dict[str, Dict[str, object]] = {}
+    for spec in tool_registry.all_specs():
+        if not _is_pipeline_capable(spec):
+            continue
+        entry: Dict[str, object] = {"name": spec.display_name, "kind": spec.kind}
+        if spec.fields:
+            entry["fields"] = list(spec.fields)
+        meta[spec.tool_id] = entry
+    return meta
+
+
+TOOL_META: Dict[str, Dict[str, object]] = _build_tool_meta()
 
 
 BLOCK_STATUS_STYLE: Dict[str, Dict[str, str]] = {
@@ -112,113 +113,6 @@ TOOL_KIND_LABELS: Dict[str, str] = {
     "interactive": "交互工具",
     "param": "参数工具",
 }
-
-
-@dataclass
-class PipelineBlock:
-    block_id: str = field(default_factory=uid)
-    tool_id: str = ""
-    start: int = 0
-    end: int = 0
-    params: dict = field(default_factory=dict)
-    status: str = "empty"
-    input_snapshot: Optional[np.ndarray] = field(default=None, repr=False)
-    output_snapshot: Optional[np.ndarray] = field(default=None, repr=False)
-    last_summary: str = ""
-
-
-@dataclass
-class PipelineLayer:
-    layer_id: str = field(default_factory=uid)
-    label: str = "step 1"
-    blocks: list[PipelineBlock] = field(default_factory=list)
-
-    def sorted_blocks(self) -> list[PipelineBlock]:
-        return sorted(self.blocks, key=lambda block: (block.start, block.end, block.block_id))
-
-
-@dataclass
-class ChannelPipeline:
-    data_id: int
-    channel: str
-    expanded: bool = True
-    layers: list[PipelineLayer] = field(default_factory=list)
-    baseline_snapshot: Optional[np.ndarray] = field(default=None, repr=False)
-
-    @property
-    def ref(self) -> tuple[int, str]:
-        return self.data_id, self.channel
-
-    def add_layer(self) -> PipelineLayer:
-        layer = PipelineLayer(label=f"step {len(self.layers) + 1}")
-        self.layers.append(layer)
-        return layer
-
-    def find_block(self, block_id: str) -> tuple[PipelineLayer, PipelineBlock] | None:
-        for layer in self.layers:
-            for block in layer.blocks:
-                if block.block_id == block_id:
-                    return layer, block
-        return None
-
-    def remove_block(self, block_id: str) -> bool:
-        for layer in self.layers:
-            before = len(layer.blocks)
-            layer.blocks = [block for block in layer.blocks if block.block_id != block_id]
-            if len(layer.blocks) != before:
-                return True
-        return False
-
-
-class SnapEngine:
-    THRESHOLD_PX = 8
-
-    def __init__(self):
-        self.grid_pts = 500
-        self.enabled = True
-        self._edges: list[int] = []
-
-    def update_edges(self, pipelines: list[ChannelPipeline], exclude_id: str = ""):
-        edges = set()
-        for pipeline in pipelines:
-            for layer in pipeline.layers:
-                for block in layer.blocks:
-                    if block.block_id == exclude_id:
-                        continue
-                    edges.add(block.start)
-                    edges.add(block.end)
-        self._edges = sorted(edges)
-
-    def snap(self, pts: int, px_per_pt: float, data_len: int) -> tuple[int, list[int]]:
-        pts = max(0, min(data_len, pts))
-        if not self.enabled:
-            return pts, []
-
-        grid = round(pts / self.grid_pts) * self.grid_pts
-        best = max(0, min(data_len, grid))
-        best_dist = abs(best - pts) * px_per_pt
-        guides: list[int] = []
-
-        for edge in self._edges:
-            dist = abs(edge - pts) * px_per_pt
-            if dist < best_dist:
-                best_dist = dist
-                best = edge
-
-        if best_dist < self.THRESHOLD_PX:
-            guides = [best]
-        return max(0, min(data_len, best)), guides
-
-    def snap_interval(self, start: int, end: int, px_per_pt: float, data_len: int) -> tuple[int, list[int]]:
-        span = max(0, end - start)
-        snapped_start, start_guides = self.snap(start, px_per_pt, data_len)
-        snapped_end, end_guides = self.snap(end, px_per_pt, data_len)
-        candidates = [
-            (snapped_start, start_guides),
-            (max(0, min(data_len - span, snapped_end - span)), end_guides),
-        ]
-        best_start, best_guides = min(candidates, key=lambda item: abs(item[0] - start))
-        return best_start, best_guides
 
 
 class PipelineParamDialog(QDialog):
@@ -263,7 +157,7 @@ class PipelineParamDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def accept(self):
+    def accept(self) -> None:
         values: dict[str, object] = {}
         for key, (edit, parser) in self._fields.items():
             text = edit.text().strip()
@@ -375,7 +269,7 @@ class ChannelOverviewWidget(QWidget):
         self._envelope_cache[bucket_count] = (mins, maxs)
         return mins, maxs
 
-    def paintEvent(self, _event):
+    def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         palette = self.palette()
         painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
@@ -425,7 +319,7 @@ class ChannelOverviewWidget(QWidget):
 
 
 class RulerWidget(QWidget):
-    def __init__(self, snap: SnapEngine, data_len: int, parent=None):
+    def __init__(self, snap: SnapEngine, data_len: int, parent=None) -> None:
         super().__init__(parent)
         self.snap = snap
         self.data_len = max(1, data_len)
@@ -442,7 +336,7 @@ class RulerWidget(QWidget):
         self.setMinimumWidth(int(points_to_pixels(self.data_len, zoom)) + 40)
         self.update()
 
-    def paintEvent(self, _event):
+    def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         palette = self.palette()
         painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
@@ -525,7 +419,7 @@ class PipelineTrackWidget(QWidget):
         self._guides = list(guides)
         self.update()
 
-    def paintEvent(self, _event):
+    def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         palette = self.palette()
@@ -588,19 +482,19 @@ class PipelineTrackWidget(QWidget):
             f"{tool_text} [{status_text}]",
         )
 
-    def dragEnterEvent(self, event):
+    def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasFormat(PIPELINE_TOOL_MIME):
             event.acceptProposedAction()
         else:
             event.ignore()
 
-    def dragMoveEvent(self, event):
+    def dragMoveEvent(self, event) -> None:
         if event.mimeData().hasFormat(PIPELINE_TOOL_MIME):
             event.acceptProposedAction()
         else:
             event.ignore()
 
-    def dropEvent(self, event):
+    def dropEvent(self, event) -> None:
         if not event.mimeData().hasFormat(PIPELINE_TOOL_MIME):
             event.ignore()
             return
@@ -715,7 +609,7 @@ class PipelineTrackWidget(QWidget):
             widget = widget.parentWidget()
         return widget
 
-    def mousePressEvent(self, event):
+    def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
 
@@ -750,7 +644,7 @@ class PipelineTrackWidget(QWidget):
         )
         self.update()
 
-    def mouseMoveEvent(self, event):
+    def mouseMoveEvent(self, event) -> None:
         x_pos = event.position().toPoint().x()
         if self._drag_block is None:
             _block, mode = self._hit_test(x_pos)
@@ -838,7 +732,7 @@ class PipelineTrackWidget(QWidget):
         self.layout_changed.emit()
         event.accept()
 
-    def mouseReleaseEvent(self, event):
+    def mouseReleaseEvent(self, event) -> None:
         del event
         if self._drag_block is None:
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -862,12 +756,12 @@ class PipelineTrackWidget(QWidget):
         if changed:
             self.block_geometry_changed.emit(block_id)
 
-    def mouseDoubleClickEvent(self, event):
+    def mouseDoubleClickEvent(self, event) -> None:
         block, _mode = self._hit_test(event.position().toPoint().x())
         if block is not None:
             self.block_double_clicked.emit(block.block_id)
 
-    def contextMenuEvent(self, event):
+    def contextMenuEvent(self, event) -> None:
         block, _mode = self._hit_test(event.pos().x())
         if block is None:
             return
@@ -1015,7 +909,7 @@ class ChannelPipelineWidget(QWidget):
 class DataProcessPipelineWidget(QWidget):
     change_finished_signal = Signal(int, str)
 
-    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
+    def __init__(self, data_manager: Optional[DataManager] = None, parent=None) -> None:
         super().__init__(parent)
         self.data_manager = data_manager
         self.data_id = 0
@@ -1033,7 +927,7 @@ class DataProcessPipelineWidget(QWidget):
         self.tool_model: Optional[QStandardItemModel] = None
         self._build_ui()
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -1194,9 +1088,7 @@ class DataProcessPipelineWidget(QWidget):
         self._update_tool_info()
 
     def _canonical_tool_id(self, tool_id: str) -> str:
-        if tool_id == "remove_step":
-            return "remove_step_diff"
-        return tool_id
+        return tool_registry.canonical_id(tool_id)
 
     def _update_tool_info(self):
         if self.selected_tool_id is None:
@@ -1211,7 +1103,7 @@ class DataProcessPipelineWidget(QWidget):
             "点击轨道空白处或直接拖到轨道中即可放置 block。"
         )
 
-    def init_data(self, data, data_id: int = 0):
+    def init_data(self, data, data_id: int = 0) -> None:
         self.data_id = data_id
         self.em_data = data
         self.selected_block_id = ""
@@ -1257,7 +1149,7 @@ class DataProcessPipelineWidget(QWidget):
 
         return added, duplicated, failed
 
-    def remove_data(self, data_id: int):
+    def remove_data(self, data_id: int) -> None:
         refs = [ref for ref in self._channel_refs if ref[0] == data_id]
         if not refs:
             return
@@ -1724,12 +1616,10 @@ class DataProcessPipelineWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         tool_id = self._canonical_tool_id(block.tool_id)
-        if tool_id == "remove_spike":
-            editor = RemoveSpike(preview_channel, dialog)
-        elif tool_id == "remove_step_window":
-            editor = RemoveStepByWindow(preview_channel, dialog)
-        else:
-            editor = RemoveStepByDiff(preview_channel, dialog)
+        editor = tool_registry.create_pipeline_editor(tool_id, preview_channel, dialog)
+        if editor is None:
+            dialog.deleteLater()
+            return
 
         editor.result_signal.connect(
             lambda _channel, result, block_id=block.block_id, source=input_snapshot,
@@ -1904,7 +1794,7 @@ class DataProcessPipelineWidget(QWidget):
                 else:
                     block.status = "configured" if block.params else "empty"
 
-    def _commit_preview(self):
+    def _commit_preview(self) -> None:
         if not self.pipelines:
             return
 

@@ -10,23 +10,20 @@
 与 RemoveRegion 不同，这个工具适合精确框选少量异常点，不适合大范围连续删除。
 """
 
-import os
+from __future__ import annotations
+
 import logging
+from typing import Any, Optional, Set
 
 import numpy as np
-
 import pyqtgraph as pg
-from PySide6 import QtWidgets, QtCore, QtGui
-from typing import Set, Optional, Any
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from processor._display_utils import decimate_for_display
 from processor._modifier_constraint import apply_modifier_axis_constraint
+from utils.theme import configure_pyqtgraph_theme, pg_background
 
-os.environ['PYQTGRAPH_QT_LIB'] = 'PySide6'
-
-pg.setConfigOptions(antialias=True)
-pg.setConfigOption('background', 'w')
-pg.setConfigOption('foreground', 'k')
+configure_pyqtgraph_theme()
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +72,8 @@ class SpikePlotWidget(pg.PlotWidget):
     def _setup_view(self) -> None:
         self.getViewBox().setMouseMode(pg.ViewBox.PanMode)
         self.getViewBox().setMouseEnabled(x=True, y=True)
-        self.setBackground('w')
+        configure_pyqtgraph_theme(self)
+        self.setBackground(pg_background(self))
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 

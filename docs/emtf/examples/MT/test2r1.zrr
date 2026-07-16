@@ -1,0 +1,13 @@
+ **** IMPEDANCE IN MEASUREMENT COORDINATES ****
+ ********** WITH FULL ERROR COVARINCE**********
+Robust Remote Reference EMAP                                                    
+station    :test2r1             
+coordinate    49.280   102.910  declination     0.00
+number of channels   5   number of frequencies    0
+ orientations and tilts of each channel 
+    1     0.00     0.00 tes  HxTS1 
+    2    90.00     0.00 tes  HyTS1 
+    3     0.00     0.00 tes  HzTS1 
+    4     0.00     0.00 tes  ExTS1 
+    5    90.00     0.00 tes  EyTS1 
+

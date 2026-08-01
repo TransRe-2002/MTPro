@@ -2,6 +2,7 @@ mod decimate;
 mod diurnal;
 mod mat_loader;
 mod step;
+mod xlsx;
 
 use pyo3::prelude::*;
 
@@ -28,4 +29,7 @@ mod rust_lib {
 
     #[pymodule_export]
     use super::diurnal::subtract_periodic_signal_series_rs;
+
+    #[pymodule_export]
+    use super::xlsx::read_xlsx_sheet_inline_str_rs;
 }

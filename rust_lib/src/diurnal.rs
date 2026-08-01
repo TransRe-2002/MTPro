@@ -2,105 +2,58 @@
 //!
 //! Provides `subtract_periodic_signal_series_rs` used by the Python layer.
 //!
-//! Algorithm:
-//!   1. Pre-build design matrix (trend + harmonic cos/sin columns) — same for every window.
-//!   2. For each window: solve least-squares `design[valid] @ coeffs = segment[valid]`,
-//!      extract harmonic coefficients, compute `harmonic_signal = harmonic_matrix @ coeffs`,
-//!      scatter-add weighted into `noise_sum` and `weight_sum`.
-//!   3. Final: `estimated_noise = noise_sum / weight_sum`.
+//! Algorithm (two-step least squares, matches the Python `_design_matrices`
+//! two-matrix split to avoid trend/harmonic collinearity):
+//!   For each window:
+//!     1. Solve `trend_matrix[valid] @ trend_coeffs = segment[valid]` (least squares via SVD).
+//!     2. Compute `detrended = segment - trend_matrix @ trend_coeffs`.
+//!     3. Solve `harmonic_matrix[valid] @ harmonic_coeffs = detrended[valid]` (least squares via SVD).
+//!     4. Compute `harmonic_signal = harmonic_matrix @ harmonic_coeffs`.
+//!     5. Scatter-add `harmonic_signal * weights` into `noise_sum`,
+//!        and `weights` into `weight_sum`.
 
-use numpy::{
-    array::PyArray1,
-    prelude::*,
-    PyReadonlyArray1, PyReadonlyArray2,
-};
+use nalgebra::{DMatrix, DVector};
+use numpy::{array::PyArray1, prelude::*};
 use pyo3::prelude::*;
 use pyo3::Bound;
 
-/// Solve `A x = b` via QR decomposition (Householder) for small dense systems.
-/// A is (m, n), b is (m,). Returns x of length n.
-/// This is a simple implementation sufficient for the small system sizes
-/// encountered here (n ≤ ~10, m up to window_size ~51840 for 3-day 5s data).
-fn lstsq_qr(a: &[f64], b: &[f64], m: usize, n: usize) -> Vec<f64> {
-    // Augmented matrix [A | b], work in column-major for QR.
-    // Actually we'll do row-major Householder QR.
-
-    // Make a working copy of A (m×n) and b (m)
-    let mut r = a.to_vec(); // m*n row-major, will become R
-    let mut bb = b.to_vec(); // m, will become Q^T b
-
-    // Householder QR: for each column k in 0..min(m,n), reflect to zero below diagonal.
-    let steps = n.min(m);
-    // Apply Householder transformations to bb as we go, accumulating into qtb.
-    // We'll store Householder vectors in the lower triangle of r.
-    for k in 0..steps {
-        // Compute norm of column k below (and including) row k.
-        let mut sigma: f64 = 0.0;
-        for i in k..m {
-            sigma += r[i * n + k] * r[i * n + k];
-        }
-        sigma = sigma.sqrt();
-        if sigma == 0.0 {
-            continue;
-        }
-        // Choose sign to avoid cancellation.
-        let diag = r[k * n + k];
-        let sign = if diag >= 0.0 { 1.0 } else { -1.0 };
-        let mut v = vec![0.0_f64; m - k];
-        v[0] = diag + sign * sigma;
-        for i in 1..(m - k) {
-            v[i] = r[(k + i) * n + k];
-        }
-        let v_norm_sq: f64 = v.iter().map(|x| x * x).sum();
-        if v_norm_sq == 0.0 {
-            continue;
-        }
-        // Apply reflection to remaining columns of r (columns k..n)
-        for j in k..n {
-            let mut dot = 0.0;
-            for i in 0..(m - k) {
-                dot += v[i] * r[(k + i) * n + j];
-            }
-            let factor = 2.0 * dot / v_norm_sq;
-            for i in 0..(m - k) {
-                r[(k + i) * n + j] -= factor * v[i];
-            }
-        }
-        // Apply reflection to bb
-        let mut dot = 0.0;
-        for i in 0..(m - k) {
-            dot += v[i] * bb[k + i];
-        }
-        let factor = 2.0 * dot / v_norm_sq;
-        for i in 0..(m - k) {
-            bb[k + i] -= factor * v[i];
+/// Solve `A x = b` in least-squares sense using nalgebra's SVD with pseudo-inverse.
+/// `a` is m×n row-major slice, `b` is length m. Returns x of length n.
+///
+/// Uses nalgebra's SVD (the same LAPACK-style implicit-shift algorithm as numpy/scipy),
+/// so results are bit-identical to `np.linalg.lstsq` up to floating-point reordering.
+///
+/// Tolerances mirror numpy's default `rcond=None` behaviour: singular values
+/// below `eps * max_sigma` are zeroed, where `eps` is the f64 machine epsilon
+/// scaled by the larger of (m, n).
+fn lstsq_svd(a: &[f64], b: &[f64], m: usize, n: usize) -> Vec<f64> {
+    // Reinterpret row-major `a` as nalgebra DMatrix (column-major, so we transpose).
+    let mat = DMatrix::from_row_slice(m, n, a);
+    let rhs = DVector::from_row_slice(b);
+    // SVD with U and V^T both computed (needed for solve).
+    let svd = mat.clone().svd(true, true);
+    // rcond-style epsilon: max(m, n) * f64::EPS as the singular-value cutoff.
+    let n_eff = m.max(n);
+    let eps = (n_eff as f64) * f64::EPSILON;
+    // solve returns Result; on failure fall back to pseudo-inverse via pinv.
+    match svd.solve(&rhs, eps) {
+        Ok(x) => x.as_slice().to_vec(),
+        Err(_) => {
+            // Defensive: pseudo_inverse then matrix-vector multiply.
+            svd.pseudo_inverse(eps)
+                .map(|pinv| (pinv * &rhs).as_slice().to_vec())
+                .unwrap_or_else(|_| vec![0.0; n])
         }
     }
-
-    // Back-substitute: R (upper triangular) is in r[0..n, 0..n] row-major (r[i*n+j], i<=j).
-    // The transformed rhs Q^T b is in bb[0..n].
-    let mut x = vec![0.0_f64; n];
-    for i in (0..n).rev() {
-        let mut s = bb[i];
-        for j in (i + 1)..n {
-            s -= r[i * n + j] * x[j];
-        }
-        let diag = r[i * n + i];
-        if diag.abs() > 1e-30 {
-            x[i] = s / diag;
-        } else {
-            x[i] = 0.0;
-        }
-    }
-    x
 }
 
 /// Python-callable: subtract_periodic_signal_series_rs(values, valid_mask_u8, starts, weights,
-///     design_matrix, harmonic_matrix, harmonic_offset, window_size, min_valid_samples,
-///     min_valid_fraction, base_period_seconds, harmonics, sample_interval_seconds, trend_degree)
+///     trend_matrix, harmonic_matrix, window_size, min_valid_samples, min_valid_fraction).
 ///
-/// Returns (noise_sum: PyArray1<f64>, weight_sum: PyArray1<f64>).
-/// Python wrapper handles normalization, NaN handling and DataFrame construction.
+/// Returns (noise_sum: PyArray1<f64>, weight_sum: PyArray1<f64>,
+///          per_window_amplitudes: PyArray2<f64>).
+/// `per_window_amplitudes` has shape (n_starts, n_harm/2); each row gives the
+/// per-harmonic amplitudes for that window (NaN for skipped windows).
 #[pyfunction]
 #[pyo3(name = "subtract_periodic_signal_series_rs")]
 #[allow(clippy::too_many_arguments)]
@@ -110,42 +63,45 @@ pub fn subtract_periodic_signal_series_rs<'py>(
     valid_mask: numpy::PyReadonlyArray1<'py, u8>,
     starts: numpy::PyReadonlyArray1<'py, i64>,
     weights: numpy::PyReadonlyArray1<'py, f64>,
-    design_matrix: numpy::PyReadonlyArray2<'py, f64>,
+    trend_matrix: numpy::PyReadonlyArray2<'py, f64>,
     harmonic_matrix: numpy::PyReadonlyArray2<'py, f64>,
-    harmonic_offset: usize,
     window_size: usize,
     min_valid_samples: usize,
     min_valid_fraction: f64,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+) -> PyResult<(
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, numpy::PyArray2<f64>>,
+)> {
+    use numpy::ndarray::Array2;
     let values = values.as_slice()?;
     let valid_mask = valid_mask.as_slice()?;
     let starts = starts.as_slice()?;
     let weights = weights.as_slice()?;
-    let design = design_matrix.as_slice()?;
+    let trend = trend_matrix.as_slice()?;
+    let trend_dims = trend_matrix.dims();
+    let _trend_rows = trend_dims[0];
+    let n_trend = trend_dims[1];
+
     let harmonic = harmonic_matrix.as_slice()?;
-    let design_dims = design_matrix.dims();
-    let n_rows = design_dims[0];
-    let n_params = design_dims[1];
     let harm_dims = harmonic_matrix.dims();
-    let _n_rows_h = harm_dims[0];
+    let _harm_rows = harm_dims[0];
     let n_harm = harm_dims[1];
-    if n_rows != window_size {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("design_matrix rows {} != window_size {}", n_rows, window_size),
-        ));
-    }
-    let _ = n_harm;
+    let n_amplitudes = n_harm / 2;
 
     let n = values.len();
     let mut noise_sum = vec![0.0_f64; n];
     let mut weight_sum = vec![0.0_f64; n];
+    let n_starts = starts.len();
+    let mut amplitudes = vec![f64::NAN; n_starts * n_amplitudes];
 
-    // Pre-allocate reusable buffers
-    let mut a_valid = Vec::with_capacity(n_rows * n_params);
-    let mut b_valid = Vec::with_capacity(n_rows);
-    let mut harm_signal = vec![0.0_f64; n_rows];
+    // Pre-allocate reusable buffers.
+    let mut a_valid: Vec<f64> = Vec::with_capacity(window_size * n_trend.max(n_harm));
+    let mut b_valid: Vec<f64> = Vec::with_capacity(window_size);
+    let mut detrended_full = vec![0.0_f64; window_size];
+    let mut harmonic_signal = vec![0.0_f64; window_size];
 
-    for &start_i in starts {
+    for (window_idx, &start_i) in starts.iter().enumerate() {
         let start = start_i as usize;
         let stop = (start + window_size).min(n);
         let cur_window = stop - start;
@@ -153,57 +109,90 @@ pub fn subtract_periodic_signal_series_rs<'py>(
             continue;
         }
 
-        // Count valid samples in window
+        // Count valid samples in window.
         let mut valid_count = 0usize;
         for i in 0..cur_window {
             if valid_mask[start + i] != 0 {
                 valid_count += 1;
             }
         }
-
+        if valid_count == 0 {
+            continue;
+        }
         let valid_fraction = valid_count as f64 / window_size as f64;
-
-        // Skip if insufficient valid samples (Python wrapper will mark diagnostics)
         if valid_count < min_valid_samples || valid_fraction < min_valid_fraction {
             continue;
         }
 
-        // Build valid subset of design matrix and rhs
+        // Step 1: trend fit on valid rows.
         a_valid.clear();
         b_valid.clear();
-        a_valid.reserve(valid_count * n_params);
+        a_valid.reserve(valid_count * n_trend);
         b_valid.reserve(valid_count);
         for i in 0..cur_window {
             if valid_mask[start + i] != 0 {
-                for j in 0..n_params {
-                    a_valid.push(design[i * n_params + j]);
+                for j in 0..n_trend {
+                    a_valid.push(trend[i * n_trend + j]);
                 }
                 b_valid.push(values[start + i]);
             }
         }
+        let trend_coeffs = lstsq_svd(&a_valid, &b_valid, valid_count, n_trend);
 
-        // Solve least squares: a_valid @ coeffs = b_valid
-        let coeffs = lstsq_qr(&a_valid, &b_valid, valid_count, n_params);
+        // Compute detrended signal over the full window (not just valid rows).
+        for i in 0..cur_window {
+            let mut s = 0.0;
+            for j in 0..n_trend {
+                s += trend[i * n_trend + j] * trend_coeffs[j];
+            }
+            detrended_full[i] = values[start + i] - s;
+        }
 
-        // Compute harmonic signal = harmonic_matrix @ harmonic_coeffs
-        let harm_coeffs = &coeffs[harmonic_offset..];
+        // Step 2: harmonic fit on detrended valid rows.
+        a_valid.clear();
+        b_valid.clear();
+        a_valid.reserve(valid_count * n_harm);
+        b_valid.reserve(valid_count);
+        for i in 0..cur_window {
+            if valid_mask[start + i] != 0 {
+                for j in 0..n_harm {
+                    a_valid.push(harmonic[i * n_harm + j]);
+                }
+                b_valid.push(detrended_full[i]);
+            }
+        }
+        let harm_coeffs = lstsq_svd(&a_valid, &b_valid, valid_count, n_harm);
+
+        // Compute harmonic_signal over the full window.
         for i in 0..cur_window {
             let mut s = 0.0;
             for j in 0..n_harm {
                 s += harmonic[i * n_harm + j] * harm_coeffs[j];
             }
-            harm_signal[i] = s;
+            harmonic_signal[i] = s;
         }
 
-        // Scatter-add weighted
+        // Per-harmonic amplitudes: coeffs[2k] = cos, coeffs[2k+1] = sin,
+        // amp[k] = sqrt(cos^2 + sin^2).
+        for k in 0..n_amplitudes {
+            let cos_c = harm_coeffs[2 * k];
+            let sin_c = harm_coeffs[2 * k + 1];
+            amplitudes[window_idx * n_amplitudes + k] = (cos_c * cos_c + sin_c * sin_c).sqrt();
+        }
+
+        // Scatter-add weighted.
         for i in 0..cur_window {
-            noise_sum[start + i] += harm_signal[i] * weights[i];
+            noise_sum[start + i] += harmonic_signal[i] * weights[i];
             weight_sum[start + i] += weights[i];
         }
     }
 
+    let amp_array = Array2::from_shape_vec((n_starts, n_amplitudes), amplitudes)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("amplitude shape: {e}")))?;
+
     Ok((
         PyArray1::from_vec(py, noise_sum),
         PyArray1::from_vec(py, weight_sum),
+        amp_array.into_pyarray(py),
     ))
 }

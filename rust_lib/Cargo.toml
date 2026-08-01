@@ -12,3 +12,6 @@ pyo3 = { version = "0.28.0", features = ["extension-module"] }
 numpy = "0.28"
 rayon = "1.10"
 hdf5-pure = "0.19"
+nalgebra = "0.33"
+quick-xml = "0.36"
+zip = { version = "4.0", default-features = false, features = ["deflate"] }

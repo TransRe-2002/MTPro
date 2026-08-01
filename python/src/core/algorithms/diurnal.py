@@ -134,70 +134,75 @@ def subtract_periodic_signal_series(
     weight_sum = np.zeros(sample_count, dtype=np.float64)
     diagnostics_rows: list[dict[str, object]] = []
 
-    for window_id, start in enumerate(starts):
-        stop = start + window_size
-        segment = values[start:stop]
-        valid_mask = np.isfinite(segment)
-        valid_samples = int(valid_mask.sum())
-        valid_fraction = valid_samples / float(window_size)
-        row: dict[str, object] = {
-            "window_id": window_id,
-            "start_time": series.index[start],
-            "end_time": series.index[stop - 1],
-            "valid_samples": valid_samples,
-            "valid_fraction": valid_fraction,
-            "status": "ok",
-        }
+    # 预构建设计矩阵（所有窗口共用同一个，因为采样等间隔）
+    trend_matrix, harmonic_matrix = _design_matrices(
+        window_size=window_size,
+        sample_interval_seconds=dt_seconds,
+        config=config,
+    )
 
-        for harmonic in config.harmonics:
-            row[f"harmonic_{harmonic}_amplitude"] = np.nan
-
-        # 当前窗口有效样本不足时跳过，不强行拟合，以免在长缺测区得到不可信结果。
-        if valid_samples < config.min_valid_samples or valid_fraction < config.min_valid_fraction:
-            row["status"] = "skipped_insufficient_valid"
-            diagnostics_rows.append(row)
-            continue
-
-        # 两步拟合（避免趋势项与谐波项共线性）：
-        # 1. 先拟合趋势背景（多项式），从数据中减去，吸收长周期漂移
-        # 2. 再对去趋势残差拟合纯谐波项（Larsen et al., 2014 做法）
-        trend_matrix, harmonic_matrix = _design_matrices(
-            window_size=window_size,
-            sample_interval_seconds=dt_seconds,
-            config=config,
-        )
-        # Step 1: 趋势拟合
-        trend_coefficients, *_ = np.linalg.lstsq(
-            trend_matrix[valid_mask],
-            segment[valid_mask],
-            rcond=None,
-        )
-        trend_signal = trend_matrix @ trend_coefficients
-        detrended_segment = segment - trend_signal
-
-        # Step 2: 对去趋势残差拟合纯谐波 — 设计矩阵只含谐波列
-        harmonic_coefficients, *_ = np.linalg.lstsq(
-            harmonic_matrix[valid_mask],
-            detrended_segment[valid_mask],
-            rcond=None,
-        )
-        harmonic_signal = harmonic_matrix @ harmonic_coefficients
-
-        noise_sum[start:stop] += harmonic_signal * weights
-        weight_sum[start:stop] += weights
-
-        # 完整拟合 = 趋势背景 + 周期谐波（仅用于残差诊断）
-        fitted_segment = trend_signal + harmonic_signal
-        residual = segment[valid_mask] - fitted_segment[valid_mask]
-        row["residual_rms"] = float(np.sqrt(np.mean(residual ** 2)))
-        row["harmonic_rms"] = float(np.sqrt(np.mean(harmonic_signal[valid_mask] ** 2)))
-        for harmonic_index, harmonic in enumerate(config.harmonics):
-            cos_coefficient = harmonic_coefficients[2 * harmonic_index]
-            sin_coefficient = harmonic_coefficients[2 * harmonic_index + 1]
-            row[f"harmonic_{harmonic}_amplitude"] = float(
-                np.hypot(cos_coefficient, sin_coefficient)
+    # Rust 加速路径：一次调用完成所有窗口的两步最小二乘 + scatter-add
+    if _HAS_RUST:
+        try:
+            valid_mask_full = np.isfinite(values).astype(np.uint8)
+            noise_sum_np, weight_sum_np, amplitudes_2d = (
+                rust_lib.subtract_periodic_signal_series_rs(
+                    np.ascontiguousarray(values, dtype=np.float64),
+                    valid_mask_full,
+                    np.ascontiguousarray(starts, dtype=np.int64),
+                    np.ascontiguousarray(weights, dtype=np.float64),
+                    np.ascontiguousarray(trend_matrix, dtype=np.float64),
+                    np.ascontiguousarray(harmonic_matrix, dtype=np.float64),
+                    window_size,
+                    config.min_valid_samples,
+                    config.min_valid_fraction,
+                )
             )
-        diagnostics_rows.append(row)
+            noise_sum = np.asarray(noise_sum_np, dtype=np.float64)
+            weight_sum = np.asarray(weight_sum_np, dtype=np.float64)
+            amps = np.asarray(amplitudes_2d, dtype=np.float64)  # shape (n_windows, n_harm/2)
+            # 重建轻量诊断：每窗口 status/valid_*，加上 Rust 计算的谐波振幅
+            for window_id, start in enumerate(starts):
+                stop = start + window_size
+                segment = values[start:stop]
+                valid_samples = int(np.sum(np.isfinite(segment)))
+                valid_fraction = valid_samples / float(window_size)
+                skipped = (
+                    valid_samples < config.min_valid_samples
+                    or valid_fraction < config.min_valid_fraction
+                )
+                row: dict[str, object] = {
+                    "window_id": window_id,
+                    "start_time": series.index[start],
+                    "end_time": series.index[stop - 1],
+                    "valid_samples": valid_samples,
+                    "valid_fraction": valid_fraction,
+                    "status": "skipped_insufficient_valid" if skipped else "ok",
+                }
+                for ai, harmonic in enumerate(config.harmonics):
+                    row[f"harmonic_{harmonic}_amplitude"] = (
+                        float(amps[window_id, ai]) if not skipped else np.nan
+                    )
+                diagnostics_rows.append(row)
+        except Exception:
+            logger.debug(
+                "Rust subtract_periodic_signal_series_rs failed, falling back to Python",
+                exc_info=True,
+            )
+            noise_sum[:] = 0.0
+            weight_sum[:] = 0.0
+            diagnostics_rows.clear()
+            _python_window_loop(
+                values, series, starts, window_size, weights,
+                trend_matrix, harmonic_matrix,
+                config, noise_sum, weight_sum, diagnostics_rows,
+            )
+    else:
+        _python_window_loop(
+            values, series, starts, window_size, weights,
+            trend_matrix, harmonic_matrix,
+            config, noise_sum, weight_sum, diagnostics_rows,
+        )
 
     # 各窗口都算完后，再按累计权重归一化，得到最终的连续噪声估计。
     estimated_noise = np.divide(
@@ -290,6 +295,76 @@ def subtract_diurnal_signal_channel(
         ),
         inplace=inplace,
     )
+
+
+def _python_window_loop(
+    values: np.ndarray,
+    series: pd.Series,
+    starts: list[int],
+    window_size: int,
+    weights: np.ndarray,
+    trend_matrix: np.ndarray,
+    harmonic_matrix: np.ndarray,
+    config: PeriodicSubtractionConfig,
+    noise_sum: np.ndarray,
+    weight_sum: np.ndarray,
+    diagnostics_rows: list[dict[str, object]],
+) -> None:
+    """Python 回退路径：逐窗口做两步最小二乘（趋势→谐波）并加权散射至 noise/weight。"""
+    for window_id, start in enumerate(starts):
+        stop = start + window_size
+        segment = values[start:stop]
+        valid_mask = np.isfinite(segment)
+        valid_samples = int(valid_mask.sum())
+        valid_fraction = valid_samples / float(window_size)
+        row: dict[str, object] = {
+            "window_id": window_id,
+            "start_time": series.index[start],
+            "end_time": series.index[stop - 1],
+            "valid_samples": valid_samples,
+            "valid_fraction": valid_fraction,
+            "status": "ok",
+        }
+        for harmonic in config.harmonics:
+            row[f"harmonic_{harmonic}_amplitude"] = np.nan
+
+        if (valid_samples < config.min_valid_samples
+                or valid_fraction < config.min_valid_fraction):
+            row["status"] = "skipped_insufficient_valid"
+            diagnostics_rows.append(row)
+            continue
+
+        # Step 1: 趋势拟合
+        trend_coefficients, *_ = np.linalg.lstsq(
+            trend_matrix[valid_mask],
+            segment[valid_mask],
+            rcond=None,
+        )
+        trend_signal = trend_matrix @ trend_coefficients
+        detrended_segment = segment - trend_signal
+
+        # Step 2: 对去趋势残差拟合纯谐波
+        harmonic_coefficients, *_ = np.linalg.lstsq(
+            harmonic_matrix[valid_mask],
+            detrended_segment[valid_mask],
+            rcond=None,
+        )
+        harmonic_signal = harmonic_matrix @ harmonic_coefficients
+
+        noise_sum[start:stop] += harmonic_signal * weights
+        weight_sum[start:stop] += weights
+
+        fitted_segment = trend_signal + harmonic_signal
+        residual = segment[valid_mask] - fitted_segment[valid_mask]
+        row["residual_rms"] = float(np.sqrt(np.mean(residual ** 2)))
+        row["harmonic_rms"] = float(np.sqrt(np.mean(harmonic_signal[valid_mask] ** 2)))
+        for harmonic_index, harmonic in enumerate(config.harmonics):
+            cos_coefficient = harmonic_coefficients[2 * harmonic_index]
+            sin_coefficient = harmonic_coefficients[2 * harmonic_index + 1]
+            row[f"harmonic_{harmonic}_amplitude"] = float(
+                np.hypot(cos_coefficient, sin_coefficient)
+            )
+        diagnostics_rows.append(row)
 
 
 def _infer_sample_interval_seconds(index: pd.DatetimeIndex) -> float:

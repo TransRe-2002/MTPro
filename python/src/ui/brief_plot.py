@@ -3,7 +3,8 @@ from __future__ import annotations
 """BriefPlot --- 基于 pyqtgraph 的时间序列曲线/柱状图封装组件。
 
 每个 BriefPlot 管理多条曲线，支持折线图(plot)和柱状图(bar)两种类型。
-通过 BriefWorker 将视口范围变化经 Qt 信号转发给外部数据请求逻辑。
+视口范围由外部（DataViewWidget/CompareWidget）在主线程防抖后直接
+调用 update_plot 设置。
 """
 
 import hashlib
@@ -14,7 +15,7 @@ from PySide6.QtGui import QFont, QPen
 import pyqtgraph as pg
 from pyqtgraph import PlotWidget, DateAxisItem
 
-from PySide6.QtCore import Qt, QObject, Signal
+from PySide6.QtCore import Qt
 from typing import Optional
 
 from utils.series import dti_to_numpy
@@ -22,28 +23,6 @@ from utils.theme import configure_pyqtgraph_theme, pg_background, subtle_pen, tr
 
 LEFT_AXIS_WIDTH = 62
 BOTTOM_AXIS_HEIGHT = 34
-
-
-class BriefWorker(QObject):
-    """工作线程桥接对象：将视图范围变更通过 Qt 信号转发给数据源。"""
-
-    # 视口范围变化时发出 (start, end) 时间戳
-    update = Signal(pd.Timestamp, pd.Timestamp)
-    # 曲线可见性变化时发出 (label, visible)
-    visible = Signal(str, bool)
-
-    def __init__(self, label: str, parent=None) -> None:
-        super().__init__(parent)
-        self.label = label
-
-    def range_change(self, start: pd.Timestamp, end: pd.Timestamp) -> None:
-        """通知外部视口范围已变更。"""
-        self.update.emit(start, end)
-
-    # 预留信号：设置曲线可见性
-    def visible_curve(self, label: str, visible: bool) -> None:
-        """切换指定曲线的可见性。"""
-        self.visible.emit(label, visible)
 
 
 class BriefPlot(PlotWidget):

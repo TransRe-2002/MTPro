@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 import pandas as pd
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDateTimeEdit,
     QLabel,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from base.time_viewport_mixin import TimeViewportMixin
 from core.em_data import EMData
-from ui.brief_plot import BriefPlot, BriefWorker
+from ui.brief_plot import BriefPlot
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 
 
@@ -55,12 +55,10 @@ class CompareWidget(TimeViewportMixin, QWidget):
         self.x_view_size: pd.Timedelta = pd.Timedelta(hours=1)
         self.duration: pd.Timedelta = pd.Timedelta(hours=0)
 
-        # 子面板及其相关组件：用 DataFrame 管理 E/B 两行的 widget/thread/worker
+        # 子面板：用 DataFrame 管理 E/B 两行的 widget
         self.widget_data: pd.DataFrame = pd.DataFrame(
             data={
                 "widget": [None] * 2,
-                "thread": [None] * 2,
-                "worker": [None] * 2,
             },
             index=["E", "B"],
         )
@@ -162,20 +160,12 @@ class CompareWidget(TimeViewportMixin, QWidget):
         self._on_viewport_changed()
 
     def _init_widget(self) -> None:
-        """初始化 E/B 两行的 BriefPlot、工作线程和 Worker 桥接对象。"""
+        """初始化 E/B 两行的 BriefPlot。"""
         for row in self.widget_data.index:
             widget: Optional[BriefPlot] = self.widget_data.loc[row, "widget"]
             if widget is None:
-                # 创建子图、worker 和线程，worker 跨线程与 widget 通信
                 widget = BriefPlot(label=row)
-                worker = BriefWorker(label=row)
-                thread = QThread()
-                worker.moveToThread(thread)
-                worker.update.connect(widget.update_plot)
-                thread.start()
                 self.widget_data.loc[row, "widget"] = widget
-                self.widget_data.loc[row, "thread"] = thread
-                self.widget_data.loc[row, "worker"] = worker
                 self.splitter.addWidget(widget)
             else:
                 widget.set_label(row)
@@ -219,12 +209,16 @@ class CompareWidget(TimeViewportMixin, QWidget):
             widget.setVisible(len(widget.curves) > 0)
 
     def _on_viewport_changed(self) -> None:
-        """实现 Mixin 钩子：视口变化时通知所有子图 worker 更新范围。"""
+        """实现 Mixin 钩子：视口变化时直接更新所有子图 X 轴范围。
+
+        视口更新已在 Mixin 侧 16ms 防抖，直接在主线程设置即可，
+        不需要再经工作线程中转。
+        """
         start: pd.Timestamp = self.start + self.x_view_start
         end: pd.Timestamp = start + self.x_view_size
-        for worker in self.widget_data["worker"].values:
-            if worker is not None:
-                worker.range_change(start, end)
+        for widget in self.widget_data["widget"].values:
+            if widget is not None:
+                widget.update_plot(start, end)
         self.set_time(pts_to_qdt(start), pts_to_qdt(end))
 
     # -------------------------------------------------------------------------
@@ -244,10 +238,3 @@ class CompareWidget(TimeViewportMixin, QWidget):
         )
         self._apply_jump(start_duration, end_duration)  # Mixin
 
-    def closeEvent(self, event) -> None:
-        """确保窗口关闭时，所有工作线程被安全终止。"""
-        for thread in self.widget_data["thread"].values:
-            if thread is not None and thread.isRunning():
-                thread.quit()
-                thread.wait(500)  # 等待线程结束，最多500毫秒
-        super().closeEvent(event)

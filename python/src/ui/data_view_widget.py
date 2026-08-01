@@ -12,10 +12,10 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QFrame, QHBoxLayout, QGridLayout, QGroupBox,
     QCheckBox, QApplication,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QPoint, QMimeData
+from PySide6.QtCore import Qt, Signal, QPoint, QMimeData
 from PySide6.QtGui import QFont, QMouseEvent, QDrag, QPixmap, QPainter, QColor
 
-from ui.brief_plot import BriefPlot, BriefWorker
+from ui.brief_plot import BriefPlot
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from utils.series import dti_to_numpy
 from utils.decimate import LODPyramid
@@ -30,8 +30,6 @@ _CHANNEL_DRAG_MIME = "application/x-channel-reorder"
 class PlotResources:
     widget: Optional[BriefPlot] = None
     row_container: Optional[QWidget] = None
-    thread: Optional[QThread] = None
-    worker: Optional[BriefWorker] = None
 
 
 class PlotRowContainer(QFrame):
@@ -501,7 +499,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         return required
 
     def _ensure_plot_row(self, ch: str) -> None:
-        """为通道创建 BriefPlot、工作线程和容器（若尚不存在）。"""
+        """为通道创建 BriefPlot 和容器（若尚不存在）。"""
         if ch not in self.plot_rows:
             self.plot_rows[ch] = PlotResources()
 
@@ -509,39 +507,22 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         if resources.widget is None:
             widget = BriefPlot(label=ch)
-            thread = QThread(self)
-            worker = BriefWorker(label=ch)
-            # 将 worker 移到子线程，update 信号跨线程排队调用 widget.update_plot
-            worker.moveToThread(thread)
-            worker.update.connect(widget.update_plot)
-            thread.start()
 
             container = PlotRowContainer(ch, widget)
             container.drop_reorder.connect(self._on_drop_reorder)
 
             resources.widget = widget
             resources.row_container = container
-            resources.worker = worker
-            resources.thread = thread
             self.splitter.addWidget(container)
         else:
             resources.widget.set_label(ch)
 
     def _teardown_plot_row(self, ch: str) -> None:
-        """安全销毁通道的工作线程、容器和绘图控件。"""
+        """销毁通道的容器和绘图控件。"""
         resources = self.plot_rows.pop(ch, None)
         self._pyramids.pop(ch, None)
         if resources is None:
             return
-
-        # 先退出工作线程，再清理 UI 控件
-        if resources.thread is not None:
-            resources.thread.quit()
-            resources.thread.wait()
-            resources.thread.deleteLater()
-
-        if resources.worker is not None:
-            resources.worker.deleteLater()
 
         if resources.row_container is not None:
             resources.row_container.hide()
@@ -681,7 +662,8 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         折线通道的曲线数据在主线程同步替换为"视口适配像素宽度"的
         LOD 降采样数据（查询是 O(log n) 级，开销可忽略）；X 轴范围
-        仍经各通道 worker 信号排队更新。
+        直接在主线程设置——视口更新已在 Mixin 侧 16ms 防抖，不需要
+        再经工作线程中转。
         """
         if self.em_data is None:
             return
@@ -698,8 +680,8 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             if len(xs) > 0:
                 widget.update_curve(ch, xs, ys)
         for resources in self.plot_rows.values():
-            if resources.worker is not None:
-                resources.worker.range_change(start, end)
+            if resources.widget is not None:
+                resources.widget.update_plot(start, end)
         self._sync_left_axes()
         self.set_time(pts_to_qdt(start), pts_to_qdt(end))
 

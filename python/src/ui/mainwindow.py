@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
+from concurrent.futures import as_completed
 from pathlib import Path
 from typing import Dict, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEventLoop, QObject, Signal
 from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
     QDialog,
@@ -45,6 +46,8 @@ from ui.welcome import Welcome
 from ui.dialogs.batch_save_dialog import BatchSaveDialog
 from ui.tools import registry as tool_registry
 from io_utils import file_ops
+from utils.concurrency import io_pool
+from utils.qt_bridge import run as run_in_pool
 from utils.app_state import (
     AppState,
     load_app_state,
@@ -61,6 +64,36 @@ DATA_MANAGER_INITIAL_WIDTH = 220
 WORKSPACE_INITIAL_WIDTH = 1260
 
 
+# ---------------------------------------------------------------------------
+# 后台任务（跑在共享线程池上，禁止碰 Qt 控件与 DataManager）
+# ---------------------------------------------------------------------------
+
+def _load_mat_task(filename: str, tz: str) -> tuple[str, object]:
+    """解析单个 MAT（含 Kp 获取），返回 (规范化路径, EMData)。"""
+    normalized = str(Path(filename).expanduser().resolve(strict=False))
+    if not Path(normalized).exists():
+        raise FileNotFoundError(normalized)
+    return normalized, file_ops.load_mat(normalized, tz=tz)
+
+
+def _save_mat_task(data: object, path: str) -> str:
+    """保存单个数据集到指定路径，返回路径。
+
+    注：后台化后保存理论上可与用户编辑并发（实际罕见：保存确认
+    弹窗刚关闭，用户注意力在保存上）。
+    """
+    file_ops.save_mat(data, path)
+    return path
+
+
+class _BatchOpenSignals(QObject):
+    """批量打开的信号总线：任务跑在 compute 池，编排 io 池逐文件加载。"""
+
+    file_loaded = Signal(str, object)  # (规范化路径, EMData)
+    failed = Signal(str, str)          # (文件名, 错误信息)
+    advanced = Signal(int, int, str)   # (已完成数, 总数, 当前文件名)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, data_manager: DataManager, parent=None):
         super().__init__(parent)
@@ -73,6 +106,14 @@ class MainWindow(QMainWindow):
         self.data_viewers: Dict[int, DataViewWidget] = {}
         self.app_state: AppState = load_app_state()
         self._log_last_nonzero_height = 120
+        # 后台打开/保存的临时状态（供主线程槽函数读写）
+        self._single_open_progress: Optional[QProgressDialog] = None
+        self._single_open_ctx: Optional[dict] = None
+        self._batch_progress: Optional[QProgressDialog] = None
+        self._batch_loop: Optional[QEventLoop] = None
+        self._batch_failed: list[tuple[str, str]] = []
+        self._batch_save_progress: Optional[QProgressDialog] = None
+        self._save_ctx: Optional[dict] = None
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(False)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -533,37 +574,105 @@ class MainWindow(QMainWindow):
         return True
 
     def _open_files_batch(self, filenames: list[str], tz: str) -> None:
-        """批量打开文件：单个进度条追踪已打开个数，遇错跳过继续。"""
-        from PySide6.QtWidgets import QApplication
+        """批量后台打开：io 池逐文件并行加载，完成后在主线程逐个入册。
 
+        失败文件跳过并列清单（与 xlsx 导入策略一致）；取消按钮停止
+        后续任务，已加载完成的数据集保留。
+        """
         total = len(filenames)
         progress = QProgressDialog(
-            f"正在打开 0/{total} 个文件...", "", 0, total, self)
+            f"正在打开 0/{total} 个文件...", "取消", 0, total, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(300)
+        progress.setMinimumDuration(0)
         progress.setWindowTitle("批量加载数据")
-        progress.setCancelButton(None)
         progress.setValue(0)
 
-        opened = 0
-        for filename in filenames:
-            progress.setLabelText(f"正在打开 {opened}/{total} 个文件...\n{Path(filename).name}")
-            QApplication.processEvents()
+        cancel_flag = [False]
+        progress.canceled.connect(lambda: cancel_flag.__setitem__(0, True))
 
-            try:
-                self._open_file_path_with_tz(filename, tz, progress=progress)
-                opened += 1
-                progress.setValue(opened)
-            except Exception:
-                self.logger.exception("Batch open — skipped: %s", filename)
+        self._batch_progress = progress
+        self._batch_failed = []
+        signals = _BatchOpenSignals(self)
+        signals.file_loaded.connect(self._on_batch_file_loaded)
+        signals.failed.connect(self._on_batch_file_failed)
+        signals.advanced.connect(self._on_batch_advanced)
 
-        progress.setValue(total)
+        def task(sigs: _BatchOpenSignals) -> None:
+            futures = {
+                io_pool.submit(_load_mat_task, filename, tz): filename
+                for filename in filenames
+            }
+            done = 0
+            for future in as_completed(futures):
+                filename = futures[future]
+                try:
+                    normalized, em_data = future.result()
+                    sigs.file_loaded.emit(normalized, em_data)
+                except Exception as exc:
+                    sigs.failed.emit(filename, str(exc))
+                done += 1
+                sigs.advanced.emit(done, total, Path(filename).name)
+                if cancel_flag[0]:
+                    for pending in futures:
+                        pending.cancel()
+                    break
+
+        loop = QEventLoop(self)
+        self._batch_loop = loop
+        # 编排任务跑在 compute 池（等 io 池的 future 属跨池等待，允许）；
+        # on_done 是 QObject 槽，经排队连接回主线程。
+        run_in_pool(
+            "compute", task, signals,
+            on_done=self._on_batch_finished, owner=self,
+        )
+        loop.exec()   # UI 保持响应：进度更新与取消都走事件循环
         progress.close()
+        self._batch_progress = None
+        self._batch_loop = None
+
+        failed = self._batch_failed
+        self._batch_failed = []
+        if cancel_flag[0]:
+            self.logger.info(
+                "Batch open cancelled by user (%d/%d files loaded)",
+                progress.value(), total,
+            )
+        if failed:
+            QMessageBox.warning(
+                self,
+                "部分文件被跳过",
+                "以下文件无法加载，已跳过:\n\n"
+                + "\n".join(f"{Path(name).name}: {error}" for name, error in failed),
+            )
+
+    # -- 批量打开信号槽（排队连接，主线程执行） -------------------------
+
+    def _on_batch_advanced(self, done: int, total: int, name: str) -> None:
+        if self._batch_progress is not None:
+            self._batch_progress.setValue(done)
+            self._batch_progress.setLabelText(
+                f"正在打开 {done}/{total} 个文件...\n{name}")
+
+    def _on_batch_file_loaded(self, normalized: str, em_data) -> None:
+        key = self.data_manager.add(em_data)
+        self.app_state = remember_recent_file(self.app_state, normalized)
+        self._persist_app_state()
+        self._refresh_recent_file_views()
+        self._continue_to_workspace()
+        self.data_manager.set_active(key)
+        self.logger.info("Opened file: %s", normalized)
+
+    def _on_batch_file_failed(self, filename: str, error: str) -> None:
+        self.logger.error("Batch open — skipped: %s (%s)", filename, error)
+        self._batch_failed.append((filename, error))
+
+    def _on_batch_finished(self, _result=None) -> None:
+        if self._batch_loop is not None:
+            self._batch_loop.quit()
 
     def _open_file_path_with_tz(self, filename: str, tz: str,
-                                 from_recent: bool = False,
-                                 progress: Optional[QProgressDialog] = None) -> None:
-        """使用指定时区加载单个文件（不再弹时区选择窗）。"""
+                                 from_recent: bool = False) -> None:
+        """使用指定时区后台加载单个文件（不再弹时区选择窗）。"""
         normalized = str(Path(filename).expanduser().resolve(strict=False))
         if not Path(normalized).exists():
             if from_recent:
@@ -574,73 +683,53 @@ class MainWindow(QMainWindow):
             self.logger.warning("File not found: %s", normalized)
             return
 
-        own_progress = None
-        is_batch = progress is not None
-        try:
-            from PySide6.QtWidgets import QApplication
+        # 不定量进度条：加载期间父窗口模态阻塞，但事件循环保持运转
+        progress = QProgressDialog(
+            f"正在读取 {Path(normalized).name} ...", "", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(200)
+        progress.setWindowTitle("加载数据")
+        progress.setCancelButton(None)
+        progress.show()
 
-            if is_batch:
-                # 批量模式：复用外部进度条，仅更新 label
-                if progress is not None:
-                    progress.setLabelText(
-                        f"正在读取 {Path(normalized).name} ...")
-                    QApplication.processEvents()
-            else:
-                # 单个文件模式：创建自己的进度条
-                own_progress = QProgressDialog(
-                    f"正在读取 {Path(normalized).name} ...", "", 0, 3, self)
-                own_progress.setWindowModality(Qt.WindowModality.WindowModal)
-                own_progress.setMinimumDuration(500)
-                own_progress.setWindowTitle("加载数据")
-                own_progress.setCancelButton(None)
-                own_progress.setValue(0)
-                progress = own_progress
+        self._single_open_progress = progress
+        self._single_open_ctx = {
+            "normalized": normalized, "from_recent": from_recent,
+        }
+        run_in_pool(
+            "io", _load_mat_task, normalized, tz,
+            on_done=self._on_single_open_done,
+            on_error=self._on_single_open_failed,
+            owner=self,
+        )
 
-            em_data = file_ops.load_mat(normalized, tz=tz)
+    def _on_single_open_done(self, result) -> None:
+        normalized, em_data = result
+        if self._single_open_progress is not None:
+            self._single_open_progress.close()
+            self._single_open_progress = None
+        key = self.data_manager.add(em_data)
+        self.app_state = remember_recent_file(self.app_state, normalized)
+        self._persist_app_state()
+        self._refresh_recent_file_views()
+        self._continue_to_workspace()
+        self.data_manager.set_active(key)
+        self.logger.info("Opened file: %s", normalized)
 
-            if not is_batch:
-                total_steps = 3 + em_data.NCh + (1 if em_data.kp_data is not None else 0)
-                progress.setMaximum(total_steps)
-                progress.setValue(1)
-                progress.setLabelText("正在读取通道数据...")
-                QApplication.processEvents()
-
-            key = self.data_manager.add(em_data)
-            self.app_state = remember_recent_file(self.app_state, normalized)
+    def _on_single_open_failed(self, exc: BaseException) -> None:
+        if self._single_open_progress is not None:
+            self._single_open_progress.close()
+            self._single_open_progress = None
+        ctx = self._single_open_ctx or {}
+        normalized = ctx.get("normalized", "")
+        if isinstance(exc, FileNotFoundError) and ctx.get("from_recent"):
+            self.app_state = remove_recent_file(self.app_state, normalized)
             self._persist_app_state()
             self._refresh_recent_file_views()
-            self._continue_to_workspace()
-
-            if not is_batch:
-                progress.setValue(2)
-                progress.setLabelText("正在初始化通道曲线...")
-                QApplication.processEvents()
-
-                step = [2]
-                def _on_progress(msg: str):
-                    step[0] += 1
-                    progress.setValue(step[0])
-                    progress.setLabelText(msg)
-                    QApplication.processEvents()
-
-                self._load_progress_callback = _on_progress
-                self.data_manager.set_active(key)
-                self._load_progress_callback = None
-
-                progress.setValue(total_steps)
-            else:
-                self.data_manager.set_active(key)
-
-            self.logger.info("Opened file: %s", normalized)
-        except Exception:
-            self.logger.exception("Failed to open file: %s", normalized)
-            if not is_batch:
-                QMessageBox.critical(self, "打开失败", f"无法打开文件:\n{normalized}")
-            else:
-                raise  # 抛给 _open_files_batch 处理
-        finally:
-            if own_progress is not None:
-                own_progress.close()
+        self.logger.error(
+            "Failed to open file: %s: %r", normalized, exc, exc_info=exc)
+        QMessageBox.critical(
+            self, "打开失败", f"无法打开文件:\n{normalized}\n\n错误: {exc}")
 
     def _open_file_path(self, filename: str, from_recent: bool = False) -> None:
         """单个文件打开（含时区弹窗）。用于最近文件等逐文件打开场景。"""
@@ -694,12 +783,13 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-            try:
-                file_ops.save_mat(data, data.path)
-                self.logger.info("Saved dataset #%s to %s", data_id, data.path)
-            except Exception:
-                self.logger.exception("Failed to save dataset #%s to %s", data_id, data.path)
-                QMessageBox.critical(self, "保存失败", f"无法保存文件:\n{data.path}")
+            self._save_ctx = {"path": data.path, "data_id": data_id, "kind": "save"}
+            run_in_pool(
+                "io", _save_mat_task, data, data.path,
+                on_done=self._on_save_done,
+                on_error=self._on_save_failed,
+                owner=self,
+            )
         else:
             return
 
@@ -735,14 +825,27 @@ class MainWindow(QMainWindow):
         if m and not Path(filename).suffix:
             filename += "." + m.group(1)
         if selected_filter == FILTER_TYPE[0]:
-            try:
-                file_ops.save_mat(data, filename)
-                self.logger.info("Saved dataset #%s as %s", data_id, filename)
-            except Exception:
-                self.logger.exception("Failed to save dataset #%s as %s", data_id, filename)
-                QMessageBox.critical(self, "另存为失败", f"无法保存到:\n{filename}")
+            self._save_ctx = {"path": filename, "data_id": data_id, "kind": "save_as"}
+            run_in_pool(
+                "io", _save_mat_task, data, filename,
+                on_done=self._on_save_done,
+                on_error=self._on_save_failed,
+                owner=self,
+            )
         else:
             return
+
+    def _on_save_done(self, path: str) -> None:
+        ctx = self._save_ctx or {}
+        verb = "as" if ctx.get("kind") == "save_as" else "to"
+        self.logger.info("Saved dataset #%s %s %s", ctx.get("data_id"), verb, path)
+
+    def _on_save_failed(self, exc: BaseException) -> None:
+        ctx = self._save_ctx or {}
+        path = ctx.get("path", "")
+        self.logger.error("Failed to save %s: %r", path, exc, exc_info=exc)
+        title = "另存为失败" if ctx.get("kind") == "save_as" else "保存失败"
+        QMessageBox.critical(self, title, f"无法保存到:\n{path}\n\n错误: {exc}")
 
     def batch_save(self):
         """批量保存 DataManager 中所有数据集到指定文件夹。"""
@@ -758,10 +861,34 @@ class MainWindow(QMainWindow):
         folder = dlg.folder_path.text()
         suffix = dlg.suffix_edit.text().strip()
 
-        saved, failed = file_ops.batch_save_mat(items, folder, suffix)
+        progress = QProgressDialog("正在保存所有数据集...", "", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(200)
+        progress.setWindowTitle("批量保存")
+        progress.setCancelButton(None)
+        progress.show()
+        self._batch_save_progress = progress
+        run_in_pool(
+            "io", file_ops.batch_save_mat, items, folder, suffix,
+            on_done=self._on_batch_save_done,
+            on_error=self._on_batch_save_failed,
+            owner=self,
+        )
 
-        msg = f"成功: {saved} 个\n失败: {failed} 个"
-        QMessageBox.information(self, "批量保存完成", msg)
+    def _on_batch_save_done(self, result) -> None:
+        if self._batch_save_progress is not None:
+            self._batch_save_progress.close()
+            self._batch_save_progress = None
+        saved, failed = result
+        QMessageBox.information(
+            self, "批量保存完成", f"成功: {saved} 个\n失败: {failed} 个")
+
+    def _on_batch_save_failed(self, exc: BaseException) -> None:
+        if self._batch_save_progress is not None:
+            self._batch_save_progress.close()
+            self._batch_save_progress = None
+        self.logger.error("Batch save failed: %r", exc, exc_info=exc)
+        QMessageBox.critical(self, "批量保存失败", f"错误: {exc}")
 
     def on_data_added(self, key: int):
         data = self.data_manager.get(key)

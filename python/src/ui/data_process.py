@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass
 import sys
 from typing import Callable, Optional
@@ -43,6 +42,7 @@ from ui.data_process_shared import (
     create_classic_tool_model,
 )
 from ui.tools import registry as tool_registry
+from utils.concurrency import compute_pool
 
 
 @dataclass(frozen=True)
@@ -407,23 +407,22 @@ class DataProcessLegacyWidget(QWidget):
         progress.setValue(0)
         progress.show()
 
-        workers = max(1, min((os.cpu_count() or 4) // 2, total))
-        _log.info("_on_region_sync: %d workers (cpu=%d)", workers, os.cpu_count() or 4)
-
+        # 用全局共享 compute 池（大小 max(1, cpu//2)，与原每动作池同策）。
+        # _modify 在池线程里原地改各数据集通道并预抽稀显示数据；
+        # 池尺寸即并发上限，不再每动作新建 executor。
         displays: dict[int, dict] = {}  # data_id → {ch: (dx, dy)}
         completed = 0
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_modify, t): t for t in tasks}
-            for future in as_completed(futures):
-                try:
-                    data_id, display = future.result()
-                    displays[data_id] = display
-                except Exception:
-                    data_id = futures[future][0]
-                    _log.exception("_on_region_sync: failed for dataset #%d", data_id)
-                completed += 1
-                progress.setValue(completed)
-                progress.setLabelText(f"已完成 {completed}/{total} 个数据集")
+        futures = {compute_pool.submit(_modify, t): t for t in tasks}
+        for future in as_completed(futures):
+            try:
+                data_id, display = future.result()
+                displays[data_id] = display
+            except Exception:
+                data_id = futures[future][0]
+                _log.exception("_on_region_sync: failed for dataset #%d", data_id)
+            completed += 1
+            progress.setValue(completed)
+            progress.setLabelText(f"已完成 {completed}/{total} 个数据集")
 
         progress.setLabelText(f"全部完成 ({total} 个数据集)")
         progress.setValue(total)

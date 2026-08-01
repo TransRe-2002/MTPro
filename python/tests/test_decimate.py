@@ -126,3 +126,49 @@ def test_python_fallback_matches_rust_path(monkeypatch):
     ):
         np.testing.assert_array_equal(rx, px)
         np.testing.assert_array_equal(ry, py_)
+
+
+def test_pyramid_truncation_drops_oversized_top_levels():
+    from utils.decimate import build_lod_pyramid
+
+    n = 5_000_000  # 顶层 ~200 万点 > cap，下一层 ~80 万点 < cap
+    x = np.arange(n, dtype=np.float64)
+    y = np.sin(x / 1e5)
+
+    full = build_lod_pyramid(x, y)
+    trunc = build_lod_pyramid(x, y, max_finest_points=1_500_000)
+
+    assert len(full[0][0]) > 1_500_000          # 不截顶时顶层确实超限
+    assert len(trunc) < len(full)               # 截掉了顶层
+    assert all(len(l[0]) <= 1_500_000 for l in trunc)
+    # 链式推导不受影响：保留的最粗层与完整版逐点一致
+    np.testing.assert_array_equal(trunc[-1][0], full[-1][0])
+    np.testing.assert_array_equal(trunc[-1][1], full[-1][1])
+
+
+def test_pyramid_truncation_noop_for_small_data():
+    from utils.decimate import PYRAMID_MAX_FINEST_POINTS, build_lod_pyramid
+
+    x, y = _spiky_series(200_000)   # 顶层 8 万点 << 150 万，截顶不应触发
+    full = build_lod_pyramid(x, y)
+    trunc = build_lod_pyramid(x, y, max_finest_points=PYRAMID_MAX_FINEST_POINTS)
+    assert len(full) == len(trunc)
+
+
+def test_lod_pyramid_truncated_still_serves_all_viewports():
+    from utils.decimate import LODPyramid
+
+    n = 5_000_000
+    x = np.arange(n, dtype=np.float64)
+    y = np.sin(x / 1e5)
+    pyramid = LODPyramid(x, y, max_finest_points=1_500_000)
+
+    # 极小视口 → 原始切片
+    xs, ys = pyramid.get(1_000_000.0, 1_002_000.0, pixel_width=800)
+    assert len(xs) == 2001
+    # 中等视口 → 由保留的层兜底，非空
+    xs, ys = pyramid.get(0.0, 2_000_000.0, pixel_width=800)
+    assert len(xs) > 0 and len(xs) <= 800 * 4 + 2
+    # 全览
+    xs, ys = pyramid.get(0.0, float(n), pixel_width=800)
+    assert len(xs) > 0

@@ -72,12 +72,18 @@ pub fn minmax_decimate_rs<'py>(
 }
 
 /// LOD pyramid builder (Python-callable, zero-copy input).
+///
+/// `max_finest_points`（截顶）：点数超过该上限的顶层不存储——但链式
+/// 推导照常进行（更粗的层仍由完整精度的上一层导出，质量不受影响）。
+/// 用于压低超大数据集（如 5s 采样年度文件）的金字塔内存。
 #[pyfunction]
 #[pyo3(name = "build_lod_pyramid_rs")]
+#[pyo3(signature = (x, y, max_finest_points=None))]
 pub fn build_lod_pyramid_rs<'py>(
     py: Python<'py>,
     x: numpy::PyReadonlyArray1<'py, f64>,
     y: numpy::PyReadonlyArray1<'py, f64>,
+    max_finest_points: Option<usize>,
 ) -> PyResult<Vec<(Py<PyArray1<f64>>, Py<PyArray1<f64>>)>> {
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
@@ -89,10 +95,13 @@ pub fn build_lod_pyramid_rs<'py>(
 
     while target >= 256 && cur_x.len() > target * 2 {
         let (rx, ry) = decimate_core(&cur_x, &cur_y, target);
-        levels.push((
-            PyArray1::from_vec(py, rx.clone()).unbind(),
-            PyArray1::from_vec(py, ry.clone()).unbind(),
-        ));
+        let keep = max_finest_points.map_or(true, |cap| rx.len() <= cap);
+        if keep {
+            levels.push((
+                PyArray1::from_vec(py, rx.clone()).unbind(),
+                PyArray1::from_vec(py, ry.clone()).unbind(),
+            ));
+        }
         cur_x = rx;
         cur_y = ry;
         target = (cur_x.len() / 5).max(256);

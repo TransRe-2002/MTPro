@@ -19,6 +19,12 @@ try:
 except ImportError:
     _HAS_RUST = False
 
+# 金字塔截顶上限：点数超过该值的顶层不存储（链式推导照常进行，
+# 更粗层的精度不受影响）。只对超大数据集生效（如 5s 采样年度
+# 文件，顶层可达 250 万点）；60s 采样数据的顶层远小于该值，
+# 截顶不会触发。压低的是金字塔内存，不影响构建耗时。
+PYRAMID_MAX_FINEST_POINTS = 1_500_000
+
 
 def minmax_decimate(
     x: np.ndarray, y: np.ndarray, target_bins: int = 1000,
@@ -78,6 +84,7 @@ def minmax_decimate(
 
 def build_lod_pyramid(
     x: np.ndarray, y: np.ndarray,
+    max_finest_points: int | None = None,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """构建 LOD 金字塔。
 
@@ -86,13 +93,15 @@ def build_lod_pyramid(
     Args:
         x: X 轴数据。
         y: Y 轴数据。
+        max_finest_points: 截顶上限——点数超过该值的顶层不存储，
+            但链式推导照常进行（更粗层精度不受影响）。None = 不截顶。
 
     Returns:
         LOD 层级列表，每层为 (x, y) 元组，从粗到精排列。
     """
     if _HAS_RUST:
         try:
-            return list(rust_lib.build_lod_pyramid_rs(x, y))
+            return list(rust_lib.build_lod_pyramid_rs(x, y, max_finest_points))
         except Exception:
             logger.debug(
                 "Rust build_lod_pyramid failed, falling back to Python",
@@ -105,7 +114,8 @@ def build_lod_pyramid(
 
     while target >= 256 and len(cur_x) > target * 2:
         dx, dy = minmax_decimate(cur_x, cur_y, target)
-        levels.append((dx, dy))
+        if max_finest_points is None or len(dx) <= max_finest_points:
+            levels.append((dx, dy))
         cur_x, cur_y = dx, dy
         target = max(256, len(cur_x) // 5)
 
@@ -146,14 +156,20 @@ class LODPyramid:
         x_lod, y_lod = pyramid.get(x_range_start, x_range_end, pixel_width)
     """
 
-    def __init__(self, x: np.ndarray, y: np.ndarray) -> None:
+    def __init__(
+        self, x: np.ndarray, y: np.ndarray,
+        max_finest_points: int | None = None,
+    ) -> None:
         self.x_raw = np.asarray(x, dtype=np.float64)
         self.y_raw = np.asarray(y, dtype=np.float64)
+        self._max_finest_points = max_finest_points
         self._levels: list[tuple[np.ndarray, np.ndarray]] = []
         self._build()
 
     def _build(self) -> None:
-        self._levels = build_lod_pyramid(self.x_raw, self.y_raw)
+        self._levels = build_lod_pyramid(
+            self.x_raw, self.y_raw, self._max_finest_points,
+        )
 
     @property
     def level_count(self) -> int:

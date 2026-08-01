@@ -145,7 +145,7 @@ def subtract_periodic_signal_series(
     if _HAS_RUST:
         try:
             valid_mask_full = np.isfinite(values).astype(np.uint8)
-            noise_sum_np, weight_sum_np, amplitudes_2d = (
+            noise_sum_np, weight_sum_np, amplitudes_2d, resid_rms_np, harm_rms_np = (
                 rust_lib.subtract_periodic_signal_series_rs(
                     np.ascontiguousarray(values, dtype=np.float64),
                     valid_mask_full,
@@ -161,7 +161,9 @@ def subtract_periodic_signal_series(
             noise_sum = np.asarray(noise_sum_np, dtype=np.float64)
             weight_sum = np.asarray(weight_sum_np, dtype=np.float64)
             amps = np.asarray(amplitudes_2d, dtype=np.float64)  # shape (n_windows, n_harm/2)
-            # 重建轻量诊断：每窗口 status/valid_*，加上 Rust 计算的谐波振幅
+            resid_rms = np.asarray(resid_rms_np, dtype=np.float64)
+            harm_rms = np.asarray(harm_rms_np, dtype=np.float64)
+            # 重建轻量诊断：每窗口 status/valid_*，加上 Rust 计算的谐波振幅与 RMS
             for window_id, start in enumerate(starts):
                 stop = start + window_size
                 segment = values[start:stop]
@@ -183,6 +185,9 @@ def subtract_periodic_signal_series(
                     row[f"harmonic_{harmonic}_amplitude"] = (
                         float(amps[window_id, ai]) if not skipped else np.nan
                     )
+                if not skipped:
+                    row["residual_rms"] = float(resid_rms[window_id])
+                    row["harmonic_rms"] = float(harm_rms[window_id])
                 diagnostics_rows.append(row)
         except Exception:
             logger.debug(

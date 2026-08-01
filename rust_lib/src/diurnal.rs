@@ -40,9 +40,13 @@ fn lstsq_svd(a: &[f64], b: &[f64], m: usize, n: usize) -> Vec<f64> {
         Ok(x) => x.as_slice().to_vec(),
         Err(_) => {
             // Defensive: pseudo_inverse then matrix-vector multiply.
+            eprintln!("rust_lib: SVD solve failed (m={m}, n={n}); falling back to pseudo-inverse");
             svd.pseudo_inverse(eps)
                 .map(|pinv| (pinv * &rhs).as_slice().to_vec())
-                .unwrap_or_else(|_| vec![0.0; n])
+                .unwrap_or_else(|_| {
+                    eprintln!("rust_lib: pseudo-inverse failed (m={m}, n={n}); returning zero coefficients");
+                    vec![0.0; n]
+                })
         }
     }
 }
@@ -51,9 +55,11 @@ fn lstsq_svd(a: &[f64], b: &[f64], m: usize, n: usize) -> Vec<f64> {
 ///     trend_matrix, harmonic_matrix, window_size, min_valid_samples, min_valid_fraction).
 ///
 /// Returns (noise_sum: PyArray1<f64>, weight_sum: PyArray1<f64>,
-///          per_window_amplitudes: PyArray2<f64>).
+///          per_window_amplitudes: PyArray2<f64>,
+///          residual_rms: PyArray1<f64>, harmonic_rms: PyArray1<f64>).
 /// `per_window_amplitudes` has shape (n_starts, n_harm/2); each row gives the
-/// per-harmonic amplitudes for that window (NaN for skipped windows).
+/// per-harmonic amplitudes for that window. Skipped windows carry NaN in all
+/// per-window diagnostic outputs (amplitudes, residual_rms, harmonic_rms).
 #[pyfunction]
 #[pyo3(name = "subtract_periodic_signal_series_rs")]
 #[allow(clippy::too_many_arguments)]
@@ -72,6 +78,8 @@ pub fn subtract_periodic_signal_series_rs<'py>(
     Bound<'py, PyArray1<f64>>,
     Bound<'py, PyArray1<f64>>,
     Bound<'py, numpy::PyArray2<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
 )> {
     use numpy::ndarray::Array2;
     let values = values.as_slice()?;
@@ -94,6 +102,9 @@ pub fn subtract_periodic_signal_series_rs<'py>(
     let mut weight_sum = vec![0.0_f64; n];
     let n_starts = starts.len();
     let mut amplitudes = vec![f64::NAN; n_starts * n_amplitudes];
+    // 逐窗诊断：跳过窗保持 NaN，与 Python 回退路径的诊断列对齐
+    let mut residual_rms = vec![f64::NAN; n_starts];
+    let mut harmonic_rms = vec![f64::NAN; n_starts];
 
     // Pre-allocate reusable buffers.
     let mut a_valid: Vec<f64> = Vec::with_capacity(window_size * n_trend.max(n_harm));
@@ -180,6 +191,28 @@ pub fn subtract_periodic_signal_series_rs<'py>(
             amplitudes[window_idx * n_amplitudes + k] = (cos_c * cos_c + sin_c * sin_c).sqrt();
         }
 
+        // Window diagnostics over valid rows, matching the Python path:
+        //   residual = segment - (trend_signal + harmonic_signal)
+        //            = detrended_full - harmonic_signal
+        //   harmonic_rms = RMS(harmonic_signal), residual_rms = RMS(residual)
+        let mut resid_sq = 0.0_f64;
+        let mut harm_sq = 0.0_f64;
+        let mut n_valid = 0usize;
+        for i in 0..cur_window {
+            if valid_mask[start + i] != 0 {
+                let h = harmonic_signal[i];
+                let r = detrended_full[i] - h;
+                harm_sq += h * h;
+                resid_sq += r * r;
+                n_valid += 1;
+            }
+        }
+        if n_valid > 0 {
+            let denom = n_valid as f64;
+            harmonic_rms[window_idx] = (harm_sq / denom).sqrt();
+            residual_rms[window_idx] = (resid_sq / denom).sqrt();
+        }
+
         // Scatter-add weighted.
         for i in 0..cur_window {
             noise_sum[start + i] += harmonic_signal[i] * weights[i];
@@ -194,5 +227,7 @@ pub fn subtract_periodic_signal_series_rs<'py>(
         PyArray1::from_vec(py, noise_sum),
         PyArray1::from_vec(py, weight_sum),
         amp_array.into_pyarray(py),
+        PyArray1::from_vec(py, residual_rms),
+        PyArray1::from_vec(py, harmonic_rms),
     ))
 }

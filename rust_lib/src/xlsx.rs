@@ -19,7 +19,6 @@ fn parse_inline_str_sheet<R: BufRead>(mut reader: Reader<R>) -> pyo3::PyResult<(
     let mut col_b: Vec<Option<String>> = Vec::new();
     let mut buf: Vec<u8> = Vec::new();
     let mut cell_texts: Vec<Option<String>> = Vec::new(); // 当前 row 内所有 cell 文本
-    let mut in_is: bool = false;
     let mut in_t: bool = false;
     let mut text_buf: Vec<u8> = Vec::new();
 
@@ -29,11 +28,10 @@ fn parse_inline_str_sheet<R: BufRead>(mut reader: Reader<R>) -> pyo3::PyResult<(
             Ok(Event::Start(ref e)) => {
                 match e.name().as_ref() {
                     b"row" => cell_texts.clear(),
-                    b"is" => in_is = true,
-                    b"t" => {
-                        in_t = true;
-                        text_buf.clear();
-                    }
+                    // 每个 cell 开始时清空缓冲；富文本 cell（多个 <r><t> run）
+                    // 的所有 <t> 文本随后累积拼接，与 ElementTree 路径一致
+                    b"c" => text_buf.clear(),
+                    b"t" => in_t = true,
                     _ => {}
                 }
             }
@@ -50,10 +48,8 @@ fn parse_inline_str_sheet<R: BufRead>(mut reader: Reader<R>) -> pyo3::PyResult<(
                         } else {
                             None
                         };
-                        text_buf.clear();
                         cell_texts.push(text);
                     }
-                    b"is" => in_is = false,
                     b"t" => in_t = false,
                     b"row" => {
                         let a = cell_texts.get(0).cloned().flatten();
@@ -87,8 +83,6 @@ fn parse_inline_str_sheet<R: BufRead>(mut reader: Reader<R>) -> pyo3::PyResult<(
             _ => {}
         }
     }
-    // 让 borrow checker 满意（in_is 没用上但不删，便于以后拓展）
-    let _ = in_is;
     Ok((col_a, col_b))
 }
 

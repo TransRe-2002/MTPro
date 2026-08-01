@@ -1097,23 +1097,6 @@ def _parse_naive_timestamp(value) -> pd.Timestamp | None:
     return timestamp
 
 
-def _parse_local_timestamp(value, tz: str) -> pd.Timestamp | None:
-    timestamp = _parse_naive_timestamp(value)
-    if timestamp is None:
-        return None
-    timezone = pytz.timezone(tz)
-    return timestamp.tz_localize(timezone).tz_convert("UTC")
-
-
-def _parse_float(value) -> float:
-    if value in (None, ""):
-        return np.nan
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
-        return np.nan
-
-
 def _parse_raw_columns(
     timestamp_values: list[str],
     data_values: list[str | None],
@@ -1125,6 +1108,14 @@ def _parse_raw_columns(
         format="%Y-%m-%d %H:%M:%S",
     )
     valid = ~pd.isna(parsed_times)
+    if not valid.any() and timestamp_values:
+        # 预览用宽松解析、导入用严格格式；全部落空时给出针对性错误，
+        # 而不是让后续流程报"没有可导入的有效通道"这种无头案
+        sample = timestamp_values[0]
+        raise ValueError(
+            f"时间列无法按 '%Y-%m-%d %H:%M:%S' 解析（样例: {sample!r}），"
+            f"请检查 xlsx 时间格式或先规范时间列"
+        )
     index = pd.DatetimeIndex(parsed_times[valid])
     timezone = pytz.timezone(tz)
     index = index.tz_localize(timezone).tz_convert("UTC")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Dict, Optional, List
@@ -18,7 +19,11 @@ from PySide6.QtGui import QFont, QMouseEvent, QDrag, QPixmap, QPainter, QColor
 from ui.brief_plot import BriefPlot
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from utils.series import dti_to_numpy
-from utils.decimate import LODPyramid
+from utils.decimate import LODPyramid, PYRAMID_MAX_FINEST_POINTS
+from utils.qt_bridge import run as run_in_pool
+from utils.signals import block_signals
+
+logger = logging.getLogger(__name__)
 from core.em_data import EMData
 from base.time_viewport_mixin import TimeViewportMixin
 
@@ -164,6 +169,9 @@ class PlotRowContainer(QFrame):
 
 class DataViewWidget(TimeViewportMixin, QWidget):
 
+    # 异步显示构建完成后发出（主线程），供外部关闭进度框
+    display_ready = Signal()
+
     # -------------------------------------------------------------------------
     # 初始化
     # -------------------------------------------------------------------------
@@ -177,6 +185,9 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         self.x_view_start: pd.Timedelta = pd.Timedelta(seconds=0)
         self.x_view_size: pd.Timedelta = pd.Timedelta(hours=1)
         self.duration: pd.Timedelta = pd.Timedelta(hours=0)
+        self._build_gen: int = 0           # 显示构建代次（防中途切换/重初始化串台）
+        self._pending_gen: int = -1
+        self._pending_data: Optional[EMData] = None
 
         # 每个通道一个独立的 BriefPlot（按通道名索引）
         self.plot_rows: Dict[str, PlotResources] = {}
@@ -299,7 +310,19 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     # 数据加载
     # -------------------------------------------------------------------------
 
-    def init_data(self, data: EMData, progress_callback: Callable[[str], None] | None = None):
+    def init_data(
+        self, data: EMData,
+        progress_callback: Callable[[str], None] | None = None,
+        view_state: Optional[dict] = None,
+        build_plots: bool = True,
+    ):
+        """初始化/更换数据。
+
+        build_plots=True 时同步构建金字塔与曲线（测试/兼容路径）；
+        False 时只建控件与状态，金字塔走 start_display_build() 异步
+        构建（主窗口激活路径，避免大文件冻住 UI）。
+        """
+        self._build_gen += 1
         self.em_data = data
         if self.em_data is None:
             self._pyramids.clear()
@@ -316,22 +339,95 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             pts_to_qdt(self.em_data.end_time),
         )
 
-        self.slide_time.setMinimum(int(pd.Timedelta(hours=1).total_seconds()))
-        self.slide_time.setMaximum(int(self.duration.total_seconds()))
-        self.slide_time.setValue(int(self.x_view_size.total_seconds()))
+        # 恢复上次的视口现场（在 slider/scroll 设置之前，使其反映恢复值）
+        if view_state is not None:
+            self._restore_viewport_state(view_state)
+
+        # 同步 slider/scroll 状态时屏蔽信号：setValue 被滑块 min/max
+        # 夹取后会触发 valueChanged → mixin 槽函数，会把刚恢复的
+        # 视口现场又改回夹取值
+        with block_signals(self.slide_time):
+            self.slide_time.setMinimum(int(pd.Timedelta(hours=1).total_seconds()))
+            self.slide_time.setMaximum(int(self.duration.total_seconds()))
+            self.slide_time.setValue(int(self.x_view_size.total_seconds()))
         self.slide_time.setEnabled(True)
 
-        self.scroll_x.setMinimum(0)
-        self.scroll_x.setMaximum(int((self.duration - self.x_view_size).total_seconds()))
-        self.scroll_x.setValue(int(self.x_view_start.total_seconds()))
-        self.scroll_x.setPageStep(int(self.x_view_size.total_seconds()))
+        with block_signals(self.scroll_x):
+            self.scroll_x.setMinimum(0)
+            self.scroll_x.setMaximum(int((self.duration - self.x_view_size).total_seconds()))
+            self.scroll_x.setValue(int(self.x_view_start.total_seconds()))
+            self.scroll_x.setPageStep(int(self.x_view_size.total_seconds()))
         self.scroll_x.setEnabled(True)
 
         self._build_channel_order()
+        if view_state is not None:
+            self._restore_channel_order(view_state)
         self._sync_plot_rows()
-        self._refresh_plots(progress_callback)
+        if build_plots:
+            self._refresh_plots(progress_callback)
         self._rebuild_checkboxes()
+        if view_state is not None:
+            self._restore_hidden_channels(view_state)
+            self._restore_splitter_sizes(view_state)
         self._on_viewport_changed()
+
+    # -------------------------------------------------------------------------
+    # 交互现场状态的快照与恢复（active-only 缓存策略的配套）
+    # -------------------------------------------------------------------------
+
+    def capture_view_state(self) -> dict:
+        """快照当前交互现场：视口、通道顺序、隐藏通道、各行高度。
+
+        viewer 被销毁前调用；下次激活同一数据集时经 init_data
+        的 view_state 参数恢复，用户无感。
+        """
+        channel_order = self._splitter_channel_order() or list(self._channel_order)
+        sizes = self.splitter.sizes()
+        hidden = [ch for ch, cb in self._checkboxes.items() if not cb.isChecked()]
+        return {
+            "x_view_start": self.x_view_start,
+            "x_view_size": self.x_view_size,
+            "channel_order": channel_order,
+            "hidden_channels": hidden,
+            "splitter_sizes": dict(zip(channel_order, sizes)),
+        }
+
+    def _restore_viewport_state(self, view_state: dict) -> None:
+        # 夹取只用数据边界（滑块 1h 下限是 UI 约束，现场恢复不受其限）
+        size = view_state.get("x_view_size")
+        if isinstance(size, pd.Timedelta) and pd.Timedelta(0) < size <= self.duration:
+            self.x_view_size = size
+        start = view_state.get("x_view_start")
+        max_start = self.duration - self.x_view_size
+        if isinstance(start, pd.Timedelta) and pd.Timedelta(0) <= start <= max_start:
+            self.x_view_start = start
+
+    def _restore_channel_order(self, view_state: dict) -> None:
+        saved = view_state.get("channel_order") or []
+        current = set(self._channel_order)
+        ordered = [ch for ch in saved if ch in current]
+        seen = set(ordered)
+        ordered += [ch for ch in self._channel_order if ch not in seen]
+        self._channel_order = ordered
+
+    def _restore_hidden_channels(self, view_state: dict) -> None:
+        # 勾选状态变化会触发 _on_channel_toggled → 隐藏对应行
+        for ch in view_state.get("hidden_channels") or []:
+            cb = self._checkboxes.get(ch)
+            if cb is not None and cb.isChecked():
+                cb.setChecked(False)
+
+    def _restore_splitter_sizes(self, view_state: dict) -> None:
+        sizes_map = view_state.get("splitter_sizes") or {}
+        order = self._splitter_channel_order()
+        sizes = []
+        for ch in order:
+            s = sizes_map.get(ch)
+            if not isinstance(s, int) or s <= 0:
+                return  # 记录不全则保持默认布局
+            sizes.append(s)
+        if len(sizes) == self.splitter.count() > 1:
+            self.splitter.setSizes(sizes)
 
     def _build_channel_order(self) -> None:
         """构建有序通道列表：E 通道 → B/H 通道 → Kp（最后）。"""
@@ -595,8 +691,9 @@ class DataViewWidget(TimeViewportMixin, QWidget):
                 self.splitter.setSizes(sizes)
 
     def _refresh_plots(self, progress_callback: Callable[[str], None] | None = None):
-        """每个通道一个 BriefPlot，每个 BriefPlot 只画一条曲线。
+        """同步构建：逐通道建金字塔并安装曲线（测试/兼容路径）。
 
+        主窗口激活路径走 start_display_build() 的异步版本。
         E/B/H 通道绘制为去均值折线图，Kp 绘制为三色柱状图。
         """
         if self.em_data is None:
@@ -604,38 +701,45 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         x_vals = dti_to_numpy(self.em_data.datetime_index)
         channel_count = self.em_data.NCh
-        view_start = self.em_data.start_time + self.x_view_start
-        view_end = view_start + self.x_view_size
 
         for idx, (key, y_data) in enumerate(self.em_data.iter_channels()):
             if key not in self.plot_rows:
                 continue
-            widget = self.plot_rows[key].widget
-            if widget is None:
-                continue
-            widget.clear_curves()
-            with np.errstate(all='ignore'):
-                mean = np.nanmean(y_data.values)
-            y_vals = np.asarray(y_data.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
-            # 构建 LOD 金字塔（Rust 加速），曲线只接收当前视口适配像素
-            # 宽度的降采样数据；数据总量再大，单次绘制的点数也有上限
-            self._pyramids[key] = LODPyramid(x_vals, y_vals)
-            xs, ys = self._pyramids[key].get(
-                view_start.timestamp(), view_end.timestamp(), max(1, widget.width()),
-            )
-            widget.add_curve(
-                x_data=xs,
-                y_data=ys,
-                label=key,
-                graph_type='plot',
-            )
+            # 构建 LOD 金字塔（Rust 加速 + 截顶）；曲线在 _install_display
+            # 里只接收当前视口适配像素宽度的降采样数据
+            self._pyramids[key] = self._build_channel_pyramid(x_vals, y_data.values)
             if progress_callback is not None:
                 progress_callback(f"正在初始化通道 {key} ({idx+1}/{channel_count})")
 
-        # Kp 数据使用柱状图（三色方案：蓝/黄/红）
+        self._install_display()
+
+    @staticmethod
+    def _build_channel_pyramid(x_vals: np.ndarray, values: np.ndarray) -> LODPyramid:
+        """去均值后构建单通道金字塔（纯 numpy/Rust，可在池线程执行）。"""
+        with np.errstate(all='ignore'):
+            mean = np.nanmean(values)
+        y_vals = np.asarray(values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
+        return LODPyramid(x_vals, y_vals, max_finest_points=PYRAMID_MAX_FINEST_POINTS)
+
+    def _install_display(self) -> None:
+        """按已装金字塔从当前视口取数建曲线（主线程执行）。"""
+        if self.em_data is None:
+            return
+        view_start = self.em_data.start_time + self.x_view_start
+        view_end = view_start + self.x_view_size
+        for key, resources in self.plot_rows.items():
+            widget = resources.widget
+            pyramid = self._pyramids.get(key)
+            if widget is None or pyramid is None:
+                continue
+            widget.clear_curves()
+            xs, ys = pyramid.get(
+                view_start.timestamp(), view_end.timestamp(), max(1, widget.width()),
+            )
+            widget.add_curve(x_data=xs, y_data=ys, label=key, graph_type='plot')
+
+        # Kp 数据使用柱状图（三色方案：蓝/黄/红），数据量小，全量绘制
         if self.em_data.kp_data is not None and 'Kp' in self.plot_rows:
-            if progress_callback is not None:
-                progress_callback("正在初始化 Kp 指数")
             kp_widget = self.plot_rows['Kp'].widget
             if kp_widget is not None:
                 kp_widget.clear_curves()
@@ -646,12 +750,56 @@ class DataViewWidget(TimeViewportMixin, QWidget):
                     graph_type='bar',
                 )
 
-        # 初始加载后直接设置 X 轴范围，使曲线立即可见，
-        # 避免等待跨线程 worker 信号排队延迟。
         for resources in self.plot_rows.values():
             if resources.widget is not None:
                 resources.widget.update_plot(view_start, view_end)
         self._sync_left_axes()
+
+    def start_display_build(self) -> None:
+        """在 io 池异步构建逐通道金字塔，完成后主线程安装并发 display_ready。
+
+        金字塔构建是 viewer 创建的重头（5s 采样年度文件约数秒），放后台
+        避免主线程冻结；进度框由调用方（MainWindow）管理。
+        """
+        if self.em_data is None:
+            return
+        self._build_gen += 1
+        gen = self._build_gen
+        em_data = self.em_data
+        self._pending_gen = gen
+        self._pending_data = em_data
+        channel_values = [
+            (key, y_data.values)
+            for key, y_data in em_data.iter_channels()
+            if key in self.plot_rows
+        ]
+
+        def task():
+            x_vals = dti_to_numpy(em_data.datetime_index)
+            return {
+                key: DataViewWidget._build_channel_pyramid(x_vals, values)
+                for key, values in channel_values
+            }
+
+        # on_done/on_error 是 QObject 绑定方法 → 排队连接回主线程
+        # （切勿换成闭包：闭包接收者会退化成 DirectConnection，
+        # 在池线程里直接碰控件）
+        run_in_pool(
+            "io", task,
+            on_done=self._on_display_build_done,
+            on_error=self._on_display_build_failed,
+            owner=self,
+        )
+
+    def _on_display_build_done(self, pyramids) -> None:
+        if self._build_gen != self._pending_gen or self.em_data is not self._pending_data:
+            return  # 已被更新的 init_data 取代，丢弃过期结果
+        self._pyramids = {k: p for k, p in pyramids.items() if k in self.plot_rows}
+        self._install_display()
+        self.display_ready.emit()
+
+    def _on_display_build_failed(self, exc: BaseException) -> None:
+        logger.error("显示数据构建失败: %r", exc, exc_info=exc)
 
     # -------------------------------------------------------------------------
     # 视口更新（实现 Mixin 钩子）

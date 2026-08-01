@@ -94,6 +94,32 @@ class _BatchOpenSignals(QObject):
     advanced = Signal(int, int, str)   # (已完成数, 总数, 当前文件名)
 
 
+def _estimate_open_memory_gb(filenames: list[str]) -> tuple[float, Optional[float]]:
+    """估算批量打开的内存开销。
+
+    返回 (预估占用 GB, 系统可用 GB)。MAT v7.3 带压缩，实测内存
+    占用约为磁盘大小的 2 倍；可用内存读 /proc/meminfo（非 Linux
+    平台返回 None，跳过预警）。
+    """
+    total_disk = 0
+    for name in filenames:
+        try:
+            total_disk += Path(name).stat().st_size
+        except OSError:
+            continue
+    est_gb = total_disk * 2 / 1e9
+    avail_gb: Optional[float] = None
+    try:
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    avail_gb = int(line.split()[1]) / (1024 * 1024)
+                    break
+    except (OSError, ValueError):
+        pass
+    return est_gb, avail_gb
+
+
 class MainWindow(QMainWindow):
     def __init__(self, data_manager: DataManager, parent=None):
         super().__init__(parent)
@@ -114,6 +140,11 @@ class MainWindow(QMainWindow):
         self._batch_failed: list[tuple[str, str]] = []
         self._batch_save_progress: Optional[QProgressDialog] = None
         self._save_ctx: Optional[dict] = None
+        self._viewer_build_progress: Optional[QProgressDialog] = None
+        # 波形视图"现场"状态（视口/通道顺序/隐藏通道/行高）：
+        # viewer 控件是 active-only 的（切走即销毁），但现场按 key
+        # 永久保存，再次激活时原样恢复
+        self.viewer_state: Dict[int, dict] = {}
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(False)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -335,13 +366,40 @@ class MainWindow(QMainWindow):
         if em_data is None:
             return None
 
-        callback = getattr(self, '_load_progress_callback', None)
         viewer = DataViewWidget(self.data_view_stack)
-        viewer.init_data(em_data, callback)
+        viewer.init_data(
+            em_data, view_state=self.viewer_state.get(key), build_plots=False,
+        )
         self.data_viewers[key] = viewer
         self.data_view_stack.addWidget(viewer)
+
+        # 金字塔在 io 池异步构建（5s 采样年度文件需数秒）；进度框设了
+        # 250ms 最小显示阈值——小文件构建快到根本不会闪现对话框
+        progress = QProgressDialog("正在构建波形显示数据...", "", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(250)
+        progress.setWindowTitle("加载数据")
+        progress.setCancelButton(None)
+        progress.show()
+        self._viewer_build_progress = progress
+        viewer.display_ready.connect(self._on_viewer_display_ready)
+        viewer.start_display_build()
+
         self.logger.info("Created data viewer for dataset #%s (%s)", key, em_data.name)
         return viewer
+
+    def _on_viewer_display_ready(self) -> None:
+        if self._viewer_build_progress is not None:
+            self._viewer_build_progress.close()
+            self._viewer_build_progress = None
+
+    def _destroy_data_viewer(self, key: int) -> None:
+        """销毁指定数据集的 viewer 控件（active-only 策略的拆离路径）。"""
+        viewer = self.data_viewers.pop(key, None)
+        if viewer is not None:
+            self.data_view_stack.removeWidget(viewer)
+            viewer.close()
+            viewer.deleteLater()
 
     def _persist_app_state(self) -> None:
         self.app_state.workspace_splitter_sizes = [int(size) for size in self.workspace_splitter.sizes()]
@@ -579,6 +637,22 @@ class MainWindow(QMainWindow):
         失败文件跳过并列清单（与 xlsx 导入策略一致）；取消按钮停止
         后续任务，已加载完成的数据集保留。
         """
+        # 内存预警：几十个 5s 采样年度文件的原始数据就可达 ~10 GB 级，
+        # 超过可用内存 70% 时让用户明确确认
+        est_gb, avail_gb = _estimate_open_memory_gb(filenames)
+        if avail_gb is not None and est_gb > max(1.0, avail_gb * 0.7):
+            reply = QMessageBox.question(
+                self,
+                "内存预警",
+                f"打开这 {len(filenames)} 个文件预计占用约 {est_gb:.1f} GB 内存，\n"
+                f"当前机器可用约 {avail_gb:.1f} GB。全量加载可能导致内存不足。\n\n"
+                f"仍要继续打开吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.logger.info("Batch open declined at memory warning")
+                return
+
         total = len(filenames)
         progress = QProgressDialog(
             f"正在打开 0/{total} 个文件...", "取消", 0, total, self)
@@ -904,6 +978,18 @@ class MainWindow(QMainWindow):
 
     def on_activate_changed(self, activate_id: int):
         self.activate_id = activate_id
+
+        # active-only：除即将激活的数据集外，其余 viewer 快照现场后销毁。
+        # 金字塔/控件内存因此只保留一份，数据集个数不再放大显示开销。
+        if self._viewer_build_progress is not None:
+            self._viewer_build_progress.close()
+            self._viewer_build_progress = None
+        for old_key in [k for k in self.data_viewers if k != activate_id]:
+            old_viewer = self.data_viewers.get(old_key)
+            if old_viewer is not None:
+                self.viewer_state[old_key] = old_viewer.capture_view_state()
+            self._destroy_data_viewer(old_key)
+
         viewer = self._ensure_data_viewer(activate_id)
         if viewer is None:
             self.data_view_stack.setCurrentWidget(self.data_view_placeholder)
@@ -938,6 +1024,7 @@ class MainWindow(QMainWindow):
             self.data_view_stack.removeWidget(viewer)
             viewer.close()
             viewer.deleteLater()
+        self.viewer_state.pop(key, None)
         self.data_process_widget.close_windows_for_data(key)
         self.logger.info("Removed dataset #%s", key)
 

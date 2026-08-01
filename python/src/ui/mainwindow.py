@@ -361,6 +361,10 @@ class MainWindow(QMainWindow):
         import_bin_action.setShortcut("Ctrl+I")
         import_bin_action.setStatusTip("以向导方式从二进制文件 (.dat/.inf) 导入数据")
         import_bin_action.triggered.connect(self.import_binary)
+        import_xlsx_action = QAction("从 xlsx 时序文件导入(&X)...", self)
+        import_xlsx_action.setShortcut("Ctrl+Shift+I")
+        import_xlsx_action.setStatusTip("以向导方式批量导入 xlsx 时序数据")
+        import_xlsx_action.triggered.connect(self.import_xlsx)
         open_folder_action = QAction("批量打开文件夹(&B)...", self)
         open_folder_action.setShortcut("Ctrl+Shift+O")
         open_folder_action.setStatusTip("打开指定文件夹下所有 MAT 文件")
@@ -382,6 +386,7 @@ class MainWindow(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         file_menu.addAction(open_action)
         file_menu.addAction(import_bin_action)
+        file_menu.addAction(import_xlsx_action)
         file_menu.addSeparator()
         file_menu.addAction(open_folder_action)
         self.recent_files_menu = file_menu.addMenu("最近打开")
@@ -461,6 +466,32 @@ class MainWindow(QMainWindow):
             self._continue_to_workspace()
             self.data_manager.set_active(key)
             self.logger.info("Binary import completed: key=%d, path=%s", key, dat_path)
+
+    def import_xlsx(self):
+        """以向导方式从 xlsx 时序文件批量导入数据。"""
+        from ui.import_xlsx_wizard import ImportXlsxWizard
+
+        wizard = ImportXlsxWizard(self.data_manager, self)
+        if wizard.exec() != QWizard.DialogCode.Accepted:
+            self.logger.info("Xlsx import wizard cancelled")
+            return
+
+        keys = wizard.imported_keys()
+        if not keys:
+            key = wizard.imported_key()
+            keys = [key] if key is not None else []
+        if not keys:
+            self.logger.info("Xlsx import finished without imported datasets")
+            return
+
+        self._continue_to_workspace()
+        self.data_manager.set_active(keys[0])
+        self.logger.info(
+            "Xlsx import completed: keys=%s, mode=%s, files=%d",
+            keys,
+            wizard.import_mode(),
+            len(wizard.selected_files()),
+        )
 
     def open_folder(self):
         """批量打开文件夹下所有 MAT 文件。"""

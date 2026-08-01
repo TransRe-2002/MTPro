@@ -164,6 +164,13 @@ class LODPyramid:
     ) -> tuple[np.ndarray, np.ndarray]:
         """获取适合当前视口的数据。
 
+        选择标准是**视口内可见点数**（而非某层的总点数）不超过
+        ``pixel_width * 4`` 的最精细层级，因此放大到很小视口时仍能
+        拿到足够密的数据，不会出现"选中的层在视口内没有点"的情况。
+
+        要求 x 数据升序排列（时间序列天然满足），用二分查找定位
+        视口边界，查询代价与数据总量无关（O(log n)）。
+
         Args:
             x_start: 视口 X 轴起始（数据坐标）。
             x_end: 视口 X 轴结束（数据坐标）。
@@ -174,21 +181,26 @@ class LODPyramid:
         """
         if pixel_width <= 0:
             pixel_width = 1
+        if x_start > x_end:
+            x_start, x_end = x_end, x_start
+        target = pixel_width * 4
 
-        mask = (self.x_raw >= x_start) & (self.x_raw <= x_end)
-        visible_count = int(np.sum(mask))
+        lo = int(np.searchsorted(self.x_raw, x_start, side="left"))
+        hi = int(np.searchsorted(self.x_raw, x_end, side="right"))
+        if hi - lo <= target:
+            return self.x_raw[lo:hi], self.y_raw[lo:hi]
 
-        if visible_count <= pixel_width * 2:
-            return self.x_raw[mask], self.y_raw[mask]
-
+        # levels 从精细到粗糙排列；取第一个"可见点数达标"的层即最精细可用层
         for dx, dy in self._levels:
-            if len(dx) <= pixel_width * 2:
-                submask = (dx >= x_start) & (dx <= x_end)
-                return dx[submask], dy[submask]
+            lo = int(np.searchsorted(dx, x_start, side="left"))
+            hi = int(np.searchsorted(dx, x_end, side="right"))
+            if hi - lo <= target:
+                return dx[lo:hi], dy[lo:hi]
 
         dx, dy = self._levels[-1]
-        submask = (dx >= x_start) & (dx <= x_end)
-        return dx[submask], dy[submask]
+        lo = int(np.searchsorted(dx, x_start, side="left"))
+        hi = int(np.searchsorted(dx, x_end, side="right"))
+        return dx[lo:hi], dy[lo:hi]
 
     def get_full_overview(
         self, pixel_width: int,
@@ -205,6 +217,8 @@ class LODPyramid:
         for dx, dy in self._levels:
             if len(dx) <= target:
                 return dx, dy
+        if not self._levels:
+            return self.x_raw, self.y_raw
         return self._levels[-1]
 
 
@@ -215,10 +229,11 @@ def slice_visible(
 ) -> tuple[np.ndarray, np.ndarray]:
     """从全量数据中切片出可见范围（含边距）。
 
-    边距用于支持小幅平移时的 pixmap 缓存。
+    边距用于支持小幅平移时的 pixmap 缓存。要求 x 升序排列，
+    用二分查找定位边界（O(log n)），与数据总量无关。
 
     Args:
-        x: X 轴数据。
+        x: X 轴数据（升序）。
         y: Y 轴数据。
         x_start: 视口起始。
         x_end: 视口结束。
@@ -228,10 +243,6 @@ def slice_visible(
         (x_slice, y_slice)。
     """
     margin = (x_end - x_start) * margin_ratio
-    lo = x_start - margin
-    hi = x_end + margin
-    mask = (x >= lo) & (x <= hi)
-    indices = np.where(mask)[0]
-    if len(indices) == 0:
-        return x[:0], y[:0]
-    return x[indices[0]:indices[-1] + 1], y[indices[0]:indices[-1] + 1]
+    lo = int(np.searchsorted(x, x_start - margin, side="left"))
+    hi = int(np.searchsorted(x, x_end + margin, side="right"))
+    return x[lo:hi], y[lo:hi]

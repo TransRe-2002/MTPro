@@ -238,6 +238,35 @@ class BriefPlot(PlotWidget):
             self.plot_item.addItem(curve)
         return None
 
+    def update_curve(
+        self,
+        label: str,
+        x_data,
+        y_data,
+    ) -> bool:
+        """原地更新已有折线曲线的数据（用于视口级 LOD 数据替换）。
+
+        不重建 GraphicsItem，只调用 ``setData``，避免频繁视口更新时
+        反复 addItem/removeItem 带来的开销。
+
+        Args:
+            label: 曲线标识。
+            x_data: X 轴数据（epoch 秒 float 数组或 DatetimeIndex）。
+            y_data: Y 轴数据。
+
+        Returns:
+            更新成功返回 True；曲线不存在或不是折线类型返回 False。
+        """
+        curve = self.curves.get(label)
+        if curve is None or not isinstance(curve, pg.PlotCurveItem):
+            return False
+        if len(x_data) != len(y_data):
+            return False
+        x_values = dti_to_numpy(x_data)
+        y_values = np.asarray(y_data, dtype=np.float64)
+        curve.setData(x_values, y_values)
+        return True
+
     def update_plot(
             self,
             x_viewport_start: pd.Timestamp,
@@ -258,32 +287,6 @@ class BriefPlot(PlotWidget):
         self.setXRange(x_start, x_end)
         self.x_start = x_viewport_start
         self.x_end = x_viewport_end
-
-    def update_curve(self, label: str,
-            x_data: Optional[pd.Series | pd.DatetimeIndex],
-            y_data: Optional[pd.Series]
-        ) -> None:
-        """更新指定 label 曲线的数据，刷新显示。
-
-        Args:
-            label: 曲线标识名称
-            x_data: 新的 X 轴时间序列
-            y_data: 新的 Y 轴数值序列
-        """
-        self.sync_axis_layout()
-        if x_data is None or y_data is None or len(x_data) == 0 or len(y_data) == 0:
-            self.show_warning("数据为空，无法更新曲线")
-            return None
-        # 检查数据长度是否一致
-        if len(x_data) != len(y_data):
-            self.show_warning(f"x_data长度({len(x_data)})与y_data长度({len(y_data)})不一致")
-
-        # 转换为NumPy数组
-        x_values = dti_to_numpy(x_data)
-        y_values = np.asarray(y_data)
-
-        self.curves[label].setData(x_values, y_values)
-        return None
 
     def hide_curve(self, label: str) -> None:
         """隐藏指定 label 的曲线（不删除数据，仅设置不可见）。"""

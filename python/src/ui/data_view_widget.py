@@ -18,6 +18,7 @@ from PySide6.QtGui import QFont, QMouseEvent, QDrag, QPixmap, QPainter, QColor
 from ui.brief_plot import BriefPlot, BriefWorker
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from utils.series import dti_to_numpy
+from utils.decimate import LODPyramid
 from core.em_data import EMData
 from base.time_viewport_mixin import TimeViewportMixin
 
@@ -181,6 +182,9 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         # 每个通道一个独立的 BriefPlot（按通道名索引）
         self.plot_rows: Dict[str, PlotResources] = {}
+        # 每通道的 LOD 金字塔：显示层只画视口适配分辨率的数据，
+        # 全分辨率数据仍留在 EMData 中供处理工具使用
+        self._pyramids: Dict[str, LODPyramid] = {}
         # 有序通道列表（控制显示顺序）
         self._channel_order: List[str] = []
 
@@ -300,6 +304,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     def init_data(self, data: EMData, progress_callback: Callable[[str], None] | None = None):
         self.em_data = data
         if self.em_data is None:
+            self._pyramids.clear()
             for resources in self.plot_rows.values():
                 if resources.widget is not None:
                     resources.widget.clear_curves()
@@ -525,6 +530,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     def _teardown_plot_row(self, ch: str) -> None:
         """安全销毁通道的工作线程、容器和绘图控件。"""
         resources = self.plot_rows.pop(ch, None)
+        self._pyramids.pop(ch, None)
         if resources is None:
             return
 
@@ -617,6 +623,8 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         x_vals = dti_to_numpy(self.em_data.datetime_index)
         channel_count = self.em_data.NCh
+        view_start = self.em_data.start_time + self.x_view_start
+        view_end = view_start + self.x_view_size
 
         for idx, (key, y_data) in enumerate(self.em_data.iter_channels()):
             if key not in self.plot_rows:
@@ -628,9 +636,15 @@ class DataViewWidget(TimeViewportMixin, QWidget):
             with np.errstate(all='ignore'):
                 mean = np.nanmean(y_data.values)
             y_vals = np.asarray(y_data.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
+            # 构建 LOD 金字塔（Rust 加速），曲线只接收当前视口适配像素
+            # 宽度的降采样数据；数据总量再大，单次绘制的点数也有上限
+            self._pyramids[key] = LODPyramid(x_vals, y_vals)
+            xs, ys = self._pyramids[key].get(
+                view_start.timestamp(), view_end.timestamp(), max(1, widget.width()),
+            )
             widget.add_curve(
-                x_data=x_vals,
-                y_data=y_vals,
+                x_data=xs,
+                y_data=ys,
                 label=key,
                 graph_type='plot',
             )
@@ -653,8 +667,6 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         # 初始加载后直接设置 X 轴范围，使曲线立即可见，
         # 避免等待跨线程 worker 信号排队延迟。
-        view_start = self.em_data.start_time + self.x_view_start
-        view_end = view_start + self.x_view_size
         for resources in self.plot_rows.values():
             if resources.widget is not None:
                 resources.widget.update_plot(view_start, view_end)
@@ -665,16 +677,37 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     # -------------------------------------------------------------------------
 
     def _on_viewport_changed(self) -> None:
-        """实现 Mixin 钩子：视口变化时通知所有子图 worker 更新范围。"""
+        """实现 Mixin 钩子：视口变化时更新所有子图。
+
+        折线通道的曲线数据在主线程同步替换为"视口适配像素宽度"的
+        LOD 降采样数据（查询是 O(log n) 级，开销可忽略）；X 轴范围
+        仍经各通道 worker 信号排队更新。
+        """
         if self.em_data is None:
             return
         start = self.em_data.start_time + self.x_view_start
         end = start + self.x_view_size
+        x_start = start.timestamp()
+        x_end = end.timestamp()
+        for ch, resources in self.plot_rows.items():
+            widget = resources.widget
+            pyramid = self._pyramids.get(ch)
+            if widget is None or pyramid is None:
+                continue
+            xs, ys = pyramid.get(x_start, x_end, max(1, widget.width()))
+            if len(xs) > 0:
+                widget.update_curve(ch, xs, ys)
         for resources in self.plot_rows.values():
             if resources.worker is not None:
                 resources.worker.range_change(start, end)
         self._sync_left_axes()
         self.set_time(pts_to_qdt(start), pts_to_qdt(end))
+
+    def resizeEvent(self, event) -> None:
+        """窗口宽度变化后按新像素宽度重查 LOD（经防抖定时器合并）。"""
+        super().resizeEvent(event)
+        if self.em_data is not None and self._viewport_debounce is not None:
+            self._viewport_debounce.start()
 
     # -------------------------------------------------------------------------
     # 槽函数
@@ -719,14 +752,22 @@ class DataViewWidget(TimeViewportMixin, QWidget):
         if channel not in self.plot_rows:
             return
 
-        ch = self.em_data.get_channel_series(channel)
+        ch_series = self.em_data.get_channel_series(channel)
         widget = self.plot_rows[channel].widget
         with np.errstate(all='ignore'):
-            mean = np.nanmean(ch.values)
-        y_vals = np.asarray(ch.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
+            mean = np.nanmean(ch_series.values)
+        y_vals = np.asarray(ch_series.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
+        # 通道数据变了：重建该通道的 LOD 金字塔，并以当前视口数据重画
+        pyramid = LODPyramid(x_vals, y_vals)
+        self._pyramids[channel] = pyramid
         if widget is not None:
+            view_start = self.em_data.start_time + self.x_view_start
+            view_end = view_start + self.x_view_size
+            xs, ys = pyramid.get(
+                view_start.timestamp(), view_end.timestamp(), max(1, widget.width()),
+            )
             widget.clear_curves()
-            widget.add_curve(x_vals, y_vals, channel, graph_type='plot')
+            widget.add_curve(xs, ys, channel, graph_type='plot')
             widget.show()
         self._sync_left_axes()
         self._on_viewport_changed()

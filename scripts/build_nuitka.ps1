@@ -3,6 +3,7 @@ param(
     [switch]$BuildRust,
     [switch]$Zip,
     [switch]$KeepBuild,
+    [switch]$Installer,
     [string]$PythonExe = ""
 )
 
@@ -138,6 +139,12 @@ foreach ($Package in $ExcludedUnusedPackages) {
     $NuitkaArgs += "--nofollow-import-to=$Package"
 }
 
+# 有应用图标时给 exe 嵌入图标(可选,缺省不影响构建)
+$IconFile = Join-Path $PythonDir "src\mtpro.ico"
+if (Test-Path $IconFile) {
+    $NuitkaArgs += "--windows-icon-from-ico=$IconFile"
+}
+
 $NuitkaArgs += $SrcMain
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
@@ -169,6 +176,14 @@ if (Test-Path $DistDir) {
 Move-Item $MainDist $DistDir
 Copy-Item (Join-Path $PythonDir "requirements.txt") $DistDir
 
+# Nuitka 以入口脚本名命名产物(main.exe),统一改名为 MTPro.exe
+$MainExe = Join-Path $DistDir "main.exe"
+if (Test-Path $MainExe) {
+    Rename-Item -Path $MainExe -NewName "MTPro.exe"
+} else {
+    Write-Warning "未找到 $MainExe,跳过改名(安装包将不可用)"
+}
+
 if (-not $KeepBuild) {
     Remove-Item -Recurse -Force $BuildDir
 }
@@ -182,4 +197,31 @@ if ($Zip) {
     Write-Host "Zip: $ZipPath"
 }
 
-Write-Host "Output: $(Join-Path $DistDir 'main.exe')"
+if ($Installer) {
+    $IsccCommand = Get-Command iscc -ErrorAction SilentlyContinue
+    if ($null -eq $IsccCommand) {
+        Write-Error "未找到 Inno Setup (iscc)。请先安装: winget install JRSoftware.InnoSetup"
+    }
+
+    # 版本号优先级: MTPRO_VERSION 环境变量 → git describe --tags → 1.0.0
+    $Version = $env:MTPRO_VERSION
+    if ([string]::IsNullOrWhiteSpace($Version) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+        $Describe = & git describe --tags 2>$null
+        if ($Describe -match '\d+\.\d+\.\d+') {
+            $Version = $Matches[0]
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        $Version = "1.0.0"
+    }
+
+    $IssFile = Join-Path $ScriptDir "mtpro_windows.iss"
+    Write-Host "=== Building installer (v$Version) with Inno Setup ==="
+    & $IsccCommand.Source "/DMyAppVersion=$Version" $IssFile
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "iscc 失败,退出码 $LASTEXITCODE"
+    }
+}
+
+$TargetExe = Join-Path $DistDir "MTPro.exe"
+Write-Host "Output: $TargetExe"

@@ -4,6 +4,11 @@ set -euo pipefail
 # 用法: build_nuitka.sh [linux|windows]
 #   linux   — 原生 Linux 构建 (默认)
 #   windows — 从 Linux 交叉编译 Windows .exe (需要 MinGW-w64 + Wine)
+#
+# 注意: Windows 分发现由 scripts/build_nuitka.ps1(本地)或 CI 的
+# build-windows job(原生 Windows runner)负责,交叉分支仅供实验。
+# 交叉编译必须先有 Windows 目标 CPython(WINPYTHON / nuitka
+# --windows-download-python),否则 main.dist 只会是空目录。
 
 PLATFORM="${1:-linux}"
 

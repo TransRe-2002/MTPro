@@ -1,7 +1,7 @@
 matplotlib>=3.10
 PySide6>=6.11
 pandas>=2.3
-scipy>=1.17
+scipy==1.17.1   # 钉住:Nuitka<=4.1.x 编译 scipy>=1.18 的 scipy.signal 导入会段错误
 PyWavelets>=1.9
 numpy>=2.4
 h5py>=3.13

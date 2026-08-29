@@ -57,6 +57,7 @@ jobs:
             --include-package=io_utils \
             --include-package=utils \
             --include-module=rust_lib \
+            --include-data-dir=python/src/bin=bin \
             --output-dir=python/build/nuitka \
             --assume-yes-for-downloads \
             --show-progress \
@@ -121,6 +122,7 @@ jobs:
             --include-package=io_utils `
             --include-package=utils `
             --include-module=rust_lib `
+            --include-data-dir=python/src/bin=bin `
             --output-dir=python/build/nuitka-windows `
             --assume-yes-for-downloads `
             --show-progress `
@@ -131,6 +133,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path outputs
           Copy-Item -Recurse python/build/nuitka-windows/main.dist outputs/mtpro-windows-x86_64
           Copy-Item python/requirements.txt outputs/mtpro-windows-x86_64/
+          Rename-Item outputs/mtpro-windows-x86_64/main.exe MTPro.exe
 
       - name: Package artifact
         run: |
@@ -141,3 +144,19 @@ jobs:
           name: mtpro-windows-x86_64
           path: mtpro-windows-x86_64.zip
           retention-days: 30
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows installer
+        run: |
+          $v = git describe --tags 2>$null
+          if ($v -match '\d+\.\d+\.\d+') { $ver = $Matches[0] } else { $ver = '1.0.0' }
+          Write-Host "Installer version: $ver"
+          iscc "/DMyAppVersion=$ver" scripts\mtpro_windows.iss
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: MTPro-Setup
+          path: outputs/MTPro-Setup-*.exe
+          retention-days: 90

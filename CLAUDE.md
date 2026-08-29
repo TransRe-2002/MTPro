@@ -117,4 +117,4 @@ cd rust_lib && cargo test
 
 ## Tests
 
-Tests live in `python/tests/`. Some tests require local `.mat` fixture files or a running Qt event loop (`QApplication`). Run with `PYTHONPATH=python/src pytest python/tests`. When adding tests, use repo-local fixtures and document any external data dependencies. TS-object fixtures (`python/tests/fixtures/ts_object*.mat`) are generated with `matlab/make_test_fixture.m`; tests that need them (or the optional `mtpro_ts_convert` executable) skip gracefully when they are absent.
+Tests live in `python/tests/`, run with `PYTHONPATH=python/src pytest python/tests`. **The suite is run per-case in forked processes**（`pytest.ini` 的 `addopts = --forked`，需要 `pytest-forked`）——Qt/pyqtgraph 包装体跨用例残留会在同进程连续跑时触发 GC 竞态崩溃，进程隔离是根治手段。`python/tests/conftest.py` 另含 pyqtgraph 0.14 `LabelItem.sizeHint` 的上游 bug 补丁。依赖本机测量数据 `.mat` 的测试（`test_read_mat`/`test_save_mat`/`test_tree_view`）在文件缺失时 `skipif` 跳过。TS-object fixtures（`python/tests/fixtures/ts_object*.mat`）由 `matlab/make_test_fixture.m` 生成；需要它们（或可选 `mtpro_ts_convert` 可执行文件）的测试缺位时优雅跳过。

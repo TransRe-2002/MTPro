@@ -6,6 +6,7 @@ import xarray as xr
 from PySide6.QtCore import QByteArray, QMimeData, QPoint, Qt
 from PySide6.QtWidgets import QApplication, QLabel
 from unittest.mock import patch
+import pytest
 
 from base.data_manager import DataManager
 from core.em_data import EMData
@@ -52,12 +53,24 @@ def _app():
     return app
 
 
+@pytest.fixture(autouse=True)
+def _stop_broker_threads_after_each_test():
+    """每个测试结束后停掉所有 ProcessingBroker 的后台线程，避免
+    QThread 带运行销毁导致 Qt abort（跨用例/跨文件的崩溃根因）。"""
+    yield
+    app = QApplication.instance()
+    if app is not None:
+        app.aboutToQuit.emit()
+
+
 def test_data_process_widget_preserves_selected_channel_and_windows():
     _app()
-    widget = DataProcessLegacyWidget()
+    manager = DataManager()
     data = DemoData("demo", ["Ex1", "Hy1"])
+    key = manager.add(data)
+    widget = DataProcessLegacyWidget(manager)
 
-    widget.init_data(data, 1)
+    widget.init_data(data, key)
     widget._selected_channel_name = "Hy1"
 
     first = widget.open_tool_window("remove step", "Hy1")
@@ -67,11 +80,11 @@ def test_data_process_widget_preserves_selected_channel_and_windows():
     assert widget.current_channel() == "Hy1"
 
     # Rebinding the same dataset should keep the selected channel and open tool window.
-    widget.init_data(data, 1)
+    widget.init_data(data, key)
 
     assert widget.current_channel() == "Hy1"
     assert widget.open_tool_window_states() == [
-        ToolWindowState("remove step", 1, "Hy1")
+        ToolWindowState("remove step", key, "Hy1")
     ]
 
     widget.close()
@@ -79,8 +92,10 @@ def test_data_process_widget_preserves_selected_channel_and_windows():
 
 def test_data_process_widget_closes_windows_when_data_cleared():
     _app()
-    widget = DataProcessLegacyWidget()
+    manager = DataManager()
     data = DemoData("demo", ["Ex1"])
+    key = manager.add(data)
+    widget = DataProcessLegacyWidget(manager)
 
     widget.init_data(data, 1)
     widget.open_tool_window("remove spike", "Ex1")
@@ -96,8 +111,10 @@ def test_data_process_widget_closes_windows_when_data_cleared():
 
 def test_data_process_widget_reopens_remove_step_after_subwindow_close():
     app = _app()
-    widget = DataProcessLegacyWidget()
+    manager = DataManager()
     data = DemoData("demo", ["Ex1"])
+    key = manager.add(data)
+    widget = DataProcessLegacyWidget(manager)
 
     widget.show()
     widget.init_data(data, 1)
@@ -127,10 +144,12 @@ def test_data_process_widget_reopens_remove_step_after_subwindow_close():
 
 def test_data_process_widget_opens_robust_baseline_step_tool():
     _app()
-    widget = DataProcessLegacyWidget()
+    manager = DataManager()
     data = DemoData("demo", ["Ex1"], values=[0.0, 0.0, 2.0, 5.0, 5.0, 5.0])
+    key = manager.add(data)
+    widget = DataProcessLegacyWidget(manager)
 
-    widget.init_data(data, 1)
+    widget.init_data(data, key)
     sub_window = widget.open_tool_window("remove step baseline", "Ex1")
 
     assert sub_window is not None
@@ -142,10 +161,12 @@ def test_data_process_widget_opens_robust_baseline_step_tool():
 
 def test_data_process_widget_opens_wavelet_denoise_tool():
     _app()
-    widget = DataProcessLegacyWidget()
+    manager = DataManager()
     data = DemoData("demo", ["Ex1"], values=[0.0, 0.1, 0.2, 3.0, 1.5, 0.8, 0.4, 0.2])
+    key = manager.add(data)
+    widget = DataProcessLegacyWidget(manager)
 
-    widget.init_data(data, 1)
+    widget.init_data(data, key)
     sub_window = widget.open_tool_window("remove wavelet denoise", "Ex1")
 
     assert sub_window is not None
@@ -157,11 +178,13 @@ def test_data_process_widget_opens_wavelet_denoise_tool():
 
 def test_data_process_widget_opens_diurnal_sinusoid_tool():
     _app()
-    widget = DataProcessLegacyWidget()
+    manager = DataManager()
     values = [0.0, 0.2, 0.5, 0.1, -0.1, 0.4, 0.8, 0.3, 0.1, -0.2]
     data = DemoData("demo", ["Ex1"], values=values)
+    key = manager.add(data)
+    widget = DataProcessLegacyWidget(manager)
 
-    widget.init_data(data, 1)
+    widget.init_data(data, key)
     sub_window = widget.open_tool_window("remove diurnal sinusoid", "Ex1")
 
     assert sub_window is not None
@@ -196,30 +219,34 @@ def test_diurnal_sinusoid_widget_uses_broker_datetime_index():
 
 def test_data_process_widget_opens_robust_estimate_placeholder():
     _app()
-    widget = DataProcessLegacyWidget()
+    manager = DataManager()
     data = DemoData("demo", ["Ex1"], values=[0.0, 0.1, 0.2])
+    key = manager.add(data)
+    widget = DataProcessLegacyWidget(manager)
 
-    widget.init_data(data, 1)
+    widget.init_data(data, key)
     sub_window = widget.open_tool_window("robust estimate", "Ex1")
 
     assert sub_window is not None
     assert sub_window.property("tool_key") == "robust estimate"
-    assert "阻抗输出的 Robust 估计入口已预留" in sub_window.widget().findChildren(QLabel)[1].text()
+    assert sub_window.widget().__class__.__name__ == "RobustEstimateWidget"
 
     widget.close()
 
 
 def test_data_process_widget_opens_remote_reference_placeholder():
     _app()
-    widget = DataProcessLegacyWidget()
+    manager = DataManager()
     data = DemoData("demo", ["Ex1"], values=[0.0, 0.1, 0.2])
+    key = manager.add(data)
+    widget = DataProcessLegacyWidget(manager)
 
-    widget.init_data(data, 1)
+    widget.init_data(data, key)
     sub_window = widget.open_tool_window("remote reference", "Ex1")
 
     assert sub_window is not None
     assert sub_window.property("tool_key") == "remote reference"
-    assert "阻抗输出的远参考法入口已预留" in sub_window.widget().findChildren(QLabel)[1].text()
+    assert sub_window.widget().__class__.__name__ == "RemoteReferenceWidget"
 
     widget.close()
 

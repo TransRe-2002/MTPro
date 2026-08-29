@@ -11,7 +11,14 @@ from processor.remove_wavelet_denoise import RemoveWaveletDenoise
 from processor.remove_step_by_diff import RemoveStepByDiff as RemoveStep
 from processor.remove_step_by_baseline import RemoveStepByBaseline
 from processor.remove_step_by_window import RemoveStepByWindow
-from processor.step_algorithms import robust_baseline_destep, wavelet_local_depulse, wavelet_multiscale_denoise
+from processor._modifier_constraint import apply_modifier_axis_constraint
+from processor.step_algorithms import (
+    remove_diff_steps_by_count,
+    robust_baseline_destep,
+    wavelet_local_depulse,
+    wavelet_multiscale_denoise,
+    windowed_mean_destep_with_diagnostics,
+)
 from processor.step_plot_widget import StepPlotWidget as RemoveStepPlotWidget
 
 
@@ -145,13 +152,13 @@ def test_remove_step_plot_widget_uses_strong_focus_and_axis_constraints(qtbot):
     assert plot.focusPolicy() == Qt.FocusPolicy.StrongFocus
 
     view_box = plot.getViewBox()
-    plot._apply_modifier_axis_constraint(Qt.KeyboardModifier.ShiftModifier)
+    apply_modifier_axis_constraint(view_box, Qt.KeyboardModifier.ShiftModifier)
     assert tuple(view_box.state["mouseEnabled"]) == (True, False)
 
-    plot._apply_modifier_axis_constraint(Qt.KeyboardModifier.AltModifier)
+    apply_modifier_axis_constraint(view_box, Qt.KeyboardModifier.AltModifier)
     assert tuple(view_box.state["mouseEnabled"]) == (False, True)
 
-    plot._apply_modifier_axis_constraint(Qt.KeyboardModifier.NoModifier)
+    apply_modifier_axis_constraint(view_box, Qt.KeyboardModifier.NoModifier)
     assert tuple(view_box.state["mouseEnabled"]) == (True, True)
 
 
@@ -276,7 +283,7 @@ def test_remove_step_window_user_max_steps_limit_is_applied(qtbot):
     widget = RemoveStepByWindow(data, "Ex1")
     qtbot.addWidget(widget)
 
-    expected, applied_steps = widget._windowed_mean_destep(
+    expected, applied_steps, _ = windowed_mean_destep_with_diagnostics(
         widget.y_data,
         min_offset=5.0,
         avg_window=2,
@@ -299,8 +306,8 @@ def test_remove_step_one_step_matches_matlab_style_algorithm(qtbot):
     widget = RemoveStep(data, "Ex1")
     qtbot.addWidget(widget)
 
-    corrected_one, removed_one = widget._matlab_style_one_step(widget.y_data, 1)
-    corrected_two, removed_two = widget._matlab_style_one_step(widget.y_data, 2)
+    corrected_one, removed_one = remove_diff_steps_by_count(widget.y_data, 1)
+    corrected_two, removed_two = remove_diff_steps_by_count(widget.y_data, 2)
 
     np.testing.assert_allclose(corrected_one, np.array([0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 10.0]), atol=1e-8)
     np.testing.assert_allclose(corrected_two, np.zeros(7), atol=1e-8)
@@ -330,7 +337,7 @@ def test_remove_step_window_destep_handles_large_series(qtbot):
     samples += 0.05 * np.sin(np.linspace(0.0, 400.0 * np.pi, npts, dtype=np.float64))
     samples[npts // 2:] += 25.0
 
-    corrected, applied_steps = widget._windowed_mean_destep(
+    corrected, applied_steps, _ = windowed_mean_destep_with_diagnostics(
         samples,
         min_offset=10.0,
         avg_window=1000,
@@ -355,7 +362,7 @@ def test_remove_step_one_step_handles_large_series(qtbot):
     samples[npts // 3:] += 15.0
     samples[2 * npts // 3:] += 20.0
 
-    corrected, removed_steps = widget._matlab_style_one_step(samples, 2)
+    corrected, removed_steps = remove_diff_steps_by_count(samples, 2)
 
     assert len(removed_steps) == 2
     left_mean = float(np.mean(corrected[npts // 3 - 500:npts // 3]))

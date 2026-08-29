@@ -33,7 +33,10 @@ class PipelineLayer:
     blocks: list[PipelineBlock] = field(default_factory=list)
 
     def sorted_blocks(self) -> list[PipelineBlock]:
-        return sorted(self.blocks, key=lambda block: (block.start, block.end, block.block_id))
+        # 同 (start, end) 的块保持插入顺序（上游在先）：sort 稳定，
+        # 只按区间排序即可。此前第三键 block_id 是随机串，
+        # 会让同区间块的顺序每次运行都可能颠倒。
+        return sorted(self.blocks, key=lambda block: (block.start, block.end))
 
 
 @dataclass

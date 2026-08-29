@@ -23,6 +23,7 @@ env/
 
 # Build outputs
 outputs/
+matlab/build/
 
 # Local data and logs
 *.log

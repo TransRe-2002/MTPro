@@ -6,9 +6,10 @@ function struct_to_ts(input_file, output_file)
 
     name = optional_field(tsStruct, 'name', '');
     data = required_field(tsStruct, 'data');
-    startTime = required_field(tsStruct, 'startTime');
-    zeroTime = optional_field(tsStruct, 'zeroTime', startTime);
-    dt = required_field(tsStruct, 'dt');
+    % datevec 字段可能是整数类型（如 uint16/int64），datenum 只接受 double
+    startTime = to_double(required_field(tsStruct, 'startTime'));
+    zeroTime = to_double(optional_field(tsStruct, 'zeroTime', startTime));
+    dt = to_double(required_field(tsStruct, 'dt'));
 
     tsObj = TS(name, data, startTime, zeroTime, dt);
 
@@ -27,6 +28,9 @@ function struct_to_ts(input_file, output_file)
         end
     end
 
+    if ~isempty(tsObj.endTime)
+        tsObj.endTime = to_double(tsObj.endTime);
+    end
     if isempty(tsObj.NCh) || isempty(tsObj.npts)
         [tsObj.NCh, tsObj.npts] = size(tsObj.data);
     end
@@ -73,5 +77,12 @@ function value = optional_field(s, field, default_value)
         value = s.(field);
     else
         value = default_value;
+    end
+end
+
+function value = to_double(value)
+%TO_DOUBLE Cast numeric values to double; leave char date strings as-is.
+    if isnumeric(value)
+        value = double(value);
     end
 end

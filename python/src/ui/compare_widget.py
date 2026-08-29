@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
+import numpy as np
 import pandas as pd
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDateTimeEdit,
     QLabel,
@@ -20,7 +22,12 @@ from PySide6.QtWidgets import (
 from base.time_viewport_mixin import TimeViewportMixin
 from core.em_data import EMData
 from ui.brief_plot import BriefPlot
+from utils.series import dti_to_numpy
+from utils.decimate import LODPyramid, PYRAMID_MAX_FINEST_POINTS
+from utils.qt_bridge import run as run_in_pool
 from utils.time_convert import pts_to_qdt, qdt_to_pts
+
+logger = logging.getLogger(__name__)
 
 
 class CompareWidget(TimeViewportMixin, QWidget):
@@ -28,6 +35,9 @@ class CompareWidget(TimeViewportMixin, QWidget):
 
     上方子图(row='E')显示 Ex 通道，下方子图(row='B')显示 Bx/Hx 通道。
     """
+
+    # 异步显示构建完成（主线程），供外部关进度框等
+    display_ready = Signal()
 
     def __init__(
         self,
@@ -54,6 +64,12 @@ class CompareWidget(TimeViewportMixin, QWidget):
         self.x_view_start: pd.Timedelta = pd.Timedelta(seconds=0)
         self.x_view_size: pd.Timedelta = pd.Timedelta(hours=1)
         self.duration: pd.Timedelta = pd.Timedelta(hours=0)
+
+        # 每条曲线的 LOD 金字塔（label → LODPyramid）与异步构建代次守卫
+        self._pyramids: dict[str, LODPyramid] = {}
+        self._build_gen: int = 0
+        self._pending_gen: int = -1
+        self._pending_labels: dict[str, str] = {}
 
         # 子面板：用 DataFrame 管理 E/B 两行的 widget
         self.widget_data: pd.DataFrame = pd.DataFrame(
@@ -171,16 +187,21 @@ class CompareWidget(TimeViewportMixin, QWidget):
                 widget.set_label(row)
 
     def _refresh_plots(self) -> None:
-        """将各参考通道的数据绘制到 E/B 对应的子图中。
+        """异步构建：逐参考通道建截顶 LODPyramid，完成后在主线程装曲线。
 
-        E 开头通道路由到上方子图(row='E')，B/H 开头路由到下方子图(row='B')。
-        每条曲线去均值后绘制为折线图。
+        曲线只接收当前视口适配像素宽度的降采样数据（min/max 包络，尖峰
+        不丢）；全量数据仍留在各 EMData 里，金字塔随对比控件一起释放。
         """
-
         for widget in self.widget_data["widget"].values:
             if widget is not None:
                 widget.clear_curves()
 
+        self._build_gen += 1
+        gen = self._build_gen
+        self._pending_gen = gen
+        self._pending_labels = {}
+
+        entries = []
         for em_data, channel_name in self.channel_refs:
             key: str = channel_name
             # 按首字母确定所属子图
@@ -190,35 +211,73 @@ class CompareWidget(TimeViewportMixin, QWidget):
                 row = "B"
             else:
                 continue
-
-            widget = self.widget_data.loc[row, "widget"]
-            y_data = em_data.get_channel_series(channel_name)
-            x_data = y_data.index
-            # 去均值以对齐不同通道的基准线
-            y_data = y_data - y_data.mean()
             label: str = f"{em_data.name} - {key}"
-            widget.add_curve(
-                x_data=x_data,
-                y_data=y_data,
-                label=label,
-                graph_type="plot",
-            )
+            self._pending_labels[label] = row
+            s = em_data.get_channel_series(channel_name)
+            entries.append((label, dti_to_numpy(s.index), s.to_numpy(dtype=np.float64, copy=True)))
 
-        # 无曲线的子图自动隐藏
+        def task():
+            # 去均值以对齐不同通道的基准线，再建金字塔（纯 numpy/Rust，可在池线程执行）
+            pyramids: dict[str, LODPyramid] = {}
+            for label, x, values in entries:
+                with np.errstate(all='ignore'):
+                    mean = np.nanmean(values)
+                y = np.asarray(values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
+                pyramids[label] = LODPyramid(x, y, max_finest_points=PYRAMID_MAX_FINEST_POINTS)
+            return pyramids
+
+        # on_done/on_error 须是 QObject 绑定方法（排队回主线程）；
+        # 闭包接收者会退化为 DirectConnection 在池线程碰控件
+        run_in_pool(
+            "io", task,
+            on_done=self._on_display_build_done,
+            on_error=self._on_display_build_failed,
+            owner=self,
+        )
+
+    def _on_display_build_done(self, pyramids: dict) -> None:
+        if self._build_gen != self._pending_gen:
+            return  # 已被更新的 _refresh_plots 取代，丢弃过期结果
+        self._pyramids = pyramids
+        start: pd.Timestamp = self.start + self.x_view_start
+        end: pd.Timestamp = start + self.x_view_size
+        for label, pyramid in self._pyramids.items():
+            row = self._pending_labels.get(label)
+            if row is None:
+                continue
+            widget: Optional[BriefPlot] = self.widget_data.loc[row, "widget"]
+            if widget is None:
+                continue
+            xs, ys = pyramid.get(start.timestamp(), end.timestamp(), max(1, widget.width()))
+            widget.add_curve(x_data=xs, y_data=ys, label=label, graph_type="plot")
         for key, widget in self.widget_data["widget"].items():
             widget.setVisible(len(widget.curves) > 0)
+        self._on_viewport_changed()
+        self.display_ready.emit()
+
+    def _on_display_build_failed(self, exc: BaseException) -> None:
+        logger.error("对比视图显示数据构建失败: %r", exc, exc_info=exc)
 
     def _on_viewport_changed(self) -> None:
-        """实现 Mixin 钩子：视口变化时直接更新所有子图 X 轴范围。
+        """实现 Mixin 钩子：视口变化时替换各曲线为适配像素宽度的 LOD 数据。
 
-        视口更新已在 Mixin 侧 16ms 防抖，直接在主线程设置即可，
-        不需要再经工作线程中转。
+        视口更新已在 Mixin 侧 16ms 防抖，直接在主线程查询金字塔 + setData 即可。
         """
         start: pd.Timestamp = self.start + self.x_view_start
         end: pd.Timestamp = start + self.x_view_size
+        x_start = start.timestamp()
+        x_end = end.timestamp()
         for widget in self.widget_data["widget"].values:
-            if widget is not None:
-                widget.update_plot(start, end)
+            if widget is None:
+                continue
+            for label in list(widget.curves.keys()):
+                pyramid = self._pyramids.get(label)
+                if pyramid is None:
+                    continue
+                xs, ys = pyramid.get(x_start, x_end, max(1, widget.width()))
+                if len(xs) > 0:
+                    widget.update_curve(label, xs, ys)
+            widget.update_plot(start, end)
         self.set_time(pts_to_qdt(start), pts_to_qdt(end))
 
     # -------------------------------------------------------------------------

@@ -85,6 +85,7 @@ class RemoveStepByWindow(BaseProcessorWidget):
 
         self._init_ui()
         self._connect_signal()
+        self._load_input_data()
 
 
     def _on_data_loaded(self):
@@ -256,25 +257,33 @@ class RemoveStepByWindow(BaseProcessorWidget):
             return
 
         self._save_history()
-        corrected, applied_steps, candidates = windowed_mean_destep_with_diagnostics(
-            self.y_data,
-            threshold,
-            avg_window=avg_window,
-            max_steps=max_steps,
-        )
-        if not applied_steps:
-            self.history.pop()
-            self._log_rejected_step_candidates(threshold, avg_window, max_steps, candidates)
-            return
+        y_snapshot = self.y_data
 
-        self.y_data = corrected
-        self.diff_y_data = np.diff(self.y_data)
-        self._update_plot()
-        self._log(
-            f"窗口均值去阶跃完成，去除了 {len(applied_steps)} 个台阶"
-            f" | 阈值={threshold:.4f} | 平均窗口={avg_window} | 最多台阶={max_steps}"
-        )
-        for step_index, step_value in applied_steps:
-            self._log(f"  阶跃位置={step_index}, 修正幅度={step_value:.4f}")
-        self._log("")
-        self._show_top_diffs()
+        def compute():
+            return windowed_mean_destep_with_diagnostics(
+                y_snapshot,
+                threshold,
+                avg_window=avg_window,
+                max_steps=max_steps,
+            )
+
+        def apply(result):
+            corrected, applied_steps, candidates = result
+            if not applied_steps:
+                self.history.pop()
+                self._log_rejected_step_candidates(threshold, avg_window, max_steps, candidates)
+                return
+
+            self.y_data = corrected
+            self.diff_y_data = np.diff(self.y_data)
+            self._update_plot()
+            self._log(
+                f"窗口均值去阶跃完成，去除了 {len(applied_steps)} 个台阶"
+                f" | 阈值={threshold:.4f} | 平均窗口={avg_window} | 最多台阶={max_steps}"
+            )
+            for step_index, step_value in applied_steps:
+                self._log(f"  阶跃位置={step_index}, 修正幅度={step_value:.4f}")
+            self._log("")
+            self._show_top_diffs()
+
+        self._run_heavy(compute, apply, "窗口均值去阶跃")

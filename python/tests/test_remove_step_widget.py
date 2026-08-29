@@ -238,6 +238,8 @@ def test_remove_step_window_threshold_uses_windowed_destep(qtbot):
     widget.avg_window_edit.setText("2")
     widget.max_steps_edit.setText("5")
     widget._de_step_by_threshold()
+    # 重计算在 compute 池后台执行，等结果回到主线程
+    qtbot.waitUntil(lambda: "去除了 1 个台阶" in widget.plain_text.toPlainText(), timeout=10000)
 
     np.testing.assert_allclose(widget.y_data, np.zeros(6), atol=1e-8)
     np.testing.assert_allclose(widget.diff_y_data, np.zeros(5), atol=1e-8)
@@ -261,6 +263,10 @@ def test_remove_step_window_threshold_uses_default_max_steps_in_log(qtbot):
     widget.de_step_threshold.setText("5")
     widget.avg_window_edit.setText("2")
     widget._de_step_by_threshold()
+    qtbot.waitUntil(
+        lambda: f"最多台阶={widget.DEFAULT_MAX_STEPS}" in widget.plain_text.toPlainText(),
+        timeout=10000,
+    )
 
     assert f"最多台阶={widget.DEFAULT_MAX_STEPS}" in widget.plain_text.toPlainText()
 
@@ -700,9 +706,12 @@ def test_remove_wavelet_denoise_preview_updates_energy_plot(qtbot):
     widget._add_region()
 
     widget._preview_fit()
+    # 重计算在 compute 池后台执行，等结果回到主线程
+    qtbot.waitUntil(lambda: widget.last_result is not None, timeout=10000)
 
     assert widget.last_result is not None
     assert widget.last_result.detail_energy_before.size >= 1
+    qtbot.waitUntil(lambda: widget.local_left_line.isVisible(), timeout=5000)
     assert widget.local_left_line.isVisible()
     assert widget.local_right_line.isVisible()
 

@@ -83,6 +83,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
 
         self._init_ui()
         self._connect_signal()
+        self._load_input_data()
 
 
     def _on_data_loaded(self):
@@ -281,31 +282,41 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
     def _clear_selection(self):
         self._remove_region()
 
-    def _fit_current_region(self) -> Optional[RobustBaselineStepResult]:
+    def _read_fit_args(self) -> Optional[dict]:
+        """在 UI 线程读取拟合参数（含切片数据），返回纯数据 dict。"""
         region = self._read_region()
         if region is None:
             return None
+        return {
+            "y": self.y_data,
+            "region": region,
+            "baseline_degree": int(self.base_degree_spin.value()),
+            "transition_degree": int(self.transition_degree_spin.value()),
+            "context_points": int(self.context_spin.value()),
+            "loss": self.loss_combo.currentText(),
+        }
 
-        try:
-            result = robust_baseline_destep(
-                self.y_data,
-                region,
-                baseline_degree=int(self.base_degree_spin.value()),
-                transition_degree=int(self.transition_degree_spin.value()),
-                context_points=int(self.context_spin.value()),
-                loss=self.loss_combo.currentText(),
-            )
-        except Exception as exc:
-            self._log(f"拟合失败: {exc}")
-            return None
-
-        return result
+    @staticmethod
+    def _fit_compute(args: dict) -> RobustBaselineStepResult:
+        """纯计算：在 compute 池里执行，不碰任何 Qt 对象。"""
+        y = args["y"]
+        region = args["region"]
+        kwargs = {k: v for k, v in args.items() if k not in ("y", "region")}
+        return robust_baseline_destep(y, region, **kwargs)
 
     def _preview_fit(self):
-        result = self._fit_current_region()
+        args = self._read_fit_args()
+        if args is None:
+            return
+        self._run_heavy(
+            lambda: self._fit_compute(args),
+            self._finish_preview,
+            "鲁棒基线去阶跃（预览）",
+        )
+
+    def _finish_preview(self, result):
         if result is None:
             return
-
         self.last_result = result
         self._update_plot()
         self._log_preview_summary(result)
@@ -332,10 +343,18 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         self._log("")
 
     def _apply_correction(self):
-        result = self._fit_current_region()
+        args = self._read_fit_args()
+        if args is None:
+            return
+        self._run_heavy(
+            lambda: self._fit_compute(args),
+            self._finish_apply,
+            "鲁棒基线去阶跃（应用）",
+        )
+
+    def _finish_apply(self, result):
         if result is None:
             return
-
         self._save_history()
         self.y_data = result.corrected.copy()
         self.last_result = result

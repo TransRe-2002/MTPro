@@ -16,8 +16,8 @@ def test_pipeline_block_defaults_are_unique():
     assert a.block_id != b.block_id
     assert a.status == "empty"
     assert a.params == {}
-    assert a.input_snapshot is None
-    assert a.output_snapshot is None
+    assert a.input_slice is None
+    assert a.output_slice is None
 
 
 def test_pipeline_layer_sorted_blocks_orders_by_start_end():

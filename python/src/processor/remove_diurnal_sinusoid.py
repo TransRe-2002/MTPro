@@ -163,6 +163,7 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
 
         self._init_ui()
         self._connect_signal()
+        self._load_input_data()
 
 
     def _on_data_loaded(self):
@@ -410,8 +411,8 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
             return None
         return harmonics
 
-    def _run_subtraction(self, samples: np.ndarray) -> Optional[PeriodicSubtractionResult]:
-        """读取界面参数并调用底层日变相减算法。"""
+    def _read_subtraction_args(self, samples: np.ndarray) -> Optional[dict]:
+        """在 UI 线程读取日变相减参数，返回纯数据 dict（不合法返回 None）。"""
         harmonics = self._parse_harmonics()
         if harmonics is None:
             return None
@@ -437,24 +438,44 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         if self.datetime_index is None:
             self._log("当前数据缺少 DatetimeIndex，无法执行按时间窗口的日变拟合")
             return None
-        series = pd.Series(samples, index=self.datetime_index, name=self.ch_name)
-        try:
-            return subtract_diurnal_signal_series(
-                series,
-                harmonics=harmonics,
-                window_days=window_days,
-                step_days=step_days,
-                trend_degree=trend_degree,
-                min_valid_fraction=min_valid_fraction,
-                min_valid_samples=min_valid_samples,
-            )
-        except Exception as exc:
-            self._log(f"正弦相减失败: {exc}")
-            return None
+        return {
+            "samples": samples,
+            "index": self.datetime_index,
+            "name": self.ch_name,
+            "harmonics": harmonics,
+            "window_days": window_days,
+            "step_days": step_days,
+            "trend_degree": trend_degree,
+            "min_valid_fraction": min_valid_fraction,
+            "min_valid_samples": min_valid_samples,
+        }
+
+    @staticmethod
+    def _subtraction_compute(args: dict) -> PeriodicSubtractionResult:
+        """纯计算：在 compute 池里执行，不碰任何 Qt 对象。"""
+        series = pd.Series(args["samples"], index=args["index"], name=args["name"])
+        return subtract_diurnal_signal_series(
+            series,
+            harmonics=args["harmonics"],
+            window_days=args["window_days"],
+            step_days=args["step_days"],
+            trend_degree=args["trend_degree"],
+            min_valid_fraction=args["min_valid_fraction"],
+            min_valid_samples=args["min_valid_samples"],
+        )
 
     def _preview(self):
-        """执行一次"只预览、不落盘"的拟合。"""
-        result = self._run_subtraction(self.y_data)
+        """执行一次"只预览、不落盘"的拟合（重计算放后台）。"""
+        args = self._read_subtraction_args(self.y_data)
+        if args is None:
+            return
+        self._run_heavy(
+            lambda: self._subtraction_compute(args),
+            self._finish_preview,
+            "正弦相减去日变（预览拟合）",
+        )
+
+    def _finish_preview(self, result):
         if result is None:
             return
         self.preview_result = result

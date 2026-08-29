@@ -98,6 +98,7 @@ class RemoveStepByDiff(BaseProcessorWidget):
 
         self._init_ui()
         self._connect_signal()
+        self._load_input_data()
 
 
     def _on_data_loaded(self):

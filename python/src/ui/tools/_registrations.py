@@ -21,6 +21,7 @@ register(ToolSpec(
     has_channel_sync=True,
     has_region_sync=True,
     classic_factory=RemoveRegion,
+    pipeline_editor_factory=RemoveRegion,
 ))
 
 register(ToolSpec(
@@ -62,6 +63,7 @@ register(ToolSpec(
     kind="interactive",
     requires_channel=True,
     classic_factory=RemoveStepByBaseline,
+    pipeline_editor_factory=RemoveStepByBaseline,
 ))
 
 register(ToolSpec(
@@ -72,6 +74,7 @@ register(ToolSpec(
     requires_channel=True,
     aliases=("remove pulse wavelet",),
     classic_factory=RemoveWaveletDenoise,
+    pipeline_editor_factory=RemoveWaveletDenoise,
 ))
 
 register(ToolSpec(
@@ -81,6 +84,7 @@ register(ToolSpec(
     kind="interactive",
     requires_channel=True,
     classic_factory=RemoveDiurnalSinusoid,
+    pipeline_editor_factory=RemoveDiurnalSinusoid,
 ))
 
 register(ToolSpec(

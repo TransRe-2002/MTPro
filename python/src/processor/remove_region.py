@@ -19,6 +19,7 @@ import pyqtgraph as pg
 from PySide6 import QtWidgets, QtCore, QtGui
 from typing import List, Optional, Any, Tuple
 
+from processor._base_processor import build_pkg_from_series
 from processor._display_utils import decimate_for_display, apply_nan_intervals
 from processor._modifier_constraint import apply_modifier_axis_constraint
 from utils.theme import configure_pyqtgraph_theme, pg_background
@@ -453,6 +454,7 @@ class RemoveRegion(QtWidgets.QWidget):
     # 工具信号（data_process 接线到 Broker）
     data_requested = QtCore.Signal(int, str)
     result_submitted = QtCore.Signal(int, str, object)
+    result_signal = QtCore.Signal(str, object)
     channel_sync_requested = QtCore.Signal(int, str, object)
     region_sync_requested = QtCore.Signal(object)
 
@@ -501,6 +503,12 @@ class RemoveRegion(QtWidgets.QWidget):
     def wire_data_ready(self, data_ready_signal) -> None:
         """连接外部数据信号。由 data_process 调。"""
         data_ready_signal.connect(self._on_data_ready)
+
+    def load_series(self, channel_name: str, series) -> None:
+        """以 ``pd.Series`` 切片直接注入数据（pipeline block 使用）。"""
+        self.ch_name = channel_name
+        pkg = build_pkg_from_series(channel_name, series)
+        self._on_data_ready(self.data_id, channel_name, pkg)
 
     def _on_data_ready(self, data_id: int, channel: str, pkg: dict) -> None:
         if data_id != self.data_id or channel != self.ch_name:
@@ -780,6 +788,7 @@ class RemoveRegion(QtWidgets.QWidget):
 
         # 当前通道结果 → 信号
         self.result_submitted.emit(self.data_id, self.ch_name, result)
+        self.result_signal.emit(self.ch_name, result)
 
 
 if __name__ == "__main__":

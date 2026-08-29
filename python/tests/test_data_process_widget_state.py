@@ -526,8 +526,8 @@ def test_pipeline_common_time_window_preview_and_commit(qtbot):
             start=0,
             end=3,
             status="ready",
-            input_snapshot=np.array([2.0, 3.0, 4.0]),
-            output_snapshot=np.array([12.0, 13.0, 14.0]),
+            input_slice=np.array([2.0, 3.0, 4.0]),
+            output_slice=np.array([12.0, 13.0, 14.0]),
         )
     )
 
@@ -635,18 +635,18 @@ def test_pipeline_preview_commit_rebases_and_marks_downstream_stale():
     first = PipelineBlock(
         tool_id="remove_spike",
         start=0,
-        end=2,
+        end=3,
         status="ready",
-        input_snapshot=base.copy(),
-        output_snapshot=base + 1,
+        input_slice=base.copy(),
+        output_slice=base + 1,
     )
     second = PipelineBlock(
         tool_id="remove_step_diff",
-        start=2,
+        start=0,
         end=3,
         status="ready",
-        input_snapshot=base + 1,
-        output_snapshot=base + 3,
+        input_slice=base + 1,
+        output_slice=base + 3,
     )
     layer.blocks.extend([first, second])
 
@@ -655,7 +655,7 @@ def test_pipeline_preview_commit_rebases_and_marks_downstream_stale():
     assert first.status == "ready"
     assert second.status == "ready"
 
-    first.output_snapshot = base + 10
+    first.output_slice = base + 10
     preview = pipeline_widget._collect_preview_results(update_status=True)
     np.testing.assert_allclose(preview[(1, "Ex1")], base + 10)
     assert first.status == "ready"
@@ -673,8 +673,8 @@ def test_pipeline_preview_commit_rebases_and_marks_downstream_stale():
         base + 10,
     )
     np.testing.assert_allclose(channel_pipeline.baseline_snapshot, base + 10)
-    assert first.output_snapshot is None
-    assert second.output_snapshot is None
+    assert first.output_slice is None
+    assert second.output_slice is None
     assert changed == [(1, "Ex1")]
 
     widget.close()

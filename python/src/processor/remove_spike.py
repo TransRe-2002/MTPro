@@ -19,6 +19,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from processor._base_processor import build_pkg_from_series
 from processor._display_utils import decimate_for_display
 from processor._modifier_constraint import apply_modifier_axis_constraint
 from utils.theme import configure_pyqtgraph_theme, pg_background
@@ -404,6 +405,7 @@ class RemoveSpike(QtWidgets.QWidget):
     # 工具信号（data_process 接线到 Broker）
     data_requested = QtCore.Signal(int, str)
     result_submitted = QtCore.Signal(int, str, object)
+    result_signal = QtCore.Signal(str, object)
     channel_sync_requested = QtCore.Signal(int, str, object)
 
     def __init__(
@@ -443,6 +445,12 @@ class RemoveSpike(QtWidgets.QWidget):
     def wire_data_ready(self, data_ready_signal) -> None:
         """连接外部数据信号。由 data_process 调。"""
         data_ready_signal.connect(self._on_data_ready)
+
+    def load_series(self, channel_name: str, series) -> None:
+        """以 ``pd.Series`` 切片直接注入数据（pipeline block 使用）。"""
+        self.ch_name = channel_name
+        pkg = build_pkg_from_series(channel_name, series)
+        self._on_data_ready(self.data_id, channel_name, pkg)
 
     def _on_data_ready(self, data_id: int, channel: str, pkg: dict) -> None:
         if data_id != self.data_id or channel != self.ch_name:
@@ -568,6 +576,7 @@ class RemoveSpike(QtWidgets.QWidget):
             self.channel_sync_requested.emit(self.data_id, self.ch_name, result)
 
         self.result_submitted.emit(self.data_id, self.ch_name, result)
+        self.result_signal.emit(self.ch_name, result)
 
 
 if __name__ == "__main__":

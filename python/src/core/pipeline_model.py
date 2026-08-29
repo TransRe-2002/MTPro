@@ -19,8 +19,10 @@ class PipelineBlock:
     end: int = 0
     params: dict = field(default_factory=dict)
     status: str = "empty"
-    input_snapshot: Optional[np.ndarray] = field(default=None, repr=False)
-    output_snapshot: Optional[np.ndarray] = field(default=None, repr=False)
+    # block 只缓存自己区间 [start:end] 的输入/输出切片，而不是整条通道，
+    # 避免每个 block 都复制一份全量数据（内存随 block 数线性翻倍）。
+    input_slice: Optional[np.ndarray] = field(default=None, repr=False)
+    output_slice: Optional[np.ndarray] = field(default=None, repr=False)
     last_summary: str = ""
 
 

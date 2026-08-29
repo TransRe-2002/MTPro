@@ -1526,14 +1526,13 @@ class DataProcessPipelineWidget(QWidget):
             lane.refresh_tracks()
 
     def _invalidate_block_cache(self, block: PipelineBlock, reason: str):
+        block.input_slice = None
+        block.output_slice = None
         if TOOL_META.get(block.tool_id, {}).get("kind") == "interactive":
-            block.input_snapshot = None
-            block.output_snapshot = None
             block.status = "empty"
-            block.last_summary = reason
         else:
             block.status = "configured" if block.params else "empty"
-            block.last_summary = reason
+        block.last_summary = reason
 
     def _on_block_geometry_changed(self, block_id: str):
         found = self._find_block(block_id)
@@ -1621,11 +1620,34 @@ class DataProcessPipelineWidget(QWidget):
             dialog.deleteLater()
             return
 
-        editor.result_signal.connect(
-            lambda _channel, result, block_id=block.block_id, source=input_snapshot,
-            start=range_start, end=range_end:
-            self._on_interactive_result(block_id, source, start, end, result)
-        )
+        block_id = block.block_id
+        source_snapshot = input_snapshot
+
+        def _on_editor_result(_channel, result):
+            ok = self._on_interactive_result(
+                block_id, source_snapshot, range_start, range_end, result,
+            )
+            if ok:
+                dialog.close()
+
+        result_signal = getattr(editor, "result_signal", None)
+        if result_signal is None:
+            dialog.deleteLater()
+            return
+        result_signal.connect(_on_editor_result)
+
+        # 同步信号：交互式编辑器勾选"应用到所有通道/所有数据集"时触发
+        slice_index = preview_channel.cts.index
+        channel_sync = getattr(editor, "channel_sync_requested", None)
+        if channel_sync is not None:
+            channel_sync.connect(
+                lambda _did, ch_name, result, idx=slice_index:
+                self._on_editor_channel_sync(pipeline.data_id, ch_name, result, idx)
+            )
+        region_sync = getattr(editor, "region_sync_requested", None)
+        if region_sync is not None:
+            region_sync.connect(self._on_editor_region_sync)
+
         layout.addWidget(editor)
         self._register_editor_dialog(dialog)
         dialog.show()
@@ -1664,27 +1686,90 @@ class DataProcessPipelineWidget(QWidget):
         range_start: int,
         range_end: int,
         result,
-    ):
+    ) -> bool:
         found = self._find_block(block_id)
         if found is None:
-            return
+            return False
 
         _pipeline, _layer, block = found
         result_array = np.asarray(result, dtype=np.float64)
         expected_size = max(0, range_end - range_start)
         if result_array.ndim != 1 or result_array.size != expected_size:
             QMessageBox.warning(self, "结果错误", "processor 返回的数据长度与 block 区间长度不一致。")
-            return
+            return False
 
-        block.input_snapshot = np.array(source_snapshot, copy=True)
-        output_snapshot = np.array(source_snapshot, copy=True)
-        output_snapshot[range_start:range_end] = result_array
-        block.output_snapshot = output_snapshot
+        # 只缓存 block 区间内的输入/输出切片，不复制整条通道
+        block.input_slice = np.array(source_snapshot[range_start:range_end], copy=True)
+        block.output_slice = np.array(result_array, copy=True)
         block.status = "ready"
         block.last_summary = f"cached {result_array.size} pts in [{range_start}, {range_end})"
         self._refresh_all_pipeline_statuses()
         self.selected_block_id = block.block_id
         self._refresh_selection()
+        return True
+
+    # ─── 编辑器同步（通道同步 / 跨数据集区域同步）─────────────
+
+    def _on_editor_channel_sync(
+        self,
+        data_id: int,
+        channel_name: str,
+        result_slice,
+        slice_index,
+    ) -> None:
+        """把 block 切片里的 NaN 位置按时间戳同步到同数据集的其他通道。"""
+        data = self._data_for(data_id)
+        if data is None:
+            return
+        result_arr = np.asarray(result_slice, dtype=np.float64)
+        if result_arr.ndim != 1 or result_arr.size != len(slice_index):
+            return
+        nan_timestamps = slice_index[np.isnan(result_arr)]
+        if len(nan_timestamps) == 0:
+            return
+
+        for ch in data.channel_names():
+            if ch == channel_name or not data.has_channel(ch):
+                continue
+            series = data.get_channel_series(ch)
+            mask = series.index.isin(nan_timestamps)
+            if not mask.any():
+                continue
+            vals = series.to_numpy(dtype=np.float64, copy=True)
+            vals[mask] = np.nan
+            data.set_channel_series(
+                ch, pd.Series(vals, index=series.index, name=series.name)
+            )
+            self.change_finished_signal.emit(data_id, ch)
+
+    def _on_editor_region_sync(self, params: dict) -> None:
+        """remove_region 跨数据集同步：按时间范围对所有数据集置 NaN。"""
+        from core.region_sync import apply_nan_intervals, compute_time_range_intervals
+
+        time_ranges = params.get("time_ranges", [])
+        source_id = params.get("source_data_id", -1)
+        if not time_ranges or self.data_manager is None:
+            return
+
+        for data_id, em_data in self.data_manager.items():
+            if data_id == source_id:
+                continue
+            start_ts = em_data.start_time.timestamp()
+            dt_sec = em_data.dt.total_seconds()
+            for ch in em_data.channel_names():
+                series = em_data.get_channel_series(ch)
+                intervals = compute_time_range_intervals(
+                    time_ranges, len(series), start_ts, dt_sec
+                )
+                if not intervals:
+                    continue
+                vals = apply_nan_intervals(
+                    series.to_numpy(dtype=np.float64, copy=True), intervals
+                )
+                em_data.set_channel_series(
+                    ch, pd.Series(vals, index=series.index, name=series.name)
+                )
+                self.change_finished_signal.emit(data_id, ch)
 
     def _refresh_all_pipeline_statuses(self):
         for pipeline in self.pipelines:
@@ -1698,29 +1783,48 @@ class DataProcessPipelineWidget(QWidget):
         current_snapshot: np.ndarray,
         update_status: bool,
     ) -> np.ndarray:
+        """把单个 block 的缓存结果叠加到当前快照上。
+
+        interactive 与 param block 统一走"切片缓存"：block 只存
+        ``[start:end]`` 的输入/输出切片。当前快照对应区段与缓存输入一致时
+        把输出切片拼回去；否则标记 stale。param block 未执行过时保持
+        configured，等待后台执行引擎生成缓存。
+        """
         tool_kind = TOOL_META.get(block.tool_id, {}).get("kind")
-        if tool_kind != "interactive":
+        n = current_snapshot.size
+        start = max(0, min(block.start, n))
+        end = max(start, min(block.end, n))
+        region_len = end - start
+
+        has_cache = block.input_slice is not None and block.output_slice is not None
+        if not has_cache:
             if update_status:
-                block.status = "configured" if block.params else "empty"
-                block.last_summary = "param block waits for processor backend"
+                if tool_kind == "interactive":
+                    block.status = "empty"
+                    block.last_summary = "double click to edit and cache result"
+                else:
+                    block.status = "configured" if block.params else "empty"
+                    block.last_summary = "param block waiting to run"
             return current_snapshot
 
-        if block.input_snapshot is None or block.output_snapshot is None:
-            if update_status:
-                block.status = "empty"
-                block.last_summary = "double click to edit and cache result"
-            return current_snapshot
-
-        if not np.array_equal(current_snapshot, block.input_snapshot, equal_nan=True):
+        if block.input_slice.size != region_len or block.output_slice.size != region_len:
             if update_status:
                 block.status = "stale"
-                block.last_summary = "upstream changed; reopen editor to refresh result"
+                block.last_summary = "block range changed; refresh result"
+            return current_snapshot
+
+        if not np.array_equal(current_snapshot[start:end], block.input_slice, equal_nan=True):
+            if update_status:
+                block.status = "stale"
+                block.last_summary = "upstream changed; refresh result"
             return current_snapshot
 
         if update_status:
             block.status = "ready"
-            block.last_summary = f"cached {block.output_snapshot.size} pts"
-        return np.array(block.output_snapshot, copy=True)
+            block.last_summary = f"cached {block.output_slice.size} pts"
+        out = np.array(current_snapshot, copy=True)
+        out[start:end] = block.output_slice
+        return out
 
     def _compose_channel_preview(
         self,
@@ -1786,13 +1890,14 @@ class DataProcessPipelineWidget(QWidget):
     def _reset_pipeline_after_commit(self, pipeline: ChannelPipeline):
         for layer in pipeline.layers:
             for block in layer.blocks:
+                block.input_slice = None
+                block.output_slice = None
                 if TOOL_META.get(block.tool_id, {}).get("kind") == "interactive":
-                    block.input_snapshot = None
-                    block.output_snapshot = None
                     block.status = "empty"
                     block.last_summary = "committed into baseline; reopen editor for next pass"
                 else:
                     block.status = "configured" if block.params else "empty"
+                    block.last_summary = "committed into baseline; rerun to regenerate"
 
     def _commit_preview(self) -> None:
         if not self.pipelines:

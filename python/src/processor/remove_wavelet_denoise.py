@@ -152,6 +152,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
 
         self._init_ui()
         self._connect_signal()
+        self._load_input_data()
 
 
     def _on_data_loaded(self):
@@ -785,27 +786,35 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
     def _current_detail_gains(self) -> list[float]:
         return [float(spin.value()) for spin in self.gain_spins]
 
-    def _run_denoise(self) -> Optional[WaveletDenoiseResult]:
+    def _read_denoise_args(self) -> Optional[dict]:
+        """在 UI 线程读取去噪所需的全部参数（含切片数据），返回纯数据 dict。
+
+        返回 ``None`` 表示参数/区域不合法。返回的 dict 只含 numpy/标量，
+        可以安全地捕获进闭包丢到 compute 池里执行。
+        """
         region = self._read_region()
         if region is None:
             return None
-        try:
-            result = wavelet_multiscale_denoise(
-                self.y_data,
-                region,
-                transform_kind="wp" if self.transform_combo.currentText() == "Wavelet Packet" else "dwt",
-                wavelet_name=self.wavelet_combo.currentText(),
-                level=int(self.level_spin.value()),
-                sample_rate_hz=self._sample_rate_hz(),
-                threshold_scale=float(self.threshold_scale_spin.value()),
-                padding_points=int(self.padding_spin.value()),
-                mode=self.mode_combo.currentText(),
-                detail_gains=self._current_detail_gains(),
-            )
-        except Exception as exc:
-            self._log(f"小波多尺度去噪失败: {exc}")
-            return None
-        return result
+        return {
+            "y": self.y_data,
+            "region": region,
+            "transform_kind": "wp" if self.transform_combo.currentText() == "Wavelet Packet" else "dwt",
+            "wavelet_name": self.wavelet_combo.currentText(),
+            "level": int(self.level_spin.value()),
+            "sample_rate_hz": self._sample_rate_hz(),
+            "threshold_scale": float(self.threshold_scale_spin.value()),
+            "padding_points": int(self.padding_spin.value()),
+            "mode": self.mode_combo.currentText(),
+            "detail_gains": self._current_detail_gains(),
+        }
+
+    @staticmethod
+    def _denoise_compute(args: dict) -> WaveletDenoiseResult:
+        """纯计算：在 compute 池里执行，不碰任何 Qt 对象。"""
+        y = args["y"]
+        region = args["region"]
+        kwargs = {k: v for k, v in args.items() if k not in ("y", "region")}
+        return wavelet_multiscale_denoise(y, region, **kwargs)
 
     def _log_preview_summary(self, result: WaveletDenoiseResult):
         left, right = result.region
@@ -850,7 +859,16 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self._log("")
 
     def _preview_fit(self):
-        result = self._run_denoise()
+        args = self._read_denoise_args()
+        if args is None:
+            return
+        self._run_heavy(
+            lambda: self._denoise_compute(args),
+            self._finish_preview,
+            "小波多尺度去噪（预览）",
+        )
+
+    def _finish_preview(self, result):
         if result is None:
             return
         self.last_result = result
@@ -858,7 +876,16 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self._log_preview_summary(result)
 
     def _apply_correction(self):
-        result = self._run_denoise()
+        args = self._read_denoise_args()
+        if args is None:
+            return
+        self._run_heavy(
+            lambda: self._denoise_compute(args),
+            self._finish_apply,
+            "小波多尺度去噪（应用）",
+        )
+
+    def _finish_apply(self, result):
         if result is None:
             return
         self._save_history()

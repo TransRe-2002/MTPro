@@ -1,16 +1,25 @@
 import copy
+import logging
+import os
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from typing import List, Optional, Union
 import pytz
 from scipy.io import loadmat, savemat
+from scipy.io.matlab import MatlabObject, MatlabOpaque
 
 from core.em_data import EMData
 from core.mat_data import MatEMData
 
+from io_utils import mcos_reader
+from io_utils import ts_convert
 from io_utils.em_io import EMDataSaver, EMDataLoader
 from utils.timestamp import pts_to_array
+
+logger = logging.getLogger(__name__)
 
 _TZ_UTC_ = pytz.timezone('UTC')
 
@@ -184,17 +193,73 @@ def _make_cell_row_(str_list: List[str]) -> np.ndarray:
 def new_ts_struct() -> dict:
     return copy.deepcopy(TS_STRUCT_TEMPLATE)
 
+def _load_raw_mat(path: str):
+    """按文件格式读取 .mat 原始内容，返回 (dict, None) 或 (None, 异常)。
+
+    v7.3 / HDF5 需要 h5py 读取，v5/v7 用 scipy。
+    """
+    try:
+        with open(path, 'rb') as fh:
+            header = fh.read(128)
+    except OSError as exc:
+        return None, exc
+    try:
+        if b'MATLAB 7.3 MAT-file' in header or header[:4] == b'\x89HDF':
+            return _load_mat_v73(path), None
+        return loadmat(path), None
+    except Exception as exc:
+        return None, exc
+
+
+def _contains_ts_object(mat_data: dict) -> bool:
+    """判断 loadmat 结果中是否含有无法解析的 MATLAB 对象。
+
+    序列化的 MATLAB 类对象（如 TS）经 scipy.io.loadmat 只能得到
+    MatlabObject / MatlabOpaque 占位数组，变量名甚至可能丢失为 None，
+    MatEMData 无法解析，必须回退到外部转换器。
+    """
+    for key, value in mat_data.items():
+        if not isinstance(key, str):
+            return True
+        if isinstance(value, (MatlabObject, MatlabOpaque)):
+            return True
+    return False
+
+
 class MatLoader(EMDataLoader):
     @staticmethod
     def load(path: str, tz: str = 'Asia/Shanghai') -> MatEMData:
-        # 检测文件格式：v7.3 / HDF5 需要 h5py 读取，v5/v4 用 scipy
-        with open(path, 'rb') as fh:
-            header = fh.read(128)
-        if b'MATLAB 7.3 MAT-file' in header or header[:4] == b'\x89HDF':
-            mat_data = _load_mat_v73(path)
-        else:
-            mat_data = loadmat(path)
-        return MatEMData(mat_data, path, tz=tz)
+        mat_data, load_exc = _load_raw_mat(path)
+
+        if mat_data is not None and not _contains_ts_object(mat_data):
+            try:
+                return MatEMData(mat_data, path, tz=tz)
+            except Exception as exc:
+                # 直接解析失败（如 v7.3 保存的 TS 对象），继续走兜底路径
+                logger.warning("直接解析 %s 失败（%s），尝试兜底转换", path, exc)
+                load_exc = exc
+
+        # ---- 兜底 1：纯 Python 解析 MCOS 序列化（免 MATLAB Runtime）----
+        if mat_data is not None:
+            ts_dict = mcos_reader.extract_ts_struct(mat_data)
+            if ts_dict is not None:
+                logger.info("纯 Python 解析 TS 对象文件: %s", path)
+                return MatEMData(ts_dict, path, tz=tz)
+
+        # ---- 兜底 2：编译的 MATLAB 转换器（可选，需 MATLAB Runtime）----
+        logger.info("使用 mtpro_ts_convert 转换文件: %s", path)
+        try:
+            converted = ts_convert.convert_to_struct(path)
+        except Exception as conv_exc:
+            # 转换器不可用时，优先暴露原始读取错误
+            raise (load_exc or conv_exc) from conv_exc
+        try:
+            mat_data = loadmat(str(converted))
+            return MatEMData(mat_data, path, tz=tz)
+        except Exception as exc:
+            raise IOError(f"转换后的文件仍无法解析: {path}") from exc
+        finally:
+            Path(converted).unlink(missing_ok=True)
 
 def _save_mat_v73(path: str, mdict: dict) -> None:
     """将 scipy 格式 dict 写入 HDF5 文件（MTPro 内部格式，非 MATLAB 兼容）。"""
@@ -254,13 +319,29 @@ def _save_mat_v73(path: str, mdict: dict) -> None:
 class MatSaver(EMDataSaver):
     @staticmethod
     def save(em_data: MatEMData, path: str):
+        mdict = MatSaver._build_mdict(em_data)
+        MatSaver._write_mat(mdict, path)
+
+    @staticmethod
+    def _build_mdict(em_data: MatEMData) -> dict:
         if isinstance(em_data, MatEMData):
             em_data.update_meta()
             if hasattr(em_data, "mat_meta"):
                 key = em_data._struct_key
-                savemat(path, {key: em_data.mat_meta[key]})
-            else:
-                raise TypeError(f"{type(em_data).__name__} is missing 'mat_meta' attribute")
+                ts = em_data.mat_meta[key]
+                # timeStamp 在加载时已被释放（见 core/mat_data 加载注释），
+                # 且 update_meta 裁剪首尾 NaN 后 start_time/npts 可能变化——
+                # 保存前统一用当前时钟重建，保证与 datetime_index 一致。
+                stamp = _make_timestamp_(
+                    em_data.start_time, em_data.dt.total_seconds(), em_data.npts,
+                )
+                if isinstance(ts, dict):
+                    ts["timeStamp"] = stamp
+                else:
+                    # 结构化数组：字段是 (1,1) 单元格，往单元格里放数组
+                    ts["timeStamp"][0, 0] = stamp
+                return {key: ts}
+            raise TypeError(f"{type(em_data).__name__} is missing 'mat_meta' attribute")
         else:
             ts = new_ts_struct()
             ts["NCh"] = em_data.NCh
@@ -294,4 +375,36 @@ class MatSaver(EMDataSaver):
             ts["timeStamp"] = _make_timestamp_(em_data.start_time, em_data.dt.total_seconds(), em_data.npts)
             if hasattr(em_data, "UserData"):
                 ts["UserData"] = _make_cell_row_(em_data.user_data)
-            savemat(path, {"tsStruct": ts})
+            return {"tsStruct": ts}
+
+    @staticmethod
+    def _write_mat(mdict: dict, path: str):
+        """写 .mat：默认转成 MATLAB TS 对象格式，转换器不可用时回退普通 tsStruct。
+
+        scipy 无法直接写 MATLAB 对象，因此先落盘 tsStruct 临时文件，再经
+        mtpro_ts_convert（struct2ts）生成 TS 对象文件。读取侧两种格式都支持。
+        """
+        try:
+            ts_convert.find_converter()
+        except FileNotFoundError:
+            logger.warning(
+                "未找到 mtpro_ts_convert，无法保存为 TS 对象格式，"
+                "按普通 tsStruct 保存: %s", path,
+            )
+            savemat(path, mdict)
+            return
+
+        fd, tmp_name = tempfile.mkstemp(suffix=".mat", prefix="mtpro_save_")
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            savemat(str(tmp), mdict)
+            try:
+                ts_convert.convert_to_ts_object(tmp, path)
+                return
+            except Exception as exc:
+                logger.warning("转换为 TS 对象失败（%s），按普通 tsStruct 保存: %s", exc, path)
+            Path(path).unlink(missing_ok=True)  # 清理可能的半成品
+            savemat(path, mdict)
+        finally:
+            tmp.unlink(missing_ok=True)

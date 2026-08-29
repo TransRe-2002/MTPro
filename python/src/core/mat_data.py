@@ -74,10 +74,13 @@ class MatEMData(EMData):
             self.NCh = int(_field(ts, 'nch')[0, 0][0, 0])
 
         # ── 时间 ──
+        # datevec 分量强制取整：MATLAB 文件里 datevec 可能是浮点类型，
+        # 而 pd.Timestamp 的分量构造只接受整数（浮点会被当作纳秒 epoch）
         st = _field(ts, 'startTime')[0, 0][0]
         tz_obj = pytz.timezone(tz)
         self.start_time = pd.Timestamp(
-            st[0], st[1], st[2], st[3], st[4], st[5], tz=tz_obj,
+            int(st[0]), int(st[1]), int(st[2]),
+            int(st[3]), int(st[4]), int(st[5]), tz=tz_obj,
         ).tz_convert('UTC')
 
         # zeroTime 可选，无则用 startTime
@@ -85,7 +88,8 @@ class MatEMData(EMData):
         if zt is not None and zt[0, 0].size >= 6:
             zv = zt[0, 0][0]
             self.zero_time = pd.Timestamp(
-                zv[0], zv[1], zv[2], zv[3], zv[4], zv[5], tz=tz_obj,
+                int(zv[0]), int(zv[1]), int(zv[2]),
+                int(zv[3]), int(zv[4]), int(zv[5]), tz=tz_obj,
             ).tz_convert('UTC')
         else:
             self.zero_time = self.start_time
@@ -111,6 +115,19 @@ class MatEMData(EMData):
         self.datetime_index = pd.date_range(
             start=self.start_time, periods=self.npts, freq=self.dt,
         )
+
+        # timeStamp（十进制年份，npts×8B）从 datetime_index 可完全重建，
+        # 且保存时 mat_io 会用 _make_timestamp_ 无条件重写——加载后立即
+        # 释放引用：数十个年度 5s 采样文件合计可省 ~2 GB 常驻内存。
+        # dict（mcos_reader 路径）用 pop；结构化数组（scipy/v7.3 路径）
+        # 的 object 字段置空以释放对 (npts,1) 数组的引用。
+        try:
+            if isinstance(ts, dict):
+                ts.pop("timeStamp", None)
+            else:
+                ts["timeStamp"] = None
+        except Exception:
+            pass
 
         # ── 台站元数据（全部 Optional）──
         self.latitude = _opt_float(ts, 'latitude')
@@ -178,11 +195,9 @@ class MatEMData(EMData):
                 self.start_time = self.datetime_index[0]
                 self.end_time = self.datetime_index[-1]
 
-                try:
-                    stamp = _field(ts, 'timeStamp')[0, 0]
-                    ts['timeStamp'][0, 0] = stamp[:, first_valid:last_valid + 1]
-                except (KeyError, ValueError):
-                    pass
+                # timeStamp 加载时被释放、保存时整体重建（见 mat_io
+                # 的 _build_mdict），裁剪只同步 npts/start_time 即可，
+                # 不再逐段维护 timeStamp
 
                 logger.info(
                     "裁剪首尾 NaN: %d → %d 点 (去除前 %d 后 %d)",

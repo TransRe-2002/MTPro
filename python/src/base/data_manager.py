@@ -8,6 +8,10 @@ class DataManager(QObject):
     data_added = Signal(int)
     data_removed = Signal(int)
     active_changed = Signal(int)
+    # 数据集内容被就地修改（预处理）。第二个参数为 structural：
+    #   True  — npts/dt/通道集变化，波形视图需完整重建
+    #   False — 仅元数据变化，刷新树与摘要即可
+    data_changed = Signal(int, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,6 +60,15 @@ class DataManager(QObject):
 
     def active_data(self) -> Optional[EMData]:
         return self.get(self._active_id)
+
+    def notify_changed(self, key: int, structural: bool = False) -> None:
+        """通知数据集已被就地修改（预处理后由 UI 层调用）。
+
+        key 不存在时静默忽略。
+        """
+        if key not in self._em_datas:
+            return
+        self.data_changed.emit(key, structural)
 
 
 

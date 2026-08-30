@@ -4,19 +4,25 @@ import logging
 import json
 
 from PySide6.QtWidgets import (
-    QTreeView, QVBoxLayout, QWidget, QSplitter,
+    QApplication, QDialog, QTreeView, QVBoxLayout, QWidget, QSplitter,
     QMenu, QPlainTextEdit, QLabel, QFrame, QGroupBox, QStackedWidget,
     QMessageBox,
 )
 from PySide6.QtCore import QByteArray, QMimeData, Qt, QModelIndex, Signal
 from PySide6.QtGui import QDrag, QFont
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 from core.em_data import EMData
 from ui.data_process_shared import CLASSIC_TOOL_MIME, DATA_TREE_SELECTION_MIME, create_classic_tool_model
 from ui.data_tree_model import DataTreeModel
 from ui.compare_widget import CompareWidget
+from ui.dialogs.channel_management_dialog import ChannelManagementDialog
+from ui.dialogs.decimate_dialog import DecimateDialog
+from ui.dialogs.rename_channel_dialog import RenameChannelDialog
+from ui.dialogs.station_metadata_dialog import StationMetadataDialog
+from ui.dialogs.trim_dialog import TrimDialog
 from ui.plot_panel import PlotPanel
+from utils.signal_decimate import decimated_length
 from base.data_manager import DataManager
 
 class DataSelectionTreeView(QTreeView):
@@ -150,6 +156,15 @@ class DataTreeViewer(QWidget):
         self.tool_tree.doubleClicked.connect(self._on_tool_activated)
         self.data_manager.active_changed.connect(self.on_active_changed)
         self.data_manager.data_removed.connect(self.on_data_removed)
+        self.data_manager.data_changed.connect(self._on_data_changed)
+
+    def _on_data_changed(self, key: int, structural: bool):
+        """结构变更后关闭该数据集的独立曲线窗口（数据已过期）。"""
+        if not structural:
+            return
+        for panel_key in [pk for pk in self._plot_panels if pk[0] == key]:
+            plot_panel = self._plot_panels.pop(panel_key)
+            plot_panel.close()
 
     def on_current_changed(self, current: QModelIndex, previous: QModelIndex):
         del previous
@@ -321,7 +336,9 @@ class DataTreeViewer(QWidget):
         ch_name = self.model.channel_name(index)
         if key is None or ch_name is None:
             return
+        self._open_channel_plot(key, ch_name)
 
+    def _open_channel_plot(self, key: int, ch_name: str):
         plot_key = (key, ch_name)
         plot_panel = self._plot_panels.get(plot_key)
         if plot_panel is not None:
@@ -368,6 +385,47 @@ class DataTreeViewer(QWidget):
         self._plot_panels[plot_key] = plot_panel
         self.logger.info("Opened plot panel for dataset #%s channel %s", key, ch_name)
 
+    # ── 右键菜单 ────────────────────────────────────────────────
+
+    def _build_dataset_context_menu(self) -> Tuple[QMenu, Dict[object, Callable[[int], None]]]:
+        """构建数据集级右键菜单，返回 (菜单, action→处理器) 映射。"""
+        menu = QMenu(self)
+        actions: Dict[object, Callable[[int], None]] = {}
+
+        for label, handler in (
+            ("保存", self._action_save_dataset),
+            ("另存为", self._action_save_dataset_as),
+            ("关闭数据", self._action_close_dataset),
+        ):
+            actions[menu.addAction(label)] = handler
+
+        menu.addSeparator()
+
+        for label, handler in (
+            ("编辑台站元数据…", self._open_station_metadata_dialog),
+            ("降采样…", self._open_decimate_dialog),
+            ("裁剪时间范围…", self._open_trim_dialog),
+            ("通道管理…", self._open_channel_management_dialog),
+        ):
+            actions[menu.addAction(label)] = handler
+
+        return menu, actions
+
+    def _build_channel_context_menu(self) -> Tuple[QMenu, Dict[object, Callable[[int, str], None]]]:
+        """构建通道级右键菜单，返回 (菜单, action→处理器) 映射。"""
+        menu = QMenu(self)
+        actions: Dict[object, Callable[[int, str], None]] = {}
+
+        for label, handler in (
+            ("显示曲线", self._open_channel_plot),
+            ("序列对比", self._action_compare_channel),
+            ("重命名通道…", self._open_rename_channel_dialog),
+            ("删除通道", self._confirm_delete_channel),
+        ):
+            actions[menu.addAction(label)] = handler
+
+        return menu, actions
+
     def on_context_menu(self, pos):
         index = self.tree_view.indexAt(pos)
 
@@ -375,65 +433,216 @@ class DataTreeViewer(QWidget):
             return
 
         if self.model.is_dataset_index(index):
-            menu = QMenu(self)
-            action_save = menu.addAction("保存")
-            action_save_as = menu.addAction("另存为")
-            action_del = menu.addAction("关闭数据")
-            action = menu.exec(self.tree_view.viewport().mapToGlobal(pos))
             data_id = self.model.dataset_key(index)
             if data_id is None:
                 return
-
-            main_window = self.window()
-            if action == action_save and hasattr(main_window, "save_file_for"):
-                main_window.save_file_for(data_id)
-            elif action == action_save_as and hasattr(main_window, "save_file_as_for"):
-                main_window.save_file_as_for(data_id)
-            elif action == action_del:
-                self.data_manager.remove(data_id)
+            menu, actions = self._build_dataset_context_menu()
+            action = menu.exec(self.tree_view.viewport().mapToGlobal(pos))
+            if action is None:
+                return
+            handler = actions.get(action)
+            if handler is not None:
+                handler(data_id)
 
         elif self.model.is_channel_index(index):
-            menu = QMenu(self)
-            action_show = menu.addAction("显示曲线")
-            action_compare = menu.addAction("序列对比")
-            action_edit_metadata = menu.addAction("编辑通道元数据")
+            key = self.model.dataset_key(index)
+            ch_name = self.model.channel_name(index)
+            if key is None or ch_name is None:
+                return
+            menu, actions = self._build_channel_context_menu()
             action = menu.exec(self.tree_view.viewport().mapToGlobal(pos))
-            if action == action_show:
-                self.on_item_double_click(index)
-            elif action == action_compare:
-                key = self.model.dataset_key(index)
-                ch_name = self.model.channel_name(index)
-                if key is None or ch_name is None:
-                    return
-                channels = self.get_check_state()
-                if len(channels) == 0:
-                    em_data = self.data_manager.get(key)
-                    if em_data is None:
-                        return
-                    channels = [(em_data, ch_name)]
-                self.open_compare_widget(channels)
-            elif action == action_edit_metadata:
-                self.open_channel_metadata_editor(index)
+            if action is None:
+                return
+            handler = actions.get(action)
+            if handler is not None:
+                handler(key, ch_name)
 
-    def open_channel_metadata_editor(self, index: QModelIndex) -> None:
-        if not self.model.is_channel_index(index):
+    # ── 数据集级动作 ───────────────────────────────────────────
+
+    def _action_save_dataset(self, data_id: int) -> None:
+        main_window = self.window()
+        if hasattr(main_window, "save_file_for"):
+            main_window.save_file_for(data_id)
+
+    def _action_save_dataset_as(self, data_id: int) -> None:
+        main_window = self.window()
+        if hasattr(main_window, "save_file_as_for"):
+            main_window.save_file_as_for(data_id)
+
+    def _action_close_dataset(self, data_id: int) -> None:
+        self.data_manager.remove(data_id)
+
+    def _close_processor_windows_for(self, data_id: int) -> None:
+        """结构变更前关闭该数据集的处理工具窗口（其缓存已过期）。"""
+        process_widget = getattr(self.window(), "data_process_widget", None)
+        if process_widget is not None:
+            process_widget.close_windows_for_data(data_id)
+
+    def _open_station_metadata_dialog(self, data_id: int) -> None:
+        em_data = self.data_manager.get(data_id)
+        if em_data is None:
             return
 
-        key = self.model.dataset_key(index)
-        ch_name = self.model.channel_name(index)
-        if key is None or ch_name is None:
+        dialog = StationMetadataDialog(em_data, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        dialog.apply_to(em_data)
+        self.logger.info("Station metadata updated for dataset #%s", data_id)
+        self.data_manager.notify_changed(data_id, structural=False)
+
+    def _open_decimate_dialog(self, data_id: int) -> None:
+        em_data = self.data_manager.get(data_id)
+        if em_data is None:
             return
 
-        self.logger.info(
-            "Channel metadata editor requested for dataset #%s channel %s",
-            key,
-            ch_name,
-        )
-        QMessageBox.information(
+        dialog = DecimateDialog(em_data, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        factor = dialog.factor()
+
+        new_npts = decimated_length(em_data.npts, factor)
+        reply = QMessageBox.question(
             self,
-            "编辑通道元数据",
-            f"通道 {ch_name} 的元数据编辑功能待实现。",
+            "确认降采样",
+            f"将数据集「{em_data.name}」降采样 {factor} 倍：\n"
+            f"{em_data.npts} → {new_npts} 点，采样周期 "
+            f"{em_data.dt.total_seconds():g}s → "
+            f"{(em_data.dt * factor).total_seconds():g}s\n\n"
+            "此操作就地修改且不可撤销，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._close_processor_windows_for(data_id)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            em_data.decimate(factor)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.logger.info(
+            "Dataset #%s decimated by %d: npts=%d dt=%ss",
+            data_id, factor, em_data.npts, em_data.dt.total_seconds(),
+        )
+        self.data_manager.notify_changed(data_id, structural=True)
+
+    def _open_trim_dialog(self, data_id: int) -> None:
+        em_data = self.data_manager.get(data_id)
+        if em_data is None:
+            return
+
+        dialog = TrimDialog(em_data, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        start, end = dialog.time_range()
+
+        reply = QMessageBox.question(
+            self,
+            "确认裁剪",
+            f"将数据集「{em_data.name}」裁剪到：\n"
+            f"{start} ～ {end}\n\n"
+            "范围外的数据将被删除，此操作不可撤销，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._close_processor_windows_for(data_id)
+        try:
+            em_data.trim_time_range(start, end)
+        except ValueError as exc:
+            QMessageBox.warning(self, "裁剪失败", str(exc))
+            return
+        self.logger.info(
+            "Dataset #%s trimmed: npts=%d range=%s..%s",
+            data_id, em_data.npts, em_data.start_time, em_data.end_time,
+        )
+        self.data_manager.notify_changed(data_id, structural=True)
+
+    def _open_channel_management_dialog(self, data_id: int) -> None:
+        em_data = self.data_manager.get(data_id)
+        if em_data is None:
+            return
+
+        dialog = ChannelManagementDialog(em_data, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._close_processor_windows_for(data_id)
+        try:
+            renamed, deleted = dialog.apply_to(em_data)
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "通道管理失败", str(exc))
+            return
+        self.logger.info(
+            "Dataset #%s channels managed: %d renamed, %d deleted",
+            data_id, renamed, deleted,
+        )
+        self.data_manager.notify_changed(data_id, structural=True)
+
+    # ── 通道级动作 ─────────────────────────────────────────────
+
+    def _action_compare_channel(self, key: int, ch_name: str) -> None:
+        channels = self.get_check_state()
+        if len(channels) == 0:
+            em_data = self.data_manager.get(key)
+            if em_data is None:
+                return
+            channels = [(em_data, ch_name)]
+        self.open_compare_widget(channels)
+
+    def _open_rename_channel_dialog(self, key: int, ch_name: str) -> None:
+        em_data = self.data_manager.get(key)
+        if em_data is None:
+            return
+
+        dialog = RenameChannelDialog(em_data, ch_name, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_name = dialog.new_name()
+        if new_name == ch_name:
+            return
+
+        self._close_processor_windows_for(key)
+        try:
+            em_data.rename_channel(ch_name, new_name)
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "重命名失败", str(exc))
+            return
+        self.logger.info(
+            "Dataset #%s channel renamed: %s → %s", key, ch_name, new_name,
+        )
+        self.data_manager.notify_changed(key, structural=True)
+
+    def _confirm_delete_channel(self, key: int, ch_name: str) -> None:
+        em_data = self.data_manager.get(key)
+        if em_data is None:
+            return
+        if em_data.NCh <= 1:
+            QMessageBox.warning(self, "删除通道", "不能删除最后一个通道。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "删除通道",
+            f"从数据集「{em_data.name}」中删除通道 {ch_name!r}？\n"
+            "此操作就地修改且不可撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._close_processor_windows_for(key)
+        try:
+            em_data.remove_channel(ch_name)
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+        self.logger.info("Dataset #%s channel deleted: %s", key, ch_name)
+        self.data_manager.notify_changed(key, structural=True)
 
     def get_check_state(self) -> list[tuple[EMData, str]]:
         refs = self.model.checked_channel_refs()

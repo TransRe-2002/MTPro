@@ -212,6 +212,7 @@ class MainWindow(QMainWindow):
         self.data_manager.data_added.connect(self.on_data_added)
         self.data_manager.active_changed.connect(self.on_activate_changed)
         self.data_manager.data_removed.connect(self.on_data_removed)
+        self.data_manager.data_changed.connect(self.on_data_changed)
 
         self.setCentralWidget(self.central_stack)
         self.central_stack.setCurrentWidget(self.welcome)
@@ -1017,6 +1018,51 @@ class MainWindow(QMainWindow):
         if viewer is not None:
             viewer.on_change_data_finished(channel)
         self.logger.info("Data updated: dataset #%s, channel %s", data_id, channel)
+
+    def on_data_changed(self, data_id: int, structural: bool) -> None:
+        """就地预处理结果路由。
+
+        structural=False：仅元数据变化 → 刷新树摘要与状态栏。
+        structural=True ：npts/dt/通道集变化 → 活跃数据集走
+        「快照现场 → 销毁 → 重建」的 active-only 重建路径；
+        非活跃数据集丢弃旧现场快照，下次激活时干净重建。
+        （DataTreeModel 自身已监听 data_changed 刷新行。）
+        """
+        em_data = self.data_manager.get(data_id)
+        if em_data is None:
+            return
+
+        if data_id == self.activate_id:
+            self.data_tree_viewer.on_active_changed(data_id)
+            self.dataset_status_label.setText(
+                f"当前数据: #{data_id} | {em_data.name} | 样点: {em_data.npts}"
+            )
+
+        if not structural:
+            self.logger.info("Dataset #%s metadata updated", data_id)
+            return
+
+        viewer = self.data_viewers.get(data_id)
+        if viewer is None:
+            self.viewer_state.pop(data_id, None)
+            self.logger.info(
+                "Dataset #%s restructured; viewer rebuild deferred", data_id,
+            )
+            return
+
+        if self._viewer_build_progress is not None:
+            self._viewer_build_progress.close()
+            self._viewer_build_progress = None
+
+        self.viewer_state[data_id] = viewer.capture_view_state()
+        self._destroy_data_viewer(data_id)
+        new_viewer = self._ensure_data_viewer(data_id)
+        if new_viewer is not None:
+            self.data_view_stack.setCurrentWidget(new_viewer)
+
+        # 通道集可能已变：同步数据处理页上下文
+        self.data_process_widget.init_data(em_data, data_id)
+        self.logger.info("Dataset #%s restructured; viewer rebuilt", data_id)
 
     def on_data_removed(self, key: int):
         viewer = self.data_viewers.pop(key, None)

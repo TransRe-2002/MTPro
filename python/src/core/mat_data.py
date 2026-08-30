@@ -235,6 +235,30 @@ class MatEMData(EMData):
         except ValueError:
             self._try_set(ts, 'nch', np.array([[self.NCh]]))
 
+        # ── 台站元数据与通道信息同步 ─────────────────────────
+        # 写回布局与 __init__ 的读取表达式镜像：字段是 (1,1) object
+        # cell，ts[field][0,0] 放值数组。
+        self._try_set(ts, 'name', np.array([self.name]))
+        if self.latitude is not None and not np.isnan(self.latitude):
+            self._try_set(ts, 'latitude', np.array([[float(self.latitude)]]))
+        if self.longitude is not None and not np.isnan(self.longitude):
+            self._try_set(ts, 'longitude', np.array([[float(self.longitude)]]))
+        if self.elevation is not None:
+            self._try_set(ts, 'elevation', np.array([float(self.elevation)]))
+
+        def _cell_row(values: list[str]) -> np.ndarray:
+            # MATLAB 1×N cell 行：每个元素是含字符串的 (1,) char 数组，
+            # 与 loadmat 读回的布局一致（chid[i][0] / units.flat[i][0]）
+            arr = np.empty((1, len(values)), dtype=object)
+            for i, v in enumerate(values):
+                arr[0, i] = np.array([str(v)])
+            return arr
+
+        self._try_set(ts, 'chid', _cell_row(self.channel_names()))
+        units = [u for u in (self.m_units, self.e_units) if u]
+        if units:
+            self._try_set(ts, 'units', _cell_row(units))
+
     @staticmethod
     def _try_set(ts, field: str, value):
         try:

@@ -22,9 +22,15 @@ class DataTreeModel(QAbstractItemModel):
             key: row for row, key in enumerate(self._keys)
         }
         self._checked_channels: Dict[int, Set[str]] = {}
+        # 通道行实时派生自 em_data.chid（无缓存），但行增删通知需要
+        # 变更前的行数——这里记录每个数据集的通道数快照
+        self._channel_counts: Dict[int, int] = {
+            key: self._dataset_channel_count(key) for key in self._keys
+        }
 
         self.data_manager.data_added.connect(self.on_data_added)
         self.data_manager.data_removed.connect(self.on_data_removed)
+        self.data_manager.data_changed.connect(self._on_data_changed)
 
     def columnCount(self, parent=QModelIndex()) -> int:
         return 1
@@ -265,6 +271,7 @@ class DataTreeModel(QAbstractItemModel):
         self._keys.append(key)
         self._row_by_key[key] = row
         self.endInsertRows()
+        self._channel_counts[key] = self._dataset_channel_count(key)
 
     def on_data_removed(self, key: int):
         row = self._row_by_key.get(key)
@@ -277,7 +284,44 @@ class DataTreeModel(QAbstractItemModel):
 
         self._row_by_key.pop(key, None)
         self._checked_channels.pop(key, None)
+        self._channel_counts.pop(key, None)
         self._reindex_rows(start=row)
+
+    def _on_data_changed(self, key: int, structural: bool):
+        del structural  # 两种变更都需要刷新数据集行与通道行
+        self.on_dataset_changed(key)
+
+    def on_dataset_changed(self, key: int) -> None:
+        """数据集被就地修改（预处理）后刷新对应行。
+
+        通道行实时派生自 em_data.chid，本方法按变更前的行数快照
+        发出行增删通知，并刷新数据集行本身（名称可能已改）。
+        """
+        row = self._row_by_key.get(key)
+        if row is None:
+            return
+        parent = self.index(row, 0)
+        if not parent.isValid():
+            return
+
+        new_count = self._dataset_channel_count(key)
+        old_count = self._channel_counts.get(key, new_count)
+
+        if old_count > 0:
+            self.beginRemoveRows(parent, 0, old_count - 1)
+            self.endRemoveRows()
+        if new_count > 0:
+            self.beginInsertRows(parent, 0, new_count - 1)
+            self.endInsertRows()
+        self._channel_counts[key] = new_count
+
+        self.dataChanged.emit(parent, parent, [Qt.ItemDataRole.DisplayRole])
+
+    def _dataset_channel_count(self, key: int) -> int:
+        em_data = self.data_manager.get(key)
+        if em_data is None:
+            return 0
+        return len(self._channel_names(em_data))
 
     def _reindex_rows(self, start: int = 0):
         for row in range(start, len(self._keys)):

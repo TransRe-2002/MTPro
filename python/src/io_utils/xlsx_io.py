@@ -21,6 +21,9 @@ import pytz
 from core.xlsx_data import XlsxEMData
 from io_utils.em_io import EMDataLoader
 from utils.concurrency import io_pool
+# 阈值与点数格式化已提升至 utils.limits（降采样对话框共用）；
+# 此处 import 兼作 re-export，现有 `from io_utils.xlsx_io import ...` 不受影响。
+from utils.limits import MAX_POINTS_PER_CHANNEL, format_points  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +57,6 @@ INTERPOLATION_METHODS = {
     INTERP_NEAREST: "最近邻",
 }
 
-# 单通道点数建议上限：超过后波形浏览（即便有 LOD 降采样）与
-# 处理工具（全序列拷贝、逐窗拟合）的内存/时间开销都会明显上升。
-MAX_POINTS_PER_CHANNEL = 5_000_000
-
-
 def estimate_channel_points(range_seconds: float, dt_sec: float) -> int:
     """估计给定时间跨度与采样周期下的单通道点数（含首尾两端）。"""
     if range_seconds <= 0 or dt_sec <= 0:
@@ -81,14 +79,6 @@ def recommend_min_dt(
     magnitude = 10.0 ** math.floor(math.log10(raw))
     return math.ceil(raw / magnitude * 10.0) * magnitude / 10.0
 
-
-def format_points(n: int) -> str:
-    """点数的中文紧凑显示：1576.8万 / 1.58亿 / 9,999。"""
-    if n >= 100_000_000:
-        return f"{n / 1e8:.2f}亿"
-    if n >= 10_000:
-        return f"{n / 1e4:.1f}万"
-    return f"{n:,}"
 
 _INLINE_A_CELL_RE = re.compile(
     rb'<c\s+[^>]*r="A\d+"[^>]*>.*?<t[^>]*>(.*?)</t>.*?</c>',

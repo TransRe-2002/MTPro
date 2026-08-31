@@ -18,7 +18,7 @@ from PySide6.QtGui import QFont, QMouseEvent, QDrag, QPixmap, QPainter, QColor
 
 from ui.brief_plot import BriefPlot
 from utils.time_convert import pts_to_qdt, qdt_to_pts
-from utils.series import dti_to_numpy
+from utils.series import dti_to_numpy, safe_nanmean
 from utils.decimate import LODPyramid, PYRAMID_MAX_FINEST_POINTS
 from utils.qt_bridge import run as run_in_pool
 from utils.signals import block_signals
@@ -716,8 +716,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
     @staticmethod
     def _build_channel_pyramid(x_vals: np.ndarray, values: np.ndarray) -> LODPyramid:
         """去均值后构建单通道金字塔（纯 numpy/Rust，可在池线程执行）。"""
-        with np.errstate(all='ignore'):
-            mean = np.nanmean(values)
+        mean = safe_nanmean(values)
         y_vals = np.asarray(values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
         return LODPyramid(x_vals, y_vals, max_finest_points=PYRAMID_MAX_FINEST_POINTS)
 
@@ -884,8 +883,7 @@ class DataViewWidget(TimeViewportMixin, QWidget):
 
         ch_series = self.em_data.get_channel_series(channel)
         widget = self.plot_rows[channel].widget
-        with np.errstate(all='ignore'):
-            mean = np.nanmean(ch_series.values)
+        mean = safe_nanmean(ch_series.values)
         y_vals = np.asarray(ch_series.values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
         # 通道数据变了：重建该通道的 LOD 金字塔，并以当前视口数据重画
         pyramid = LODPyramid(x_vals, y_vals)

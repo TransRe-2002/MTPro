@@ -155,6 +155,25 @@ def test_decimate_dialog_accepts_valid_factor():
     dlg.close()
 
 
+def test_decimate_dialog_preview_shows_limit_hint(monkeypatch):
+    """预览应标注与建议上限（与 xlsx 导入共用）的比较及建议因子。"""
+    _app()
+    import ui.dialogs.decimate_dialog as dd
+
+    monkeypatch.setattr(dd, "MAX_POINTS_PER_CHANNEL", 30)
+    dlg = DecimateDialog(DemoData(100))
+
+    dlg._factor_spin.setValue(2)  # 100 → 50 点 > 30：超限 + 建议因子 ceil(99/29)=4
+    preview = dlg._preview_label.text()
+    assert "仍高于建议上限" in preview
+    assert "≥ 4" in preview
+
+    dlg._factor_spin.setValue(4)  # 100 → 25 点 ≤ 30：达标
+    preview = dlg._preview_label.text()
+    assert "低于建议上限" in preview
+    dlg.close()
+
+
 # ── TrimDialog ────────────────────────────────────────────────
 
 

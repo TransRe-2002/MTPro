@@ -637,7 +637,8 @@ class XlsxSamplingPage(QWizardPage):
                 f"<br><span style='color:#8a5a00;'>⚠ 超过建议上限 "
                 f"{format_points(MAX_POINTS_PER_CHANNEL)} 点/通道：内存占用与处理耗时"
                 f"会明显上升。若要压到上限以内，建议 dt ≥ {worst_recommend:g} s"
-                f"（在「目标采样周期」选手动设置）。</span>"
+                f"（在「目标采样周期」选手动设置），"
+                f"也可先按原样导入、之后在数据树上右键「数据降采样」。</span>"
             )
         self._dt_estimate_label.setText(text)
 
@@ -752,7 +753,8 @@ class XlsxConfirmPage(QWizardPage):
                 "<p style='color:#8a5a00;'>⚠ 有前缀组单通道点数超过建议上限 "
                 f"{format_points(MAX_POINTS_PER_CHANNEL)}：导入可以继续，但大数据集"
                 f"会占用更多内存、处理更慢。若只是浏览，建议返回上一步手动设置 "
-                f"dt ≥ {worst_recommend:g} s。</p>"
+                f"dt ≥ {worst_recommend:g} s，或导入后在数据树上右键"
+                f"「数据降采样」缩小数据量。</p>"
             )
         self._summary_label.setText(
             "<table cellpadding='3' cellspacing='0'>"

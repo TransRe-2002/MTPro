@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.em_data import EMData
+from utils.limits import MAX_POINTS_PER_CHANNEL, format_points, suggested_decimate_factor
 from utils.signal_decimate import decimated_length
 
 
@@ -143,11 +144,25 @@ class DecimateDialog(QDialog):
         old_mb = em.NCh * em.npts * 8 / 1e6
         new_mb = em.NCh * new_npts * 8 / 1e6
 
+        # 与 xlsx 导入共用同一经验上限（utils.limits），互通判断口径
+        if new_npts > MAX_POINTS_PER_CHANNEL:
+            suggest = suggested_decimate_factor(em.npts, MAX_POINTS_PER_CHANNEL)
+            limit_line = (
+                f"⚠ 降采样后仍高于建议上限 "
+                f"{format_points(MAX_POINTS_PER_CHANNEL)} 点/通道"
+                f"（内存与处理开销偏大），建议因子 ≥ {suggest}"
+            )
+        else:
+            limit_line = (
+                f"✓ 低于建议上限 {format_points(MAX_POINTS_PER_CHANNEL)} 点/通道"
+            )
+
         self._preview_label.setText(
             f"降采样后：采样周期 {new_dt.total_seconds():g}s "
             f"({format_sample_rate(new_dt)})，"
             f"{new_npts} 点，时长 {format_duration(duration)}\n"
-            f"数据内存估计：{old_mb:.0f} MB → {new_mb:.0f} MB"
+            f"数据内存估计：{old_mb:.0f} MB → {new_mb:.0f} MB\n"
+            f"{limit_line}"
         )
         self._error_label.hide()
 

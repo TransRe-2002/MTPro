@@ -378,7 +378,7 @@ class DataProcessLegacyWidget(QWidget):
 
         # ── Phase 2: 线程池并行修改 + 预计算显示数据 ────
         from processor._display_utils import decimate_for_display
-        from utils.series import dti_to_numpy
+        from utils.series import dti_to_numpy, safe_nanmean
 
         def _modify(task):
             data_id, em_data, intervals = task
@@ -391,8 +391,7 @@ class DataProcessLegacyWidget(QWidget):
                 em_data.set_channel_series(ch, pd.Series(
                     vals, index=em_data.get_channel_series(ch).index, name=ch,
                 ))
-                with np.errstate(all='ignore'):
-                    m = np.nanmean(vals)
+                m = safe_nanmean(vals)
                 dy = vals - (m if np.isfinite(m) else 0.0)
                 dx, dy_d = decimate_for_display(x, dy)
                 display[ch] = (dx, dy_d)

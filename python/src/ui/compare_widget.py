@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from base.time_viewport_mixin import TimeViewportMixin
 from core.em_data import EMData
 from ui.brief_plot import BriefPlot
-from utils.series import dti_to_numpy
+from utils.series import dti_to_numpy, safe_nanmean
 from utils.decimate import LODPyramid, PYRAMID_MAX_FINEST_POINTS
 from utils.qt_bridge import run as run_in_pool
 from utils.time_convert import pts_to_qdt, qdt_to_pts
@@ -220,8 +220,7 @@ class CompareWidget(TimeViewportMixin, QWidget):
             # 去均值以对齐不同通道的基准线，再建金字塔（纯 numpy/Rust，可在池线程执行）
             pyramids: dict[str, LODPyramid] = {}
             for label, x, values in entries:
-                with np.errstate(all='ignore'):
-                    mean = np.nanmean(values)
+                mean = safe_nanmean(values)
                 y = np.asarray(values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
                 pyramids[label] = LODPyramid(x, y, max_finest_points=PYRAMID_MAX_FINEST_POINTS)
             return pyramids

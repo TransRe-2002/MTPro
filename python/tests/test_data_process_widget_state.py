@@ -114,6 +114,43 @@ def test_data_process_creates_a_new_pipeline_mdi_subwindow(qtbot):
     widget.close()
 
 
+def test_pipeline_can_hide_and_restore_a_channel_without_removing_its_blocks(qtbot):
+    _app()
+    manager = DataManager()
+    data = DemoData("demo", ["Ex1", "Hy1"])
+    key = manager.add(data)
+    pipeline_widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(pipeline_widget)
+    pipeline_widget.add_channels([(key, "Ex1"), (key, "Hy1")])
+
+    hidden_pipeline = pipeline_widget._find_pipeline(key, "Hy1")
+    assert hidden_pipeline is not None
+    hidden_block = PipelineBlock(tool_id="remove_spike", start=0, end=3)
+    hidden_pipeline.layers[0].blocks.append(hidden_block)
+
+    pipeline_widget._set_channel_visible((key, "Hy1"), False)
+
+    assert pipeline_widget.channel_refs() == [(key, "Ex1"), (key, "Hy1")]
+    assert pipeline_widget.visible_channel_refs() == [(key, "Ex1")]
+    assert [lane.pipeline.ref for lane in pipeline_widget._lane_widgets] == [(key, "Ex1")]
+    assert hidden_pipeline.layers[0].blocks == [hidden_block]
+    assert [action.text() for action in pipeline_widget.channel_visibility_menu.actions()] == [
+        f"#{key} Ex1",
+        f"#{key} Hy1",
+    ]
+    assert not pipeline_widget.channel_visibility_menu.actions()[1].isChecked()
+
+    pipeline_widget._set_channel_visible((key, "Hy1"), True)
+
+    assert pipeline_widget.visible_channel_refs() == [(key, "Ex1"), (key, "Hy1")]
+    assert [lane.pipeline.ref for lane in pipeline_widget._lane_widgets] == [
+        (key, "Ex1"),
+        (key, "Hy1"),
+    ]
+    assert hidden_pipeline.layers[0].blocks == [hidden_block]
+    pipeline_widget.close()
+
+
 def test_data_tree_drag_payload_uses_checked_channels_and_dataset_drag(qtbot):
     _app()
     manager = DataManager()

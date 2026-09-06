@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QFont,
     QPainter,
@@ -34,10 +35,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSlider,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -969,6 +972,7 @@ class DataProcessPipelineWidget(QWidget):
         self.data_id = 0
         self.em_data: Optional[EMData] = None
         self._channel_refs: list[tuple[int, str]] = []
+        self._hidden_channel_refs: set[tuple[int, str]] = set()
         self.selected_block_id: str = ""
         self.pipelines: list[ChannelPipeline] = []
         self._lane_widgets: list[ChannelPipelineWidget] = []
@@ -1028,6 +1032,14 @@ class DataProcessPipelineWidget(QWidget):
         self.overview_baseline_checkbox.setChecked(self._overview_baseline_visible)
         self.overview_baseline_checkbox.toggled.connect(self._on_overview_baseline_toggled)
         toolbar_layout.addWidget(self.overview_baseline_checkbox)
+
+        self.channel_visibility_button = QToolButton(toolbar)
+        self.channel_visibility_button.setText("通道")
+        self.channel_visibility_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.channel_visibility_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.channel_visibility_menu = QMenu(self.channel_visibility_button)
+        self.channel_visibility_button.setMenu(self.channel_visibility_menu)
+        toolbar_layout.addWidget(self.channel_visibility_button)
 
         toolbar_layout.addWidget(QLabel("grid"))
         self.grid_spin = QSpinBox(toolbar)
@@ -1136,6 +1148,9 @@ class DataProcessPipelineWidget(QWidget):
     def channel_refs(self) -> list[tuple[int, str]]:
         return list(self._channel_refs)
 
+    def visible_channel_refs(self) -> list[tuple[int, str]]:
+        return [ref for ref in self._channel_refs if ref not in self._hidden_channel_refs]
+
     def window_title(self) -> str:
         if not self._channel_refs:
             return "Pipeline Editor"
@@ -1172,6 +1187,7 @@ class DataProcessPipelineWidget(QWidget):
                 pipeline.baseline_snapshot = self._snapshot_for_channel(data_id, channel_name)
             synced.append(pipeline)
         self.pipelines = synced
+        self._hidden_channel_refs.intersection_update(channel_refs)
 
     def _data_for(self, data_id: int) -> Optional[EMData]:
         if self.data_manager is not None:
@@ -1293,8 +1309,19 @@ class DataProcessPipelineWidget(QWidget):
 
         self._lane_widgets.clear()
         self._ruler_widget = None
+        self._refresh_channel_visibility_menu()
         if not self.pipelines:
             placeholder = QLabel("拖动一个或多个 channel 到工作区后开始构建 pipeline。", self.scroll_content)
+            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            placeholder.setMargin(24)
+            self.scroll_layout.insertWidget(0, placeholder)
+            return
+
+        visible_pipelines = [
+            pipeline for pipeline in self.pipelines if pipeline.ref not in self._hidden_channel_refs
+        ]
+        if not visible_pipelines:
+            placeholder = QLabel("所有通道均已隐藏；使用工具栏“通道”菜单重新显示。", self.scroll_content)
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             placeholder.setMargin(24)
             self.scroll_layout.insertWidget(0, placeholder)
@@ -1316,7 +1343,7 @@ class DataProcessPipelineWidget(QWidget):
         ruler_layout.addWidget(self._ruler_widget, 1)
         self.scroll_layout.insertWidget(0, ruler_row)
 
-        for pipeline in self.pipelines:
+        for pipeline in visible_pipelines:
             data_len = self._pipeline_data_len(pipeline)
             lane = ChannelPipelineWidget(
                 pipeline,
@@ -1338,6 +1365,40 @@ class DataProcessPipelineWidget(QWidget):
             lane.block_geometry_changed.connect(self._on_block_geometry_changed)
             self._lane_widgets.append(lane)
             self.scroll_layout.insertWidget(self.scroll_layout.count() - 1, lane)
+
+    def _refresh_channel_visibility_menu(self) -> None:
+        self.channel_visibility_menu.clear()
+        visible_count = 0
+        for ref in self._channel_refs:
+            data_id, channel_name = ref
+            action = QAction(f"#{data_id} {channel_name}", self.channel_visibility_menu)
+            action.setCheckable(True)
+            is_visible = ref not in self._hidden_channel_refs
+            action.setChecked(is_visible)
+            action.toggled.connect(
+                lambda checked, channel_ref=ref: self._set_channel_visible(channel_ref, checked)
+            )
+            self.channel_visibility_menu.addAction(action)
+            visible_count += int(is_visible)
+
+        self.channel_visibility_button.setEnabled(bool(self._channel_refs))
+        self.channel_visibility_button.setText(
+            f"通道 ({visible_count}/{len(self._channel_refs)})"
+        )
+
+    def _set_channel_visible(self, channel_ref: tuple[int, str], visible: bool) -> None:
+        if channel_ref not in self._channel_refs:
+            return
+        if visible:
+            self._hidden_channel_refs.discard(channel_ref)
+        else:
+            self._hidden_channel_refs.add(channel_ref)
+
+        found = self._find_block(self.selected_block_id)
+        if found is not None and found[0].ref == channel_ref:
+            self.selected_block_id = ""
+        self._rebuild_lanes()
+        self._refresh_selection()
 
     def _on_zoom_changed(self, value: int):
         self._zoom = float(value)

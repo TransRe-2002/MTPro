@@ -15,9 +15,9 @@ from base.data_manager import DataManager
 from core.em_data import EMData
 from core.pipeline_model import PipelineBlock
 from ui.data_process_shared import (
-    CLASSIC_TOOL_MIME,
+    PROCESSING_TOOL_MIME,
     PIPELINE_TOOL_MIME,
-    create_classic_tool_model,
+    create_processing_tool_model,
 )
 from ui.data_tree_view import ToolTreeView
 from ui.data_process_pipeline import DataProcessPipelineWidget, pipeline_tool_id_from_mime
@@ -57,7 +57,7 @@ def _app() -> QApplication:
 
 def test_pipeline_accepts_shared_processing_tool_drag_mime():
     shared_mime = QMimeData()
-    shared_mime.setData(CLASSIC_TOOL_MIME, QByteArray(b"remove step diff"))
+    shared_mime.setData(PROCESSING_TOOL_MIME, QByteArray(b"remove step diff"))
     assert pipeline_tool_id_from_mime(shared_mime) == "remove step diff"
 
     pipeline_mime = QMimeData()
@@ -81,14 +81,14 @@ def test_shared_processing_tool_tree_emits_pipeline_drag_mime(monkeypatch):
 
     monkeypatch.setattr("ui.data_tree_view.QDrag", _Drag)
     tree = ToolTreeView()
-    model = create_classic_tool_model()
+    model = create_processing_tool_model()
     tree.setModel(model)
     tree.setCurrentIndex(model.item(0).child(0).index())
 
     tree.startDrag(Qt.DropAction.CopyAction)
 
     mime_data = captured["mime_data"]
-    assert mime_data.hasFormat(CLASSIC_TOOL_MIME)
+    assert mime_data.hasFormat(PROCESSING_TOOL_MIME)
     assert mime_data.hasFormat(PIPELINE_TOOL_MIME)
     assert pipeline_tool_id_from_mime(mime_data) == "remove region"
     tree.deleteLater()
@@ -105,7 +105,7 @@ def test_pipeline_track_adds_block_from_shared_processing_tool_drag(qtbot):
     track = widget._lane_widgets[0]._tracks[0]
 
     mime_data = QMimeData()
-    mime_data.setData(CLASSIC_TOOL_MIME, QByteArray(b"remove step diff"))
+    mime_data.setData(PROCESSING_TOOL_MIME, QByteArray(b"remove step diff"))
     enter_event = QDragEnterEvent(
         QPoint(12, 8),
         Qt.DropAction.CopyAction,

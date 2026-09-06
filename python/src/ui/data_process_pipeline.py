@@ -53,7 +53,7 @@ from core.pipeline_model import (
 from core.recipe import recipe_from_pipeline, save_recipe
 from plugin_api import ChannelBlock, ChannelMeta
 from ui.plugin_adapter import PluginParamDialog, run_plugin_process
-from ui.data_process_shared import CLASSIC_TOOL_MIME, PIPELINE_TOOL_MIME
+from ui.data_process_shared import PROCESSING_TOOL_MIME, PIPELINE_TOOL_MIME
 from ui.tools import registry as tool_registry
 from utils.decimate import LODPyramid, PYRAMID_MAX_FINEST_POINTS
 from utils.qt_bridge import run as run_in_pool
@@ -199,8 +199,8 @@ class _PluginTaskBridge(QObject):
 
 
 def pipeline_tool_id_from_mime(mime_data) -> Optional[str]:
-    """Read a tool id from either the shared or legacy Pipeline drag MIME."""
-    for mime_type in (PIPELINE_TOOL_MIME, CLASSIC_TOOL_MIME):
+    """Read a tool id from the shared processing or Pipeline drag MIME."""
+    for mime_type in (PIPELINE_TOOL_MIME, PROCESSING_TOOL_MIME):
         if not mime_data.hasFormat(mime_type):
             continue
         try:
@@ -1760,7 +1760,7 @@ class DataProcessPipelineWidget(QWidget):
         """Stage synchronized blocks without writing any EMData channel.
 
         A Pipeline confirmation persists only a block definition.  In
-        particular, an editor's old Classic ``channel_sync`` signal must not
+        particular, an editor's direct ``channel_sync`` signal must not
         turn into an immediate NaN write here: every target receives its own
         block, cache, and preview computation instead.
         """

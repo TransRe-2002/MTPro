@@ -54,11 +54,11 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 
 ---
 
-## base 包 — 注册表与中介
+## base 包 — 注册表与运行时
 
 ### `plugin_loader.py` / `plugin_runtime.py`
 - 插件按一方插件、`mtpro.plugins` entry point、`MTPRO_PLUGIN_PATH`、用户扫描路径、默认目录的顺序加载；目录和 zip 都支持，单个插件失败只进入 `LoadReport.failed`。
-- `plugin_runtime.run_plugin_process` 补齐默认参数并强制检查 `TransformResult` 与输入同长度、同 index，供 Classic、Pipeline 和批处理共用。
+- `plugin_runtime.run_plugin_process` 补齐默认参数并强制检查 `TransformResult` 与输入同长度、同 index，供 Pipeline 和批处理共用。
 
 ### `batch_runner.py`
 - `BatchRunner` 对目标间并行、目标内按 recipe step 串行；单目标失败隔离。带点索引的步骤遇到采样间隔不一致时跳过并写诊断。
@@ -69,14 +69,10 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 - API：`add(data)->key`、`remove(key)`、`get(key)`、`items()`、`set_active(key)`、`active_id()`、`active_data()`。
 - **key=0 表示"无活跃数据"**，`get(0)` 永远返回 `None`。`remove` 当前活跃项时自动 `set_active(0)`。`set_active` 相同 key 不发信号。
 
-### `processing_broker.py` `ProcessingBroker(QObject)`
-- 数据处理工具与 `DataManager` 的中介，跑在后台 `QThread`，统一读写。
-- `StationMetadata(name, latitude, longitude, elevation)` (frozen dataclass)。
-- 信号：`data_ready(int, str, object)` / `result_applied(int, str)` / `data_changed(int, str, object)`。
-- `request_data(data_id, channel)`：`channel==""` 返回台站级包（含 `stations` 列表 + 全通道 `all_y` + `StationMetadata`）；否则单通道 `{x, y, channel_names, all_y, npts, start_time, dt, kp_data}`。`x` 经 `dti_to_numpy` 转 float 秒数组。
-- `apply_result`：长度匹配用原 index 写 Series，否则 `set_channel_data`；发 `result_applied` + `data_changed`。
-- `apply_result_all_channels`：跨通道同步 NaN 位置（mask 与 result 的 NaN 一致），逐通道发 `data_changed`。
-- `apply_region_to_all`：`RemoveRegion` 跨数据集同步；接收 `time_ranges` 列表，对每个数据集按自身 `start_time/dt` 计算索引区间置 NaN，**用绝对时间戳而非点索引**，跨数据集健壮。`QMutexLocker` 保护。
+### `core/station_metadata.py` / `output_tools/station_data.py`
+- `StationMetadata(name, latitude, longitude, elevation)` 是阻抗输出工具共享的冻结数据类。
+- `station_data_package(data_manager, data_id)` 为 Robust 估计和远参考法构造只读台站包：全通道 `all_y`、时间索引、台站列表与位置元数据。
+- 站级输出不经过数据处理线程，也不写回 `EMData`；单通道变换只在 Pipeline 的 preview/commit 生命周期内写回。
 
 ### `time_viewport_mixin.py` `TimeViewportMixin`
 - 波形浏览器的视口状态管理混入，提供 x 轴视口与 Qt 控件双向同步。
@@ -172,7 +168,7 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 ## ui 包 — 用户界面
 
 ### 插件宿主
-- `plugin_adapter.py`：自动参数对话框、Classic 接线壳与 compute-pool 执行桥；插件 Editor 只提交 JSON 参数，数据统一由 `process()` 产生。
+- `plugin_adapter.py`：自动参数对话框、切片编辑器与 compute-pool 执行桥；插件 Editor 只提交 JSON 参数，数据统一由 `process()` 产生。
 - `plugin_manager_dialog.py`：展示加载成功/失败、管理扫描路径、安装本地目录或 zip、重新扫描。
 - `batch_process_dialog.py`：加载 recipe，勾选多个已打开通道，执行后把成功结果写回内存数据集。
 - `plugins/`：按功能拆分的插件包（7 个单通道变换插件及 `output/` 下的输出工具）；`builtin_plugins/` 仅作为内置实现集合被加载器引用。
@@ -207,16 +203,12 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 - `shutdown`/`closeEvent` 安全退出所有工作线程。
 
 ### `data_process.py` — 数据处理面板
-- Classic/Pipeline 模式切换 + MDI。**`PIPELINE_ENABLED = True`**；pipeline block 通过插件 `process()` 异步执行并可导出 recipe。
-- `DataProcessLegacyWidget`：Classic 宿主，管理 MDI 子窗口 + `ProcessingBroker`。`open_tool_window` 实例化具体 processor 并 `_wire_tool` 接到 broker。
-- `WorkspaceMdiArea`：单工作区 MDI，拖放 classic 工具（`CLASSIC_TOOL_MIME`）或 pipeline 通道（`DATA_TREE_SELECTION_MIME`，JSON payload）。
+- 单一 Pipeline 工作区 + MDI；活动数据和新工作区都会建立全通道 Pipeline，block 通过插件 `process()` 异步执行并可导出 recipe。
+- `WorkspaceMdiArea`：单工作区 MDI，接受处理工具（`PROCESSING_TOOL_MIME`）和通道选择（`DATA_TREE_SELECTION_MIME`，JSON payload）的拖放。
 - `WorkspaceTabPanel`：多工作区 tab，末尾常驻"+"tab 新建工作区。
-- 信号链：`broker.data_changed → on_change_data_finished_for`；`broker.result_applied → _on_tool_result_applied`；`tool.data_requested → broker.request_data`；`tool.result_submitted → broker.apply_result`。
-- `_canonical_tool_type`："remove step"→"remove step diff"，"remove pulse wavelet"→"remove wavelet denoise"。
-- 工具窗口去重：相同 (tool_key, data_id, channel_name) 复用。
-- `RemoveRegion` 的 `region_sync_requested → _on_region_sync`：ThreadPoolExecutor 并行把时间段置 NaN 到其他数据集，预计算 decimate 显示数据，主线程直接 setData。
+- `open_tool_for()` 定位目标通道并添加 block；只选择 block，不直接修改 `EMData`。
 
-### `data_process_pipeline.py` — Pipeline 编辑器（当前禁用）
+### `data_process_pipeline.py` — Pipeline 编辑器
 - 通道级 pipeline 编辑器：每通道一条带多层 step 轨道的可视化编辑器，可放置/拖动/调整 block，双击编辑，preview/commit 串联结果。
 - 数据类：`PipelineBlock`(block_id/tool_id/start/end/params/status/input_snapshot/output_snapshot)、`PipelineLayer`、`ChannelPipeline`。
 - `SnapEngine`：网格吸附 + 邻接 block 边吸附（阈值 8px）。
@@ -227,14 +219,17 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 - commit：把 preview snapshot 写回 `data.set_channel_series`，烘焙进 baseline。
 
 ### `data_process_shared.py`
-- 拖放 MIME 常量：`DATA_TREE_SELECTION_MIME` / `CLASSIC_TOOL_MIME` / `PIPELINE_TOOL_MIME`。
-- `create_classic_tool_model()`：三级工具树——手动数据处理（框选区域/框选尖峰/差分去阶跃）、自动数据处理（窗口均值/鲁棒基线/小波多尺度/正弦相减去日变）、阻抗输出（Robust估计/远参考法）。
+- 拖放 MIME 常量：`DATA_TREE_SELECTION_MIME` / `PROCESSING_TOOL_MIME` / `PIPELINE_TOOL_MIME`。
+- `create_processing_tool_model()`：两级处理工具树——手动数据处理（框选区域/框选尖峰/差分去阶跃）和自动数据处理（含 EMD、VMD、SV、滤波与去阶跃）。
+
+### `station_output_host.py` / `impedance_output.py`
+- `StationOutputHost` 只承载 Robust 估计和远参考法两个站级输出窗口；它同步提供只读台站数据包，不启动处理 broker。
 
 ### `data_tree_view.py` `DataTreeViewer(QWidget)`
 - 左侧面板：数据集/通道树 + 台站摘要/处理工具列表（按 tab 切换），支持拖放、右键菜单、双击打开单通道图、序列对比。
 - 信号 `tool_requested(str)`。
 - `DataSelectionTreeView`：拖出 `DATA_TREE_SELECTION_MIME`（dataset → {kind,data_id}；channel → {kind:"channels", refs:[...]}，refs 取勾选或当前通道）。
-- `ToolTreeView`：拖出 `CLASSIC_TOOL_MIME`，载荷=tool_type 字符串。
+- `ToolTreeView`：拖出 `PROCESSING_TOOL_MIME` 与 `PIPELINE_TOOL_MIME`，载荷=tool_type 字符串。
 - 右键菜单：dataset 级=保存/另存为/关闭；channel 级=显示曲线/序列对比/编辑元数据（占位）。
 - 单通道 PlotPanel 缓存在 `_plot_panels[(key,ch)]`，重复双击复用；E 通道用 e_units，B/H 用 m_units 作 Y 轴标签。
 
@@ -303,7 +298,7 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 
 ### `_base_processor.py` `BaseProcessorWidget(QWidget)`
 - 所有处理器工具窗口基类，统一两段式数据初始化、撤销/还原/确认流程。
-- 信号 `data_requested(int, str)` / `result_submitted(int, str, object)`，工具不持有 `ProcessingBroker`，只通过信号通信。
+- 切片编辑器通过 `load_series()` 接收当前 block 的 `pd.Series`，确认后发 `result_signal(channel, ndarray)` 回到 Pipeline。
 - `wire_data_ready()` 连外部数据信号到 `_on_data_ready`。
 - `_on_data_ready`：检查 id/通道匹配，取 `pkg['x'/'y']`，`pd.Series.interpolate(method="linear")` 插值 NaN，缓存 `nan_index`，`origin_y_data` = 当前 y 副本。
 - `_save_history / _undo / _revert / _restore_nan / _confirm_and_close`：统一机制；`_confirm_and_close` 还原 NaN 位置后发 `result_submitted`。
@@ -507,7 +502,7 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 - **信号驱动数据流**：`DataManager` 信号 → `MainWindow` 槽 → viewer/processor 更新。
 - **xarray.Dataset 是规范内存存储**；`pd.Series(DatetimeIndex)` 是 `EMData` 与处理器之间的交换格式。
 - **Mixin 共享行为**：`TimeViewportMixin`(时间导航)、`RegionManagementMixin`(区域选择)。
-- **MIME 拖放**：工具选择 `CLASSIC_TOOL_MIME`，通道选择 `DATA_TREE_SELECTION_MIME`(JSON)，通道重排 `application/x-channel-reorder`，pipeline 工具 `PIPELINE_TOOL_MIME`。
+- **MIME 拖放**：工具选择 `PROCESSING_TOOL_MIME` / `PIPELINE_TOOL_MIME`，通道选择 `DATA_TREE_SELECTION_MIME`(JSON)，通道重排 `application/x-channel-reorder`。
 - **撤销/重做**：处理器维护 `list[np.ndarray]` 快照历史栈。
 - **LOD 金字塔**：百万点流畅浏览，Rust 加速降采样，Python 回退。
-- **后台线程**：每通道独立 QThread 绘图；`ProcessingBroker` 跑在独立 QThread；`RemoveRegion` 跨数据集同步用 ThreadPoolExecutor。
+- **后台线程**：每通道独立 QThread 绘图；插件执行使用共享 compute 池；跨数据集同步由 Pipeline 统一调度。

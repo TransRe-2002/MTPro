@@ -1,21 +1,13 @@
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 import numpy as np
 import pandas as pd
-from PySide6.QtWidgets import QApplication
 
 from base.plugin_runtime import run_plugin_process
 from core.algorithms.spike import detect_auto_spikes
 from plugin_api import ChannelBlock
-from plugins.auto_spike_filter.editor import AutoSpikeFilter
 from plugins.auto_spike_filter.plugin import AutoSpikeFilterPlugin
-from ui.data_process_shared import create_classic_tool_model
-from ui.plugin_adapter import create_classic_plugin_widget
-from ui.tools import registry
+from ui.data_process_shared import create_processing_tool_model
 
 
 def _baseline(size: int = 301) -> np.ndarray:
@@ -85,33 +77,8 @@ def test_auto_spike_plugin_preserves_index_existing_nans_and_recipe_params():
     assert result.diagnostics["removed"] == 1
 
 
-def test_auto_spike_classic_widget_previews_then_applies(qtbot):
-    QApplication.instance() or QApplication([])
-    widget = create_classic_plugin_widget(AutoSpikeFilterPlugin(), 7, "Ex")
-    assert isinstance(widget, AutoSpikeFilter)
-    assert registry.get("auto_spike_filter").kind == "interactive"
-    qtbot.addWidget(widget)
-
-    values = _baseline()
-    values[180] += 100.0
-    series = pd.Series(
-        values,
-        index=pd.date_range("2025-01-01", periods=values.size, freq="s", tz="Asia/Shanghai"),
-        name="Ex",
-    )
-    emitted: list[np.ndarray] = []
-    widget.result_submitted.connect(lambda _data_id, _channel, result: emitted.append(result))
-    widget.load_series("Ex", series)
-
-    qtbot.waitUntil(widget.apply_button.isEnabled, timeout=5000)
-    widget._apply_detection()
-
-    assert len(emitted) == 1
-    assert np.isnan(emitted[0][180])
-
-
-def test_auto_spike_filter_is_listed_in_classic_auto_tools():
-    model = create_classic_tool_model()
+def test_auto_spike_filter_is_listed_in_processing_tools():
+    model = create_processing_tool_model()
     auto_category = model.item(1)
     tool_ids = {
         auto_category.child(row).data()

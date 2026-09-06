@@ -10,31 +10,9 @@
 
 ## P0 · 未完成的真功能
 
-### 1. Pipeline 处理模式 —— 已建成但禁用，缺执行引擎与确定性重放
+### 1. Pipeline 处理工作区 —— 已完成
 
-**现状**：约 2000 行管线代码（`ui/data_process_pipeline.py` + `core/pipeline_model.py`：blocks/layers/快照引擎/preview/commit/交互式编辑器）与测试均已存在，但整个模式被功能开关屏蔽，界面不可达：
-
-- `ui/data_process.py:1006` `PIPELINE_ENABLED = False`；
-- 同文件 1057–1058 行按钮置灰，tooltip "Pipeline 功能暂时屏蔽"；1143–1144 行 `set_mode("pipeline")` 被强制钳回 classic；
-- git 历史 HEAD~2 即 `wip(pipeline): 管线快照模型重构（input_snapshot→input_slice）与处理器接入`，本身就是 WIP。
-
-**缺口 A — param block 从不执行**：
-
-- `PipelineParamDialog` 文案自认："这类 block 先保存参数，不直接执行。后续接入真实 processor 后再参与 preview/commit"（`data_process_pipeline.py:147-148`）；
-- preview 摘要打印 "param block 目前只保存参数，还不参与实际计算"（同文件 1875 行）；
-- block 状态字面量 `"param block waiting to run"`（1807 行）；
-- 目前 `kind="param"` 的工具只有 `robust_estimate` / `remote_reference`（`ui/tools/_registrations.py`），即 param block 今天是纯死配置。
-
-**缺口 B — interactive block 无法确定性重放**：
-
-- 只缓存编辑器产出的 ndarray 切片；上游一变 → `stale`，必须人工重开编辑器；
-- 提交对话框文案自认："interactive block 的缓存结果已经烘焙进 baseline，后续继续编辑需要重新打开对应 block"（1943 行）。
-
-**依赖提示**：插件框架（见 P1 第 3 项）的设计目标就是补这两个缺口（插件 `process()` = 执行引擎，"编辑器产出参数、process 消费参数" = 确定性重放）。**除非决定放弃插件化路线，否则不要为 Pipeline 单独实现执行引擎**，以免重复建设。
-
-**验证方法**：`grep -n "PIPELINE_ENABLED" python/src/ui/data_process.py`；在 `python/src` 内搜索上述三段中文文案。
-
----
+Pipeline 是唯一的数据处理界面：活动数据与新工作区自动建立全通道轨道，处理工具以 block 形式添加、预览并在 commit 时写回。后续功能应直接扩展 block 执行、配方和批处理，不再维护第二条单通道处理界面。
 
 ### 2. 数据库数据通路 —— 0%，且当前不可实例化
 

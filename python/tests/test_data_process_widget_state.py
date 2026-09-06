@@ -6,12 +6,10 @@ import xarray as xr
 from PySide6.QtCore import QByteArray, QMimeData, QPoint, Qt
 from PySide6.QtWidgets import QApplication, QLabel
 from unittest.mock import patch
-import pytest
 
 from base.data_manager import DataManager
 from core.em_data import EMData
-from processor.remove_diurnal_sinusoid import RemoveDiurnalSinusoid
-from ui.data_process import DataProcessLegacyWidget, DataProcessWidget, ToolWindowState, WorkspaceMdiArea
+from ui.data_process import DataProcessWidget, WorkspaceMdiArea
 from ui.data_process_shared import DATA_TREE_SELECTION_MIME
 from ui.data_process_pipeline import DataProcessPipelineWidget, PipelineBlock, TOOL_META
 from ui.data_tree_view import DataTreeViewer
@@ -53,204 +51,6 @@ def _app():
     return app
 
 
-@pytest.fixture(autouse=True)
-def _stop_broker_threads_after_each_test():
-    """每个测试结束后停掉所有 ProcessingBroker 的后台线程，避免
-    QThread 带运行销毁导致 Qt abort（跨用例/跨文件的崩溃根因）。"""
-    yield
-    app = QApplication.instance()
-    if app is not None:
-        app.aboutToQuit.emit()
-
-
-def test_data_process_widget_preserves_selected_channel_and_windows():
-    _app()
-    manager = DataManager()
-    data = DemoData("demo", ["Ex1", "Hy1"])
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-
-    widget.init_data(data, key)
-    widget._selected_channel_name = "Hy1"
-
-    first = widget.open_tool_window("remove step", "Hy1")
-    second = widget.open_tool_window("remove step", "Hy1")
-
-    assert first is second
-    assert widget.current_channel() == "Hy1"
-
-    # Rebinding the same dataset should keep the selected channel and open tool window.
-    widget.init_data(data, key)
-
-    assert widget.current_channel() == "Hy1"
-    assert widget.open_tool_window_states() == [
-        ToolWindowState("remove step", key, "Hy1")
-    ]
-
-    widget.close()
-
-
-def test_data_process_widget_closes_windows_when_data_cleared():
-    _app()
-    manager = DataManager()
-    data = DemoData("demo", ["Ex1"])
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-
-    widget.init_data(data, 1)
-    widget.open_tool_window("remove spike", "Ex1")
-    assert len(widget.open_tool_window_states()) == 1
-
-    widget.init_data(None, 0)
-
-    assert widget.current_channel() is None
-    assert len(widget.open_tool_window_states()) == 0
-
-    widget.close()
-
-
-def test_data_process_widget_reopens_remove_step_after_subwindow_close():
-    app = _app()
-    manager = DataManager()
-    data = DemoData("demo", ["Ex1"])
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-
-    widget.show()
-    widget.init_data(data, 1)
-
-    first = widget.open_tool_window("remove step", "Ex1")
-    assert first is not None
-    first.show()
-    app.processEvents()
-    assert first.widget() is not None
-
-    first.close()
-    app.processEvents()
-    app.sendPostedEvents(None, 0)
-    app.processEvents()
-    assert len(widget.open_tool_window_states()) == 0
-
-    second = widget.open_tool_window("remove step", "Ex1")
-    assert second is not None
-    assert second is not first
-    second.show()
-    app.processEvents()
-    assert second.widget() is not None
-    assert second.widget().isVisible()
-
-    widget.close()
-
-
-def test_data_process_widget_opens_robust_baseline_step_tool():
-    _app()
-    manager = DataManager()
-    data = DemoData("demo", ["Ex1"], values=[0.0, 0.0, 2.0, 5.0, 5.0, 5.0])
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-
-    widget.init_data(data, key)
-    sub_window = widget.open_tool_window("remove step baseline", "Ex1")
-
-    assert sub_window is not None
-    assert sub_window.property("tool_key") == "remove step baseline"
-    assert sub_window.widget().__class__.__name__ == "RemoveStepByBaseline"
-
-    widget.close()
-
-
-def test_data_process_widget_opens_wavelet_denoise_tool():
-    _app()
-    manager = DataManager()
-    data = DemoData("demo", ["Ex1"], values=[0.0, 0.1, 0.2, 3.0, 1.5, 0.8, 0.4, 0.2])
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-
-    widget.init_data(data, key)
-    sub_window = widget.open_tool_window("remove wavelet denoise", "Ex1")
-
-    assert sub_window is not None
-    assert sub_window.property("tool_key") == "remove wavelet denoise"
-    assert sub_window.widget().__class__.__name__ == "RemoveWaveletDenoise"
-
-    widget.close()
-
-
-def test_data_process_widget_opens_diurnal_sinusoid_tool():
-    _app()
-    manager = DataManager()
-    values = [0.0, 0.2, 0.5, 0.1, -0.1, 0.4, 0.8, 0.3, 0.1, -0.2]
-    data = DemoData("demo", ["Ex1"], values=values)
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-
-    widget.init_data(data, key)
-    sub_window = widget.open_tool_window("remove diurnal sinusoid", "Ex1")
-
-    assert sub_window is not None
-    assert sub_window.property("tool_key") == "remove diurnal sinusoid"
-    assert sub_window.widget().__class__.__name__ == "RemoveDiurnalSinusoid"
-
-    widget.close()
-
-
-def test_diurnal_sinusoid_widget_uses_broker_datetime_index():
-    _app()
-    data = DemoData("demo", ["Ex1"], values=[0.0, np.nan, 2.0, 3.0])
-    widget = RemoveDiurnalSinusoid(1, "Ex1")
-
-    widget._on_data_ready(1, "Ex1", {
-        "x": np.arange(data.npts, dtype=np.float64),
-        "y": data.get_channel_series("Ex1").to_numpy(dtype=np.float64),
-        "channel_names": ["Ex1"],
-        "all_y": {"Ex1": data.get_channel_series("Ex1").to_numpy(dtype=np.float64)},
-        "npts": data.npts,
-        "start_time": data.start_time.timestamp(),
-        "dt": data.dt.total_seconds(),
-        "datetime_index": data.datetime_index,
-        "kp_data": None,
-    })
-
-    assert widget.datetime_index.equals(data.datetime_index)
-    assert np.isfinite(widget.y_data).all()
-
-    widget.close()
-
-
-def test_data_process_widget_opens_robust_estimate_placeholder():
-    _app()
-    manager = DataManager()
-    data = DemoData("demo", ["Ex1"], values=[0.0, 0.1, 0.2])
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-
-    widget.init_data(data, key)
-    sub_window = widget.open_tool_window("robust estimate", "Ex1")
-
-    assert sub_window is not None
-    assert sub_window.property("tool_key") == "robust estimate"
-    assert sub_window.widget().__class__.__name__ == "RobustEstimateWidget"
-
-    widget.close()
-
-
-def test_data_process_widget_opens_remote_reference_placeholder():
-    _app()
-    manager = DataManager()
-    data = DemoData("demo", ["Ex1"], values=[0.0, 0.1, 0.2])
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-
-    widget.init_data(data, key)
-    sub_window = widget.open_tool_window("remote reference", "Ex1")
-
-    assert sub_window is not None
-    assert sub_window.property("tool_key") == "remote reference"
-    assert sub_window.widget().__class__.__name__ == "RemoteReferenceWidget"
-
-    widget.close()
-
-
 def test_data_process_host_creates_an_all_channel_pipeline_for_active_data():
     _app()
     widget = DataProcessWidget()
@@ -263,7 +63,6 @@ def test_data_process_host_creates_an_all_channel_pipeline_for_active_data():
     pipeline = widget.pipeline_widget
     assert pipeline is not None
     assert pipeline.channel_refs() == [(1, "Ex1"), (1, "Hy1")]
-    assert not hasattr(widget, "classic_panel")
 
     widget.close()
 
@@ -281,7 +80,6 @@ def test_data_process_host_adds_selected_tool_to_pipeline_channel():
     channel_pipeline = pipeline._find_pipeline(key, "Hy1")
     assert channel_pipeline is not None
     assert channel_pipeline.layers[0].blocks[0].tool_id == "remove_step_diff"
-    assert not hasattr(widget, "classic_panel")
 
     widget.close()
 
@@ -345,21 +143,6 @@ def test_workspace_tab_close_keeps_single_workspace_and_hides_add_tab_close_butt
     panel._close_workspace(0)
     assert len(panel._workspaces) == 1
     assert panel.workspace_tabs.count() == 2
-
-    widget.close()
-
-
-def test_data_process_legacy_context_resolver_overrides_default_first_channel():
-    _app()
-    manager = DataManager()
-    data = DemoData("demo", ["Ex1", "Hy1"])
-    key = manager.add(data)
-    widget = DataProcessLegacyWidget(manager)
-    widget.init_data(data, key)
-    widget.set_context_resolver(lambda: (key, "Hy1"))
-
-    assert widget.current_context() == (key, "Hy1")
-    assert widget.current_channel() == "Hy1"
 
     widget.close()
 

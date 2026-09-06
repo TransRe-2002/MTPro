@@ -13,7 +13,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from scipy.signal import detrend
 
-from base.processing_broker import StationMetadata
+from core.station_metadata import StationMetadata
 from core.em_data import EMData
 from emtf.io.zfile import emtf_phase_deg
 

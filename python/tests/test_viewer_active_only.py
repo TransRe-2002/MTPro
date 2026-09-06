@@ -36,7 +36,7 @@ def _make_window():
 
 
 def _stop_broker(mw) -> None:
-    # 各 DataProcessLegacyWidget 在初始化时把自己的 _stop_broker 接到了
+    # 旧处理窗口曾在初始化时把自己的线程停止回调接到了
     # aboutToQuit 上；测试退出前手动触发一次，避免 QThread 带运行销毁
     _app().aboutToQuit.emit()
 

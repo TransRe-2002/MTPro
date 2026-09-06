@@ -16,10 +16,10 @@ from typing import Callable, Dict, Optional, Tuple
 
 from core.em_data import EMData
 from ui.data_process_shared import (
-    CLASSIC_TOOL_MIME,
+    PROCESSING_TOOL_MIME,
     DATA_TREE_SELECTION_MIME,
     PIPELINE_TOOL_MIME,
-    create_classic_tool_model,
+    create_processing_tool_model,
 )
 from ui.data_tree_model import DataTreeModel
 from ui.compare_widget import CompareWidget
@@ -70,7 +70,7 @@ class ToolTreeView(QTreeView):
             return
 
         mime_data = QMimeData()
-        mime_data.setData(CLASSIC_TOOL_MIME, QByteArray(tool_type.encode("utf-8")))
+        mime_data.setData(PROCESSING_TOOL_MIME, QByteArray(tool_type.encode("utf-8")))
         mime_data.setData(PIPELINE_TOOL_MIME, QByteArray(tool_type.encode("utf-8")))
         drag = QDrag(self)
         drag.setMimeData(mime_data)
@@ -144,7 +144,7 @@ class DataTreeViewer(QWidget):
         tool_layout.setContentsMargins(4, 8, 4, 4)
         tool_layout.setSpacing(2)
         self.tool_tree = ToolTreeView(self.tool_group)
-        self.tool_model = create_classic_tool_model()
+        self.tool_model = create_processing_tool_model()
         self.tool_tree.setModel(self.tool_model)
         self.tool_tree.expandAll()
         tool_layout.addWidget(self.tool_tree, 1)

@@ -61,7 +61,7 @@ def test_all_builtin_plugin_editors_create_from_pipeline_slice():
         assert editor._editor is not None, plugin_id
         assert editor._host.block.series.index.equals(preview.cts.index), plugin_id
 
-        # The former Classic visual editors now receive this range directly;
+        # Visual editors now receive this range directly;
         # no DataManager/Broker selection is involved in their construction.
         slice_editor = getattr(editor._editor, "editor", None)
         if plugin_id in {

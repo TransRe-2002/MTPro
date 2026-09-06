@@ -18,7 +18,7 @@ class ToolSpec:
     fields: tuple[tuple[str, str, type, object], ...] = ()
     has_channel_sync: bool = False
     has_region_sync: bool = False
-    classic_factory: Optional[Callable[..., QWidget]] = None
+    output_factory: Optional[Callable[..., QWidget]] = None
     pipeline_editor_factory: Optional[Callable[..., QWidget]] = None
 
 
@@ -40,7 +40,7 @@ def register(spec: ToolSpec) -> None:
 def toolspec_from_plugin(loaded_plugin) -> ToolSpec:
     """Adapt a validated plugin instance to the existing tool registry."""
 
-    from ui.plugin_adapter import create_classic_plugin_widget, create_pipeline_plugin_editor
+    from ui.plugin_adapter import create_pipeline_plugin_editor
 
     info = loaded_plugin.info
     has_editor = callable(getattr(loaded_plugin.plugin, "create_editor", None))
@@ -58,7 +58,6 @@ def toolspec_from_plugin(loaded_plugin) -> ToolSpec:
         fields=fields,
         has_channel_sync="channel_sync" in info.capabilities,
         has_region_sync="region_sync" in info.capabilities,
-        classic_factory=partial(create_classic_plugin_widget, loaded_plugin.plugin),
         pipeline_editor_factory=partial(create_pipeline_plugin_editor, loaded_plugin.plugin),
     )
 
@@ -105,17 +104,15 @@ def is_station_tool(key: str) -> bool:
     return spec is not None and not spec.requires_channel
 
 
-def create_classic_widget(
+def create_output_widget(
     key: str,
     data_id: int,
-    channel_name: Optional[str],
 ) -> Optional[QWidget]:
+    """Create a station-level output tool without a processing data path."""
     spec = _REGISTRY.get(key)
-    if spec is None or spec.classic_factory is None:
+    if spec is None or spec.requires_channel or spec.output_factory is None:
         return None
-    if spec.requires_channel:
-        return spec.classic_factory(data_id, channel_name)
-    return spec.classic_factory(data_id)
+    return spec.output_factory(data_id)
 
 
 def create_pipeline_editor(
@@ -127,9 +124,9 @@ def create_pipeline_editor(
     """为 pipeline block 创建交互式编辑器，并同步注入 block 切片数据。
 
     ``preview_channel`` 是 ``PreviewChannelSlice(name, cts)``，其中 ``cts`` 是
-    该 block 区间 ``[start:end]`` 的 ``pd.Series``。channel 工具复用 classic
-    构造签名 ``(data_id, channel_name)`` 创建（data_id 用 0 占位），随后通过
-    ``load_series()`` 把切片直接灌进去——不再经过 broker 异步请求。
+    该 block 区间 ``[start:end]`` 的 ``pd.Series``。channel 工具使用
+    ``(data_id, channel_name)`` 构造签名创建（data_id 用 0 占位），随后通过
+    ``load_series()`` 把切片直接灌进去。
 
     构造时不传 parent（避免触发子类的独立窗口 Window flag），由调用方
     ``layout.addWidget()`` 负责重定父。

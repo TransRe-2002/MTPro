@@ -14,7 +14,7 @@ register(ToolSpec(
         ("low", "low", float, 0.01),
         ("high", "high", float, 1.0),
     ),
-    classic_factory=RobustEstimateWidget,
+    output_factory=RobustEstimateWidget,
 ))
 
 register(ToolSpec(
@@ -26,5 +26,5 @@ register(ToolSpec(
     fields=(
         ("order", "order", int, 1),
     ),
-    classic_factory=RemoteReferenceWidget,
+    output_factory=RemoteReferenceWidget,
 ))

@@ -4,11 +4,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 
 DATA_TREE_SELECTION_MIME = "application/x-data-tree-selection"
-CLASSIC_TOOL_MIME = "application/x-widgettype"
+PROCESSING_TOOL_MIME = "application/x-processing-tool"
 PIPELINE_TOOL_MIME = "application/x-pipeline-tool"
 
 
-def create_classic_tool_model() -> QStandardItemModel:
+def create_processing_tool_model() -> QStandardItemModel:
     tree_model = QStandardItemModel()
     tree_model.setHorizontalHeaderLabels(["数据处理工具"])
 

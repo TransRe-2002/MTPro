@@ -10,7 +10,7 @@
 
 ### 1.1 目标
 
-- 定义一套稳定的**数据处理插件 API**：第三方（及内置）处理工具以插件形式注册进宿主，出现在工具面板、classic MDI 工作区与 pipeline 模式里。
+- 定义一套稳定的**数据处理插件 API**：第三方（及内置）处理工具以插件形式注册进宿主，出现在工具面板和 Pipeline 工作区。
 - 把 7 个"变换类"内置工具全部迁移为**一方插件**，使插件 API 得到持续的内部使用。
 - 借此把"交互决策序列化为参数"落地，使 pipeline block 获得**确定性重放**能力（当前 interactive block 只缓存编辑器产出的 ndarray，上游一变就 stale，必须人工重开编辑器）。
 - 补上 pipeline 缺失的**执行引擎**：当前代码自己承认 "param block 目前只保存参数，还不参与实际计算"（见 `data_process_pipeline.py::_show_preview_summary`）。插件的 `process()` 就是这个执行引擎。
@@ -45,7 +45,7 @@
 
 ### 2.1 工具注册表
 
-- `python/src/ui/tools/registry.py`：`ToolSpec` frozen dataclass（`tool_id / display_name / category / kind / requires_channel / aliases / fields / has_channel_sync / has_region_sync / classic_factory / pipeline_editor_factory`），全局 `_REGISTRY` dict，`register()` / `get()` / `all_specs()` / `create_classic_widget()` / `create_pipeline_editor()`。
+- `python/src/ui/tools/registry.py`：`ToolSpec` frozen dataclass（`tool_id / display_name / category / kind / requires_channel / aliases / fields / has_channel_sync / has_region_sync / output_factory / pipeline_editor_factory`），全局 `_REGISTRY` dict，`register()` / `get()` / `all_specs()` / `create_output_widget()` / `create_pipeline_editor()`。
 - `python/src/ui/tools/_registrations.py`：手工清单，硬编码 import 全部 9 个工具并逐个 `register()`。`kind` 二值：`"interactive"`（带编辑器 widget）/ `"param"`（`fields` 元组 → 自动参数对话框）。
 - 9 个工具 = 7 个变换类（remove_region、remove_spike、remove_step_diff、remove_step_window、remove_step_baseline、remove_wavelet_denoise、remove_diurnal_sinusoid）+ 2 个 output 类（robust_estimate、remote_reference，`requires_channel=False` 的 station 工具，**本期不动**）。
 
@@ -54,18 +54,14 @@
 - `python/src/processor/_base_processor.py::BaseProcessorWidget`：两段式初始化（构造搭 UI → `_on_data_ready` 建图）、NaN 记录与还原、历史栈 undo / revert、`_run_heavy()`（compute 池 + 模态进度条）、`_confirm_and_close()` 发 `result_submitted(data_id, ch, ndarray)` 与 `result_signal(ch, ndarray)`。
 - **注意**：`RemoveSpike`（`processor/remove_spike.py`）与 `RemoveRegion` **不继承** `BaseProcessorWidget`，是独立 QWidget，自带同款信号集（`data_requested / result_submitted / result_signal / channel_sync_requested` 等）与 `wire_data_ready()` / `load_series()`。迁移时以"满足接线契约"为准，不以继承关系为准。
 
-### 2.3 Classic 模式接线契约（data_process.py 实测）
+### 2.3 Pipeline 切片编辑契约
 
-宿主对工具 widget 的要求（第 298–332 行附近）：
+Pipeline 宿主对交互编辑器的约定：
 
-1. `tool_registry.create_classic_widget(key, data_id, channel_name)` 构造；
-2. 若 `spec.has_channel_sync`，连 `widget.channel_sync_requested → broker.apply_result_all_channels`；
-3. 若 `spec.has_region_sync`，连 `widget.region_sync_requested → self._on_region_sync`；
-4. `widget.data_requested.connect(broker.request_data)`、`widget.result_submitted.connect(broker.apply_result)`；
-5. `widget.wire_data_ready(broker.data_ready)`（broker 的 `data_ready(int, str, pkg)` 信号）；
-6. `widget.data_requested.emit(data_id, channel_name)` 启动异步送数。
-
-`pkg` 字典字段见 `build_pkg_from_series()`：`x / y / channel_names / all_y / npts / start_time / dt / datetime_index / kp_data`。
+1. `tool_registry.create_pipeline_editor()` 用当前 block 的 `PreviewChannelSlice` 构造编辑器；
+2. 编辑器通过 `load_series()` 接收切片，不访问 `DataManager`；
+3. 交互结果由 `result_signal(channel, ndarray)` 返回，Pipeline 缓存为 `input_slice / output_slice`；
+4. 参数插件的 `process()` 在 compute 池运行，preview 与 commit 统一走 Pipeline 状态机。
 
 ### 2.4 Pipeline 模式现状（data_process_pipeline.py + core/pipeline_model.py）
 
@@ -250,8 +246,8 @@ class EditorHost(Protocol):
         params: Mapping[str, Any],
         broadcast: frozenset[str] = frozenset(),
     ) -> None:
-        """确认。宿主随后调 process() 并把结果写回（classic）或
-        缓存（pipeline）。``broadcast`` ⊆ info.capabilities：
+        """确认。宿主随后调 process() 并缓存结果供 Pipeline 预览/提交。
+        ``broadcast`` ⊆ info.capabilities：
         "channel_sync" = 结果同步到同数据集其他通道；
         "region_sync" = 按时间区间同步到所有数据集。"""
 
@@ -395,7 +391,7 @@ def toolspec_from_plugin(lp: "LoadedPlugin") -> ToolSpec:
     fields = 由 params_schema 映射的 (name, label, type, default) 元组
     （供自动参数对话框与 _default_params_for_tool 使用）；
     has_channel_sync / has_region_sync 由 capabilities 映射；
-    classic_factory / pipeline_editor_factory 指向 plugin_adapter 的通用工厂。"""
+    pipeline_editor_factory 指向 plugin_adapter 的切片编辑器工厂。"""
 ```
 
 - `_registrations.py` 的 9 条静态注册中：7 个变换类随迁移逐条删除（对应一方插件顶上），**2 个 output 类保留原样**；全部迁完后该文件只剩 output 两条。
@@ -403,12 +399,10 @@ def toolspec_from_plugin(lp: "LoadedPlugin") -> ToolSpec:
 
 ### 6.2 插件适配器 —— `python/src/ui/plugin_adapter.py`
 
-一个文件承担"把插件接进两种模式"的全部胶水：
+一个文件承担 Pipeline 切片编辑所需的胶水：
 
-1. **`PluginEditorHost(QWidget)`**：`EditorHost` 的主线程实现。构造入参 `(plugin, block, mode, ...)`；`apply_params` 的行为按 mode 分叉：
-   - classic：调 `process()`（经 compute 池）→ 还原调用方语义 → 发 `result_submitted(data_id, ch, ndarray)`，broadcast 含 `channel_sync` 时另发 `channel_sync_requested`、含 `region_sync` 时发 `region_sync_requested(params)` —— **信号签名与 §2.3 契约逐字一致**，这样 `data_process.py` 的现有接线代码零改动；
-   - pipeline：调 `process()` → 写 `block.input_slice / output_slice` 缓存（替代现在 `_on_interactive_result` 信任编辑器 ndarray 的路径）。
-2. **`PluginClassicWidget`**：满足 §2.3 全部接线契约的壳。`data_requested →` 等数据就绪后构造 `ChannelBlock` 并调 `plugin.create_editor()`；无编辑器的纯参数插件 → 弹自动参数对话框。
+1. **`PluginEditorHost(QWidget)`**：`EditorHost` 的主线程实现。`apply_params` 调 `process()` → 写 `block.input_slice / output_slice` 缓存（替代直接信任编辑器 ndarray 的路径）。
+2. **`PluginSliceEditor`**：满足 §2.3 切片契约的壳。它接收 `ChannelBlock` 后调 `plugin.create_editor()`；无编辑器的纯参数插件 → 弹自动参数对话框。
 3. **`PluginParamDialog`**：由现 `PipelineParamDialog` 演化，按 `ParamSpec` 渲染（float/int 带 min/max 的 spin、bool 复选、str+options 下拉、list 跳过并提示"需自定义编辑器"）。
 4. `create_pipeline_editor()` 路径：工厂用"截止本 block 的输入快照切片"构造 `ChannelBlock` 后调 `plugin.create_editor()`——与现有 `PreviewChannelSlice` 流程对接，`data_process_pipeline.py::_open_interactive_editor` 的对话框壳不变。
 
@@ -526,10 +520,10 @@ class SpikeRemovalPlugin:
 - 内部 `undo_stack` / 追加选点照旧，但维护一个累积的 `deleted_indices: set[int]`；
 - "确定"按钮：不再 `result_signal.emit(ndarray)`，改为
   `host.apply_params({"indices": sorted(deleted_indices)}, broadcast=frozenset({"channel_sync"} if 复选框勾选 else ()))`；
-- classic 模式由 `PluginEditorHost` 把 `apply_params` 翻译成 §2.3 的信号序列（含 `channel_sync_requested`），`data_process.py` 不动。
+- Pipeline 宿主把 `apply_params` 记录为 block 参数，并按 capability 执行同步。
 
 迁移验收：
-1. classic 模式行为与旧版逐操作一致（框选、撤销、还原、通道同步）；
+1. Pipeline 内的框选、撤销、还原与通道同步行为可重复执行；
 2. pipeline 里确认后 `block.params == {"indices": [...]}`，**改动上游后 stale 自动重跑且结果一致**（这是旧版做不到的，必须有测试）；
 3. `params` 可 `json.dumps`。
 
@@ -569,7 +563,7 @@ class SpikeRemovalPlugin:
 ### 9.3 错误
 
 - 加载期：§5.3 校验失败 → 报告，不崩；
-- 运行期：`process()` 抛异常 → classic 模式宿主弹日志/消息框；pipeline 模式 block 置 `error`；**宿主捕获范围是 Exception 而非 BaseException**（KeyboardInterrupt 等透传）。
+- 运行期：`process()` 抛异常 → Pipeline block 置 `error` 并显示错误；**宿主捕获范围是 Exception 而非 BaseException**（KeyboardInterrupt 等透传）。
 
 ### 9.4 版本策略
 
@@ -602,7 +596,7 @@ class SpikeRemovalPlugin:
 - `data_process_pipeline.py`：interactive 确认改走 `apply_params` + 执行引擎（§7）；`_registrations.py` 删除 remove_spike 静态条目
 - 测试：参数往返（`process(block, params)` 与旧行为对拍）、pipeline stale 自动重放确定性、`params` JSON 可序列化
 
-验收：`PYTHONPATH=python/src pytest python/tests` 全绿（含既有 forked 套件）；手工走查 classic 框选删点全流程 + pipeline 确认→改上游→自动重放。
+验收：`PYTHONPATH=python/src pytest python/tests` 全绿（含既有 forked 套件）；手工走查 Pipeline 框选删点、确认、改上游后的自动重放。
 
 ### Phase 3 —— 其余 6 个变换工具迁移
 

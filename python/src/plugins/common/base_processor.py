@@ -3,7 +3,7 @@ from __future__ import annotations
 """处理器窗口基类，提供统一的两段式数据初始化、撤销/恢复/确认流程。
 
 子类只需实现 _init_ui() + _init_plot() + _log() 即可获得完整的 undo/revert/confirm 支持。
-工具不持有 ProcessingBroker 引用——通过信号和外部接线获取/提交数据。
+工具不持有数据管理器引用；Pipeline 编辑器通过切片注入数据。
 """
 
 from typing import Optional
@@ -20,7 +20,7 @@ def build_pkg_from_series(channel_name: str, series: pd.Series) -> dict:
     """把一段 ``pd.Series`` 切片打包成 processor 期望的数据字典（pkg）。
 
     Pipeline 模式下 block 只携带 ``[start:end]`` 的切片，这里把切片伪装成
-    单通道 pkg（与 broker 的字段对齐），让既有 ``_on_data_ready`` 无需改动。
+    单通道 pkg，让既有 ``_on_data_ready`` 无需改动。
     """
     y = series.to_numpy(dtype=np.float64)
     index = series.index
@@ -44,7 +44,7 @@ class BaseProcessorWidget(QWidget):
     统一管理：
     - 两段式数据初始化（__init__ 搭 UI → _on_data_ready 建图）
     - 撤销 / 恢复原始数据 / 确认并关闭
-    - 通过信号与外部通信（不知道 Broker 存在）
+    - 通过信号与外部通信（不直接依赖数据管理器）
 
     子类需要：
     - 实现 _init_ui() 搭 UI 壳（不依赖数据）
@@ -53,7 +53,7 @@ class BaseProcessorWidget(QWidget):
     - 可选重写 _update_derived_data() / _reset_result_state()
     """
 
-    # 工具发出的信号（由 data_process 接线到 Broker）
+    # 供编辑器宿主使用的结果信号。
     data_requested = Signal(int, str)              # 请求数据: data_id, channel
     result_submitted = Signal(int, str, object)     # 提交结果: data_id, channel, ndarray
     # pipeline 编辑器用的二参结果信号: (channel, ndarray)，不携带 data_id
@@ -67,8 +67,7 @@ class BaseProcessorWidget(QWidget):
     ):
         """``source`` 可以是：
 
-        - ``int`` data_id —— classic/broker 路径，构造时不加载数据，仍走
-          ``data_requested`` → ``_on_data_ready`` 的异步送数；
+        - ``int`` data_id —— 延迟注入路径，构造时先不加载数据；
         - ``EMData`` —— 直接取 ``channel_name`` 对应通道；
         - ``pd.Series`` —— pipeline block 的 ``[start:end]`` 切片。
 
@@ -109,7 +108,7 @@ class BaseProcessorWidget(QWidget):
     def _load_input_data(self) -> None:
         """子类 ``__init__`` 结尾调用：source 能提供数据就同步加载。
 
-        source 为 int（classic/broker）时不做任何事，保持异步送数路径。
+        source 为 int 时不做任何事，等待后续切片注入。
         """
         series = self._resolve_series()
         if series is None:
@@ -119,7 +118,7 @@ class BaseProcessorWidget(QWidget):
     def load_series(self, channel_name: str, series: pd.Series) -> None:
         """以 ``pd.Series`` 切片直接注入数据（pipeline block 使用）。
 
-        与 broker 异步送数不同，这里同步构造 pkg 并走 ``_on_data_ready``，
+        这里同步构造 pkg 并走 ``_on_data_ready``，
         适合切片数据已经在手、无需跨线程请求的场景。
         """
         self.ch_name = channel_name

@@ -206,8 +206,8 @@ class PluginEditorHost(QWidget):
         logger.info("%s: %s", self.plugin.info.plugin_id, message)
 
 
-class PluginClassicWidget(QWidget):
-    """Generic classic/pipeline shell satisfying the existing broker contract."""
+class PluginSliceEditor(QWidget):
+    """Generic slice editor that exposes plugin and result signals."""
 
     data_requested = Signal(int, str)
     result_submitted = Signal(int, str, object)
@@ -307,37 +307,9 @@ class PluginClassicWidget(QWidget):
         QMessageBox.critical(self, "插件处理失败", repr(exc))
 
 
-def create_classic_plugin_widget(
-    plugin: object,
-    data_id: int,
-    channel_name: str,
-) -> QWidget:
-    # Keep Classic's direct widgets isolated until the compatibility workspace
-    # is removed.  Pipeline uses the slice-based PluginClassicWidget below;
-    # changing Classic's broker/MDI lifecycle in the same migration causes
-    # duplicate pyqtgraph view construction while old MDI windows tear down.
-    legacy = {
-        "remove_region": ("plugins.remove_region", "RemoveRegion"),
-        "remove_spike": ("plugins.remove_spike", "RemoveSpike"),
-        "auto_spike_filter": ("plugins.auto_spike_filter", "AutoSpikeFilter"),
-        "remove_step_diff": ("plugins.remove_step_diff", "RemoveStepByDiff"),
-        "remove_step_window": ("plugins.remove_step_window", "RemoveStepByWindow"),
-        "remove_step_baseline": ("plugins.remove_step_baseline", "RemoveStepByBaseline"),
-        "remove_wavelet_denoise": ("plugins.remove_wavelet_denoise", "RemoveWaveletDenoise"),
-        "remove_diurnal_sinusoid": ("plugins.remove_diurnal_sinusoid", "RemoveDiurnalSinusoid"),
-    }
-    entry = legacy.get(plugin.info.plugin_id)
-    if entry is not None:
-        import importlib
-
-        cls = getattr(importlib.import_module(entry[0]), entry[1])
-        return cls(data_id, channel_name)
-    return PluginClassicWidget(plugin, data_id, channel_name)
-
-
 def create_pipeline_plugin_editor(
     plugin: object,
     data_id: int,
     channel_name: str,
-) -> PluginClassicWidget:
-    return PluginClassicWidget(plugin, data_id, channel_name)
+) -> PluginSliceEditor:
+    return PluginSliceEditor(plugin, data_id, channel_name)

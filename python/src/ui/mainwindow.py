@@ -1108,6 +1108,7 @@ class MainWindow(QMainWindow):
             viewer.deleteLater()
         self.viewer_state.pop(key, None)
         self.data_process_widget.close_windows_for_data(key)
+        self.impedance_output_widget.close_windows_for_data(key)
         self.logger.info("Removed dataset #%s", key)
 
     def closeEvent(self, event):

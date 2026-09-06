@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QDateTime, QTimer
 
 from base.data_manager import DataManager
-from base.processing_broker import StationMetadata
+from core.station_metadata import StationMetadata
 from core.em_data import EMData
 from emtf.io.zfile import emtf_phase_deg
 from output_tools.shared.emtf import (

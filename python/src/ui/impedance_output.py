@@ -12,8 +12,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget
 
 from base.data_manager import DataManager
-from ui.data_process import DataProcessLegacyWidget
 from ui.impedance_preview import ImpedanceResultPool
+from ui.station_output_host import StationOutputHost
 
 
 class ImpedanceOutputWidget(QWidget):
@@ -22,7 +22,7 @@ class ImpedanceOutputWidget(QWidget):
         self.data_manager = data_manager
         self._data_id = 0
         self._data = None
-        self.host = DataProcessLegacyWidget(data_manager, self)
+        self.host = StationOutputHost(data_manager, self)
         self.pool = pool or ImpedanceResultPool(self)
 
         title = QLabel("阻抗输出", self)
@@ -59,11 +59,14 @@ class ImpedanceOutputWidget(QWidget):
     def _open(self, tool_type: str) -> None:
         if self._data is None or self._data_id == 0:
             return
-        window = self.host.open_tool_window(tool_type, self._data_id, None)
+        window = self.host.open_output_window(tool_type, self._data_id)
         if window is not None:
             widget = window.widget()
             signal = getattr(widget, "result_ready", None)
             if signal is not None and not window.property("impedance_pool_connected"):
                 signal.connect(lambda result, method=tool_type: self.pool.add(method, result))
                 window.setProperty("impedance_pool_connected", True)
-        self.host.present_subwindow(window)
+        self.host.present_window(window)
+
+    def close_windows_for_data(self, data_id: int) -> None:
+        self.host.close_windows_for_data(data_id)

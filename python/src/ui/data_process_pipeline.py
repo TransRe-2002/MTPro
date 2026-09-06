@@ -1045,7 +1045,7 @@ class DataProcessPipelineWidget(QWidget):
         commit_button = QPushButton("commit", toolbar)
         commit_button.clicked.connect(self._commit_preview)
         self.clear_blocks_after_commit_checkbox = QCheckBox("提交后清空 block", toolbar)
-        self.clear_blocks_after_commit_checkbox.setChecked(True)
+        self.clear_blocks_after_commit_checkbox.setChecked(False)
         self.clear_blocks_after_commit_checkbox.setToolTip(
             "仅在至少一个 channel 成功提交后，清空当前 Pipeline 窗口内的全部 block。"
         )

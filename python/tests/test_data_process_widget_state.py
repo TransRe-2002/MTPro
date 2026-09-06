@@ -94,14 +94,16 @@ def test_data_process_uses_a_single_mdi_workspace():
     widget.close()
 
 
-def test_data_process_creates_a_new_pipeline_mdi_subwindow():
+def test_data_process_creates_a_new_pipeline_mdi_subwindow(qtbot):
     _app()
     data = DemoData("demo", ["Ex1"])
     widget = DataProcessWidget()
+    qtbot.addWidget(widget)
     widget.init_data(data, 1)
 
     first_pipeline = widget.pipeline_widget
-    second_pipeline = widget._create_pipeline_window()
+    qtbot.mouseClick(widget.new_pipeline_button, Qt.MouseButton.LeftButton)
+    second_pipeline = widget.workspace.active_pipeline_window()
 
     assert first_pipeline is not None
     assert second_pipeline is not None
@@ -446,14 +448,15 @@ def test_pipeline_preview_commit_replays_downstream_edit_on_updated_upstream():
         base + 12,
     )
     np.testing.assert_allclose(channel_pipeline.baseline_snapshot, base + 12)
-    assert pipeline_widget.clear_blocks_after_commit_checkbox.isChecked()
-    assert layer.blocks == []
+    assert not pipeline_widget.clear_blocks_after_commit_checkbox.isChecked()
+    assert first.output_slice is None
+    assert second.output_slice is None
     assert changed == [(1, "Ex1")]
 
     widget.close()
 
 
-def test_pipeline_commit_can_keep_blocks_when_clear_option_is_disabled(qtbot):
+def test_pipeline_commit_clears_blocks_when_clear_option_is_enabled(qtbot):
     _app()
     manager = DataManager()
     data = DemoData("demo", ["Ex1"])
@@ -461,7 +464,7 @@ def test_pipeline_commit_can_keep_blocks_when_clear_option_is_disabled(qtbot):
     pipeline_widget = DataProcessPipelineWidget(manager)
     qtbot.addWidget(pipeline_widget)
     pipeline_widget.add_channels([(key, "Ex1")])
-    pipeline_widget.clear_blocks_after_commit_checkbox.setChecked(False)
+    pipeline_widget.clear_blocks_after_commit_checkbox.setChecked(True)
 
     layer = pipeline_widget.pipelines[0].layers[0]
     base = data.get_channel_series("Ex1").to_numpy(dtype=np.float64, copy=True)
@@ -478,11 +481,42 @@ def test_pipeline_commit_can_keep_blocks_when_clear_option_is_disabled(qtbot):
     with patch("ui.data_process_pipeline.QMessageBox.information"):
         pipeline_widget._commit_preview()
 
-    assert layer.blocks == [block]
-    assert block.status == "empty"
-    assert block.input_slice is None
-    assert block.output_slice is None
+    assert layer.blocks == []
     pipeline_widget.close()
+
+
+def test_pipeline_commit_never_closes_other_pipeline_mdi_windows(qtbot):
+    _app()
+    widget = DataProcessWidget()
+    qtbot.addWidget(widget)
+    data = DemoData("demo", ["Ex1"])
+    widget.init_data(data, 1)
+
+    first_pipeline = widget.pipeline_widget
+    assert first_pipeline is not None
+    second_pipeline = widget._create_pipeline_window()
+    assert second_pipeline is not None
+
+    base = data.get_channel_series("Ex1").to_numpy(dtype=np.float64, copy=True)
+    first_pipeline.pipelines[0].layers[0].blocks.append(
+        PipelineBlock(
+            tool_id="remove_spike",
+            start=0,
+            end=base.size,
+            status="ready",
+            input_slice=base.copy(),
+            output_slice=base + 1,
+        )
+    )
+    first_pipeline.clear_blocks_after_commit_checkbox.setChecked(True)
+
+    with patch("ui.data_process_pipeline.QMessageBox.information"):
+        first_pipeline._commit_preview()
+
+    assert len(widget.workspace.subWindowList()) == 2
+    assert widget.workspace.pipeline_subwindow(first_pipeline) is not None
+    assert widget.workspace.pipeline_subwindow(second_pipeline) is not None
+    widget.close()
 
 
 def test_pipeline_replays_deletion_without_overwriting_unchanged_upstream_values():

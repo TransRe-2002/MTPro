@@ -251,85 +251,71 @@ def test_data_process_widget_opens_remote_reference_placeholder():
     widget.close()
 
 
-def test_data_process_host_switches_to_pipeline_mode():
+def test_data_process_host_creates_an_all_channel_pipeline_for_active_data():
     _app()
     widget = DataProcessWidget()
     data = DemoData("demo", ["Ex1", "Hy1"])
 
     widget.init_data(data, 1)
-    assert widget.current_mode() == "classic"
-    assert len(widget.classic_panel._workspaces) == 1
     assert len(widget.pipeline_panel._workspaces) == 1
-    assert widget.classic_panel.workspace_tabs.count() == 2
     assert widget.pipeline_panel.workspace_tabs.count() == 2
 
-    widget.set_mode("pipeline")
-    assert widget.current_mode() == "pipeline"
-    assert widget.mode_stack.currentWidget() is widget.pipeline_panel
-    assert widget.pipeline_button.isEnabled() is True
-    assert widget.pipeline_widget is None
+    pipeline = widget.pipeline_widget
+    assert pipeline is not None
+    assert pipeline.channel_refs() == [(1, "Ex1"), (1, "Hy1")]
+    assert not hasattr(widget, "classic_panel")
 
     widget.close()
 
 
-def test_data_process_host_opens_classic_tool_for_selected_dataset_channel():
+def test_data_process_host_adds_selected_tool_to_pipeline_channel():
     _app()
     manager = DataManager()
     data = DemoData("demo", ["Ex1", "Hy1"])
     key = manager.add(data)
     widget = DataProcessWidget(manager)
 
-    sub_window = widget.open_tool_for(key, "Hy1", "remove step")
+    pipeline = widget.open_tool_for(key, "Hy1", "remove step")
 
-    assert sub_window is not None
-    assert widget.current_mode() == "classic"
-    assert widget.legacy_widget.open_tool_window_states() == [
-        ToolWindowState("remove step", key, "Hy1")
-    ]
+    assert pipeline is not None
+    channel_pipeline = pipeline._find_pipeline(key, "Hy1")
+    assert channel_pipeline is not None
+    assert channel_pipeline.layers[0].blocks[0].tool_id == "remove_step_diff"
+    assert not hasattr(widget, "classic_panel")
 
     widget.close()
 
 
-def test_data_process_has_separate_workspace_tabs_per_mode():
+def test_data_process_has_one_pipeline_workspace_tab_set():
     _app()
     widget = DataProcessWidget()
 
-    assert len(widget.classic_panel._workspaces) == 1
     assert len(widget.pipeline_panel._workspaces) == 1
-    assert widget.classic_panel.workspace_tabs.tabText(widget.classic_panel.workspace_tabs.count() - 1) == "+"
     assert widget.pipeline_panel.workspace_tabs.tabText(widget.pipeline_panel.workspace_tabs.count() - 1) == "+"
-    assert widget.current_mode() == "classic"
-
-    widget.set_mode("pipeline")
-
-    assert widget.current_mode() == "pipeline"
-    assert widget.mode_stack.currentWidget() is widget.pipeline_panel
-    assert widget.classic_panel.workspace_tabs is not widget.pipeline_panel.workspace_tabs
+    assert widget.current_workspace() is widget.pipeline_panel.current_workspace()
+    assert not hasattr(widget, "mode_stack")
 
     widget.close()
 
 
-def test_data_process_mode_buttons_and_new_workspace_tabs():
+def test_data_process_creates_new_pipeline_workspace_tabs():
     _app()
+    data = DemoData("demo", ["Ex1"])
     widget = DataProcessWidget()
+    widget.init_data(data, 1)
 
-    assert widget.classic_button.text() == "Classic"
-    assert widget.pipeline_button.text() == "Pipeline"
-    assert widget.pipeline_button.isEnabled() is True
-    assert len(widget.classic_panel._workspaces) == 1
     assert len(widget.pipeline_panel._workspaces) == 1
-    assert widget.classic_panel.workspace_tabs.count() == 2
-    assert widget.classic_panel.current_workspace() is not None
     assert widget.pipeline_panel.current_workspace() is not None
 
-    first_workspace = widget.classic_panel.current_workspace()
-    second_workspace = widget.classic_panel._create_workspace()
+    first_workspace = widget.pipeline_panel.current_workspace()
+    second_workspace = widget.pipeline_panel._create_workspace()
 
-    assert len(widget.classic_panel._workspaces) == 2
-    assert widget.classic_panel.workspace_tabs.count() == 3
+    assert len(widget.pipeline_panel._workspaces) == 2
+    assert widget.pipeline_panel.workspace_tabs.count() == 3
     assert second_workspace is not None
     assert second_workspace is not first_workspace
-    assert second_workspace.subWindowList() == []
+    assert second_workspace.last_pipeline_window() is not None
+    assert second_workspace.last_pipeline_window().channel_refs() == [(1, "Ex1")]
 
     widget.close()
 
@@ -338,7 +324,7 @@ def test_workspace_tab_close_keeps_single_workspace_and_hides_add_tab_close_butt
     _app()
     widget = DataProcessWidget()
 
-    panel = widget.classic_panel
+    panel = widget.pipeline_panel
     panel._create_workspace()
 
     assert len(panel._workspaces) == 2
@@ -599,11 +585,10 @@ def test_pipeline_uses_shared_tool_drag_instead_of_a_second_tool_tree():
     data = DemoData("demo", ["Ex1"])
 
     widget.init_data(data, 1)
-    widget.set_mode("pipeline")
 
     workspace = widget.pipeline_panel.current_workspace()
     assert workspace is not None
-    pipeline = workspace.create_pipeline_window([(1, "Ex1")])
+    pipeline = workspace.last_pipeline_window()
     assert pipeline is not None
     assert not hasattr(pipeline, "tool_tree")
     assert pipeline.pipeline_hint is not None
@@ -618,11 +603,10 @@ def test_pipeline_drop_adds_block_from_shared_tool_payload():
     data = DemoData("demo", ["Ex1"])
 
     widget.init_data(data, 1)
-    widget.set_mode("pipeline")
 
     workspace = widget.pipeline_panel.current_workspace()
     assert workspace is not None
-    pipeline = workspace.create_pipeline_window([(1, "Ex1")])
+    pipeline = workspace.last_pipeline_window()
     assert pipeline is not None
     layer = pipeline.pipelines[0].layers[0]
 
@@ -640,11 +624,10 @@ def test_pipeline_preview_commit_replays_downstream_edit_on_updated_upstream():
     data = DemoData("demo", ["Ex1"])
 
     widget.init_data(data, 1)
-    widget.set_mode("pipeline")
 
     workspace = widget.pipeline_panel.current_workspace()
     assert workspace is not None
-    pipeline_widget = workspace.create_pipeline_window([(1, "Ex1")])
+    pipeline_widget = workspace.last_pipeline_window()
     assert pipeline_widget is not None
     channel_pipeline = pipeline_widget.pipelines[0]
     layer = channel_pipeline.layers[0]

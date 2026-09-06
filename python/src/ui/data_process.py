@@ -14,14 +14,12 @@ from PySide6.QtCore import QPoint, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QHBoxLayout,
     QLabel,
     QMdiArea,
     QMdiSubWindow,
     QMessageBox,
     QProgressDialog,
-    QStackedWidget,
     QTabBar,
     QTabWidget,
     QTextEdit,
@@ -522,9 +520,8 @@ class DataProcessLegacyWidget(QWidget):
 class WorkspaceMdiArea(QMdiArea):
     change_finished_signal = Signal(int, str)
 
-    def __init__(self, mode: str, data_manager: Optional[DataManager] = None, parent=None):
+    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
         super().__init__(parent)
-        self.mode = mode
         self.data_manager = data_manager
         self.data_id = 0
         self.em_data: Optional[EMData] = None
@@ -533,28 +530,16 @@ class WorkspaceMdiArea(QMdiArea):
         self._clear_checked_channels: Optional[Callable[[list[tuple[int, str]]], None]] = None
         self._last_pipeline_window: Optional[DataProcessPipelineWidget] = None
         self.setAcceptDrops(True)
-        self.classic_host = DataProcessLegacyWidget(data_manager, self)
-        # Classic tools should live directly inside this workspace MDI area.
-        # The legacy host is kept only as a controller/state holder.
-        nested_mdi = self.classic_host.mdi_area
-        if nested_mdi is not None and nested_mdi is not self:
-            nested_mdi.hide()
-            nested_mdi.setParent(None)
-            nested_mdi.deleteLater()
-        self.classic_host.mdi_area = self
-        self.classic_host.change_finished_signal.connect(self.change_finished_signal)
 
     def init_data(self, data, data_id: int = 0):
         self.data_id = data_id
         self.em_data = data
-        self.classic_host.init_data(data, data_id)
 
     def set_context_resolver(
         self,
         resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
     ) -> None:
         self._context_resolver = resolver
-        self.classic_host.set_context_resolver(resolver)
 
     def set_selection_payload_resolver(
         self,
@@ -595,17 +580,12 @@ class WorkspaceMdiArea(QMdiArea):
         self._last_pipeline_window = pipeline_widget
         return True
 
-    def activate_classic_mode(self) -> None:
-        self.setActiveSubWindow(None)
-
     def _apply_subwindow_size(
         self,
         sub_window: QMdiSubWindow,
         position: Optional[QPoint] = None,
     ) -> None:
-        min_width = 1100 if self.mode == "pipeline" else 900
-        min_height = 720 if self.mode == "pipeline" else 680
-        target_width, target_height = _mdi_target_size(self, min_width, min_height)
+        target_width, target_height = _mdi_target_size(self, 1100, 720)
         if position is not None:
             sub_window.setGeometry(position.x(), position.y(), target_width, target_height)
         else:
@@ -619,68 +599,42 @@ class WorkspaceMdiArea(QMdiArea):
         self.setActiveSubWindow(sub_window)
 
     def dragEnterEvent(self, event):
-        if self.mode == "pipeline" and (
+        if (
             event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME)
             or pipeline_tool_id_from_mime(event.mimeData()) is not None
         ):
-            event.acceptProposedAction()
-        elif self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if self.mode == "pipeline" and (
+        if (
             event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME)
             or pipeline_tool_id_from_mime(event.mimeData()) is not None
         ):
-            event.acceptProposedAction()
-        elif self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        if self.mode == "pipeline" and event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
+        if event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
             self._handle_data_selection_drop(event)
             return
 
-        if self.mode == "pipeline":
-            tool_id = pipeline_tool_id_from_mime(event.mimeData())
-            if tool_id is not None:
-                drop_point = event.position().toPoint()
-                sub_window = self._subwindow_at(drop_point)
-                target = None if sub_window is None else sub_window.widget()
-                global_pos = self.mapToGlobal(drop_point)
-                if (
-                    isinstance(target, DataProcessPipelineWidget)
-                    and target.drop_tool_at_global_position(tool_id, global_pos)
-                ):
-                    event.acceptProposedAction()
-                    return
-                event.ignore()
-                return
-
-        if self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
-            widget_type = event.mimeData().data(CLASSIC_TOOL_MIME).data().decode()
-            if tool_registry.is_station_tool(widget_type):
-                if self.classic_host.em_data is not None and self.classic_host.data_id != 0:
-                    data_id = self.classic_host.data_id
-                    channel_name = ""
-                else:
-                    event.ignore()
-                    return
-            else:
-                target = self._context_resolver() if self._context_resolver is not None else None
-                if target is None:
-                    event.ignore()
-                    return
-                data_id, channel_name = target
-            sub_window = self.classic_host.open_tool_window(widget_type, data_id, channel_name, event.position().toPoint())
-            if sub_window is not None:
-                self.classic_host.present_subwindow(sub_window)
+        tool_id = pipeline_tool_id_from_mime(event.mimeData())
+        if tool_id is not None:
+            drop_point = event.position().toPoint()
+            sub_window = self._subwindow_at(drop_point)
+            target = None if sub_window is None else sub_window.widget()
+            global_pos = self.mapToGlobal(drop_point)
+            if (
+                isinstance(target, DataProcessPipelineWidget)
+                and target.drop_tool_at_global_position(tool_id, global_pos)
+            ):
                 event.acceptProposedAction()
                 return
+            event.ignore()
+            return
 
         event.ignore()
 
@@ -810,6 +764,25 @@ class WorkspaceMdiArea(QMdiArea):
             QMessageBox.information(self, "部分通道未加入", "\n\n".join(parts))
         return pipeline_widget
 
+    def ensure_pipeline_window(self) -> Optional[DataProcessPipelineWidget]:
+        if self.em_data is None or self.data_id == 0:
+            return None
+
+        channel_refs = [(self.data_id, channel_name) for channel_name in self.em_data.channel_names()]
+        if not channel_refs:
+            return None
+
+        for sub_window in self.subWindowList():
+            pipeline_widget = sub_window.widget()
+            if (
+                isinstance(pipeline_widget, DataProcessPipelineWidget)
+                and any(data_id == self.data_id for data_id, _channel_name in pipeline_widget.channel_refs())
+            ):
+                self.activate_pipeline_window(pipeline_widget)
+                return pipeline_widget
+
+        return self.create_pipeline_window(channel_refs)
+
     def add_channels_to_pipeline_window(
         self,
         pipeline_widget: DataProcessPipelineWidget,
@@ -843,9 +816,8 @@ class WorkspaceMdiArea(QMdiArea):
 class WorkspaceTabPanel(QWidget):
     change_finished_signal = Signal(int, str)
 
-    def __init__(self, mode: str, data_manager: Optional[DataManager] = None, parent=None):
+    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
         super().__init__(parent)
-        self.mode = mode
         self.data_manager = data_manager
         self.data_id = 0
         self.em_data: Optional[EMData] = None
@@ -898,7 +870,7 @@ class WorkspaceTabPanel(QWidget):
             self._workspaces: list[QWidget] = []
             self._current_workspace_index = 0
         self._workspace_counter += 1
-        mdi_area = WorkspaceMdiArea(self.mode, self.data_manager, self.workspace_tabs)
+        mdi_area = WorkspaceMdiArea(self.data_manager, self.workspace_tabs)
         mdi_area.set_context_resolver(self._context_resolver)
         mdi_area.set_selection_payload_resolver(self._selection_payload_resolver)
         mdi_area.set_clear_checked_channels(self._clear_checked_channels)
@@ -913,6 +885,7 @@ class WorkspaceTabPanel(QWidget):
         self.workspace_tabs.blockSignals(False)
         self._current_workspace_index = len(self._workspaces) - 1
         self._update_tab_buttons()
+        mdi_area.ensure_pipeline_window()
         return mdi_area
 
     def _update_tab_buttons(self) -> None:
@@ -1018,13 +991,11 @@ class WorkspaceTabPanel(QWidget):
             mdi_area = container.property("mdi_area")
             if not isinstance(mdi_area, WorkspaceMdiArea):
                 continue
-            mdi_area.classic_host.close_windows_for_data(data_id)
             mdi_area.close_pipeline_windows_for_data(data_id)
 
 
 class DataProcessWidget(QWidget):
     change_finished_signal = Signal(int, str)
-    PIPELINE_ENABLED = True
 
     def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
         super().__init__(parent)
@@ -1034,68 +1005,18 @@ class DataProcessWidget(QWidget):
         self._context_resolver: Optional[Callable[[], Optional[tuple[int, str]]]] = None
         self._selection_payload_resolver: Optional[Callable[[], Optional[dict]]] = None
         self._clear_checked_channels: Optional[Callable[[list[tuple[int, str]]], None]] = None
-        self._mode = "classic"
-
-        self.mode_label = QLabel("模式", self)
-        self.mode_button_group = QButtonGroup(self)
-        self.classic_button = QToolButton(self)
-        self.classic_button.setText("Classic")
-        self.classic_button.setCheckable(True)
-        self.classic_button.setAutoExclusive(True)
-        self.classic_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.pipeline_button = QToolButton(self)
-        self.pipeline_button.setText("Pipeline")
-        self.pipeline_button.setCheckable(True)
-        self.pipeline_button.setAutoExclusive(True)
-        self.pipeline_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.mode_button_group.addButton(self.classic_button)
-        self.mode_button_group.addButton(self.pipeline_button)
-        self.classic_button.clicked.connect(lambda: self.set_mode("classic"))
-        self.pipeline_button.clicked.connect(lambda: self.set_mode("pipeline"))
-        self.classic_button.setObjectName("classicModeButton")
-        self.pipeline_button.setObjectName("pipelineModeButton")
-        self.classic_button.setStyleSheet(
-            "QToolButton {"
-            " padding: 6px 16px;"
-            " border: 1px solid palette(mid);"
-            " border-right: none;"
-            " border-radius: 6px 0 0 6px;"
-            " background: palette(button);"
-            " color: palette(button-text);"
-            " }"
-            "QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
-        )
-        self.pipeline_button.setStyleSheet(
-            "QToolButton {"
-            " padding: 6px 16px;"
-            " border: 1px solid palette(mid);"
-            " border-radius: 0 6px 6px 0;"
-            " background: palette(button);"
-            " color: palette(button-text);"
-            " }"
-            "QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
-        )
-        self.pipeline_button.setEnabled(self.PIPELINE_ENABLED)
-        self.pipeline_button.setToolTip("Pipeline 功能暂时屏蔽" if not self.PIPELINE_ENABLED else "")
         self.batch_button = QToolButton(self)
         self.batch_button.setText("批处理…")
         self.batch_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.batch_button.clicked.connect(self._open_batch_process)
 
-        self.mode_stack = QStackedWidget(self)
-        self.classic_panel = WorkspaceTabPanel("classic", data_manager, self)
-        self.pipeline_panel = WorkspaceTabPanel("pipeline", data_manager, self)
-        self.classic_panel.change_finished_signal.connect(self.change_finished_signal)
+        self.pipeline_panel = WorkspaceTabPanel(data_manager, self)
         self.pipeline_panel.change_finished_signal.connect(self.change_finished_signal)
-        self.mode_stack.addWidget(self.classic_panel)
-        self.mode_stack.addWidget(self.pipeline_panel)
 
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(8, 6, 8, 6)
         header_layout.setSpacing(10)
-        header_layout.addWidget(self.mode_label)
-        header_layout.addWidget(self.classic_button)
-        header_layout.addWidget(self.pipeline_button)
+        header_layout.addWidget(QLabel("Pipeline", self))
         header_layout.addStretch(1)
         header_layout.addWidget(self.batch_button)
 
@@ -1103,9 +1024,7 @@ class DataProcessWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(header_layout)
-        layout.addWidget(self.mode_stack, 1)
-
-        self.set_mode("classic")
+        layout.addWidget(self.pipeline_panel, 1)
 
     def _open_batch_process(self) -> None:
         if self.data_manager is None:
@@ -1114,38 +1033,56 @@ class DataProcessWidget(QWidget):
         dialog.result_applied.connect(self.change_finished_signal)
         dialog.exec()
 
-    def _current_panel(self) -> WorkspaceTabPanel:
-        return self.classic_panel if self._mode == "classic" else self.pipeline_panel
-
-    def open_tool_for(self, data_id: int, channel_name: str, tool_type: str):
+    def open_tool_for(
+        self,
+        data_id: int,
+        channel_name: str,
+        tool_type: str,
+    ) -> Optional[DataProcessPipelineWidget]:
         data = self.data_manager.get(data_id) if self.data_manager is not None else None
         if data is None:
             return None
         self.init_data(data, data_id)
-        self.set_mode("classic")
-        workspace = self.classic_panel.current_workspace()
+        workspace = self.pipeline_panel.current_workspace()
         if workspace is None:
-            workspace = self.classic_panel._create_workspace()
-        sub_window = workspace.classic_host.open_tool_window(tool_type, data_id, channel_name)
-        if sub_window is not None:
-            workspace.classic_host.present_subwindow(sub_window)
-        return sub_window
+            workspace = self.pipeline_panel._create_workspace()
+        pipeline_widget = workspace.ensure_pipeline_window()
+        if pipeline_widget is None:
+            return None
+
+        channel_pipeline = pipeline_widget._find_pipeline(data_id, channel_name)
+        if channel_pipeline is None:
+            workspace.add_channels_to_pipeline_window(pipeline_widget, [(data_id, channel_name)])
+            channel_pipeline = pipeline_widget._find_pipeline(data_id, channel_name)
+        if channel_pipeline is None or not channel_pipeline.layers:
+            return pipeline_widget
+
+        pipeline_widget._on_tool_dropped(
+            data_id,
+            channel_name,
+            channel_pipeline.layers[0].layer_id,
+            tool_type,
+            0,
+        )
+        workspace.activate_pipeline_window(pipeline_widget)
+        return pipeline_widget
 
     def current_workspace(self) -> Optional[WorkspaceMdiArea]:
-        return self._current_panel().current_workspace()
+        return self.pipeline_panel.current_workspace()
 
     def init_data(self, data, data_id: int = 0):
         self.data_id = data_id
         self.em_data = data
-        self.classic_panel.init_data(data, data_id)
         self.pipeline_panel.init_data(data, data_id)
+        workspace = self.pipeline_panel.current_workspace()
+        if workspace is not None:
+            workspace.ensure_pipeline_window()
 
     def set_context_resolver(
         self,
         resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
     ) -> None:
         self._context_resolver = resolver
-        self.classic_panel.set_context_resolver(resolver)
         self.pipeline_panel.set_context_resolver(resolver)
 
     def set_selection_payload_resolver(
@@ -1153,7 +1090,6 @@ class DataProcessWidget(QWidget):
         resolver: Optional[Callable[[], Optional[dict]]],
     ) -> None:
         self._selection_payload_resolver = resolver
-        self.classic_panel.set_selection_payload_resolver(resolver)
         self.pipeline_panel.set_selection_payload_resolver(resolver)
 
     def set_clear_checked_channels(
@@ -1161,30 +1097,10 @@ class DataProcessWidget(QWidget):
         clearer: Optional[Callable[[list[tuple[int, str]]], None]],
     ) -> None:
         self._clear_checked_channels = clearer
-        self.classic_panel.set_clear_checked_channels(clearer)
         self.pipeline_panel.set_clear_checked_channels(clearer)
 
     def close_windows_for_data(self, data_id: int):
-        self.classic_panel.close_windows_for_data(data_id)
         self.pipeline_panel.close_windows_for_data(data_id)
-
-    def current_mode(self) -> str:
-        return self._mode
-
-    def set_mode(self, mode: str):
-        if mode not in ("classic", "pipeline"):
-            return
-        if mode == "pipeline" and not self.PIPELINE_ENABLED:
-            mode = "classic"
-        self._mode = mode
-        self.classic_button.setChecked(mode == "classic")
-        self.pipeline_button.setChecked(mode == "pipeline")
-        self.mode_stack.setCurrentWidget(self.classic_panel if mode == "classic" else self.pipeline_panel)
-
-    @property
-    def legacy_widget(self) -> Optional[DataProcessLegacyWidget]:
-        workspace = self.classic_panel.current_workspace()
-        return None if workspace is None else workspace.classic_host
 
     @property
     def pipeline_widget(self) -> Optional[DataProcessPipelineWidget]:

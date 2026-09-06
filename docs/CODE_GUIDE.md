@@ -205,7 +205,7 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 ### `data_process.py` — 数据处理面板
 - 单一 Pipeline 工作区 + MDI；活动数据和新工作区都会建立全通道 Pipeline，block 通过插件 `process()` 异步执行并可导出 recipe。
 - `WorkspaceMdiArea`：单工作区 MDI，接受处理工具（`PROCESSING_TOOL_MIME`）和通道选择（`DATA_TREE_SELECTION_MIME`，JSON payload）的拖放。
-- `WorkspaceTabPanel`：多工作区 tab，末尾常驻"+"tab 新建工作区。
+- “新建 Pipeline”直接在同一个 `WorkspaceMdiArea` 中创建独立的 `QMdiSubWindow`；不再有工作区 Tab 容器。
 - `open_tool_for()` 定位目标通道并添加 block；只选择 block，不直接修改 `EMData`。
 
 ### `data_process_pipeline.py` — Pipeline 编辑器

@@ -12,8 +12,6 @@ from PySide6.QtWidgets import (
     QMdiArea,
     QMdiSubWindow,
     QMessageBox,
-    QTabBar,
-    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -335,187 +333,6 @@ class WorkspaceMdiArea(QMdiArea):
         super().closeEvent(event)
 
 
-class WorkspaceTabPanel(QWidget):
-    change_finished_signal = Signal(int, str)
-
-    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
-        super().__init__(parent)
-        self.data_manager = data_manager
-        self.data_id = 0
-        self.em_data: Optional[EMData] = None
-        self._context_resolver: Optional[Callable[[], Optional[tuple[int, str]]]] = None
-        self._selection_payload_resolver: Optional[Callable[[], Optional[dict]]] = None
-        self._clear_checked_channels: Optional[Callable[[list[tuple[int, str]]], None]] = None
-        self._workspace_counter = 0
-        self._workspaces: list[QWidget] = []
-        self._current_workspace_index = 0
-        self.workspace_tabs = QTabWidget(self)
-        self.workspace_tabs.setMovable(True)
-        self.workspace_tabs.setTabsClosable(True)
-        self.workspace_tabs.currentChanged.connect(self._on_tab_changed)
-        self.workspace_tabs.tabCloseRequested.connect(self._close_workspace)
-        self._creating_workspace = False
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.workspace_tabs, 1)
-
-        self._ensure_add_tab()
-        self._create_workspace()
-
-    def _tab_label(self, number: int) -> str:
-        return f"工作区 {number}"
-
-    def _ensure_add_tab(self):
-        if self.workspace_tabs.count() == 0 or self.workspace_tabs.tabText(self.workspace_tabs.count() - 1) != "+":
-            current_index = self.workspace_tabs.currentIndex()
-            self.workspace_tabs.blockSignals(True)
-            self.workspace_tabs.addTab(QWidget(self.workspace_tabs), "+")
-            if current_index >= 0:
-                self.workspace_tabs.setCurrentIndex(current_index)
-            self.workspace_tabs.blockSignals(False)
-        self._update_tab_buttons()
-
-    def _workspace_container(self, mdi_area: WorkspaceMdiArea) -> QWidget:
-        container = QWidget(self.workspace_tabs)
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(mdi_area, 1)
-        container.setLayout(layout)
-        container.setProperty("mdi_area", mdi_area)
-        return container
-
-    def _create_workspace(self) -> WorkspaceMdiArea:
-        if not hasattr(self, "_workspaces"):
-            self._workspaces: list[QWidget] = []
-            self._current_workspace_index = 0
-        self._workspace_counter += 1
-        mdi_area = WorkspaceMdiArea(self.data_manager, self.workspace_tabs)
-        mdi_area.set_context_resolver(self._context_resolver)
-        mdi_area.set_selection_payload_resolver(self._selection_payload_resolver)
-        mdi_area.set_clear_checked_channels(self._clear_checked_channels)
-        mdi_area.change_finished_signal.connect(self.change_finished_signal)
-        mdi_area.init_data(self.em_data, self.data_id)
-        container = self._workspace_container(mdi_area)
-        self._workspaces.append(container)
-        insert_index = max(0, self.workspace_tabs.count() - 1)
-        self.workspace_tabs.blockSignals(True)
-        self.workspace_tabs.insertTab(insert_index, container, self._tab_label(self._workspace_counter))
-        self.workspace_tabs.setCurrentIndex(insert_index)
-        self.workspace_tabs.blockSignals(False)
-        self._current_workspace_index = len(self._workspaces) - 1
-        self._update_tab_buttons()
-        mdi_area.ensure_pipeline_window()
-        return mdi_area
-
-    def _update_tab_buttons(self) -> None:
-        tab_bar = self.workspace_tabs.tabBar()
-        add_index = self.workspace_tabs.count() - 1
-        show_close = len(self._workspaces) > 1
-
-        for index in range(self.workspace_tabs.count()):
-            for side in (QTabBar.LeftSide, QTabBar.RightSide):
-                button = tab_bar.tabButton(index, side)
-                if button is None:
-                    continue
-                if index == add_index:
-                    button.hide()
-                else:
-                    button.setVisible(show_close)
-
-    def _close_workspace(self, index: int) -> None:
-        add_index = self.workspace_tabs.count() - 1
-        if index < 0 or index >= add_index:
-            return
-        if len(self._workspaces) <= 1:
-            self._update_tab_buttons()
-            return
-
-        container = self._workspaces.pop(index)
-        mdi_area = container.property("mdi_area")
-        if isinstance(mdi_area, WorkspaceMdiArea):
-            mdi_area.close()
-
-        self.workspace_tabs.blockSignals(True)
-        self.workspace_tabs.removeTab(index)
-        next_index = min(index, len(self._workspaces) - 1)
-        self.workspace_tabs.setCurrentIndex(max(0, next_index))
-        self.workspace_tabs.blockSignals(False)
-
-        container.deleteLater()
-        self._current_workspace_index = max(0, min(next_index, len(self._workspaces) - 1))
-        self._update_tab_buttons()
-
-    def _on_tab_changed(self, index: int):
-        add_index = self.workspace_tabs.count() - 1
-        if index == add_index:
-            if self._creating_workspace:
-                return
-            self._creating_workspace = True
-            try:
-                self._create_workspace()
-            finally:
-                self._creating_workspace = False
-            return
-        if 0 <= index < add_index:
-            self._current_workspace_index = index
-
-    def current_workspace(self) -> Optional[WorkspaceMdiArea]:
-        if not self._workspaces:
-            return None
-        index = min(self._current_workspace_index, len(self._workspaces) - 1)
-        container = self._workspaces[index]
-        widget = container.property("mdi_area")
-        return widget if isinstance(widget, WorkspaceMdiArea) else None
-
-    def init_data(self, data, data_id: int = 0):
-        self.data_id = data_id
-        self.em_data = data
-        for container in self._workspaces:
-            mdi_area = container.property("mdi_area")
-            if isinstance(mdi_area, WorkspaceMdiArea):
-                mdi_area.init_data(data, data_id)
-
-    def set_context_resolver(
-        self,
-        resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
-    ) -> None:
-        self._context_resolver = resolver
-        for container in self._workspaces:
-            mdi_area = container.property("mdi_area")
-            if isinstance(mdi_area, WorkspaceMdiArea):
-                mdi_area.set_context_resolver(resolver)
-
-    def set_selection_payload_resolver(
-        self,
-        resolver: Optional[Callable[[], Optional[dict]]],
-    ) -> None:
-        self._selection_payload_resolver = resolver
-        for container in self._workspaces:
-            mdi_area = container.property("mdi_area")
-            if isinstance(mdi_area, WorkspaceMdiArea):
-                mdi_area.set_selection_payload_resolver(resolver)
-
-    def set_clear_checked_channels(
-        self,
-        clearer: Optional[Callable[[list[tuple[int, str]]], None]],
-    ) -> None:
-        self._clear_checked_channels = clearer
-        for container in self._workspaces:
-            mdi_area = container.property("mdi_area")
-            if isinstance(mdi_area, WorkspaceMdiArea):
-                mdi_area.set_clear_checked_channels(clearer)
-
-    def close_windows_for_data(self, data_id: int):
-        for container in self._workspaces:
-            mdi_area = container.property("mdi_area")
-            if not isinstance(mdi_area, WorkspaceMdiArea):
-                continue
-            mdi_area.close_pipeline_windows_for_data(data_id)
-
-
 class DataProcessWidget(QWidget):
     change_finished_signal = Signal(int, str)
 
@@ -532,21 +349,26 @@ class DataProcessWidget(QWidget):
         self.batch_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.batch_button.clicked.connect(self._open_batch_process)
 
-        self.pipeline_panel = WorkspaceTabPanel(data_manager, self)
-        self.pipeline_panel.change_finished_signal.connect(self.change_finished_signal)
+        self.workspace = WorkspaceMdiArea(data_manager, self)
+        self.workspace.change_finished_signal.connect(self.change_finished_signal)
+        self.new_pipeline_button = QToolButton(self)
+        self.new_pipeline_button.setText("新建 Pipeline")
+        self.new_pipeline_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.new_pipeline_button.clicked.connect(self._create_pipeline_window)
 
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(8, 6, 8, 6)
         header_layout.setSpacing(10)
         header_layout.addWidget(QLabel("Pipeline", self))
         header_layout.addStretch(1)
+        header_layout.addWidget(self.new_pipeline_button)
         header_layout.addWidget(self.batch_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(header_layout)
-        layout.addWidget(self.pipeline_panel, 1)
+        layout.addWidget(self.workspace, 1)
 
     def _open_batch_process(self) -> None:
         if self.data_manager is None:
@@ -554,6 +376,12 @@ class DataProcessWidget(QWidget):
         dialog = BatchProcessDialog(self.data_manager, self)
         dialog.result_applied.connect(self.change_finished_signal)
         dialog.exec()
+
+    def _create_pipeline_window(self) -> Optional[DataProcessPipelineWidget]:
+        if self.em_data is None or self.data_id == 0:
+            return None
+        channel_refs = [(self.data_id, channel_name) for channel_name in self.em_data.channel_names()]
+        return self.workspace.create_pipeline_window(channel_refs)
 
     def open_tool_for(
         self,
@@ -565,16 +393,13 @@ class DataProcessWidget(QWidget):
         if data is None:
             return None
         self.init_data(data, data_id)
-        workspace = self.pipeline_panel.current_workspace()
-        if workspace is None:
-            workspace = self.pipeline_panel._create_workspace()
-        pipeline_widget = workspace.ensure_pipeline_window()
+        pipeline_widget = self.workspace.ensure_pipeline_window()
         if pipeline_widget is None:
             return None
 
         channel_pipeline = pipeline_widget._find_pipeline(data_id, channel_name)
         if channel_pipeline is None:
-            workspace.add_channels_to_pipeline_window(pipeline_widget, [(data_id, channel_name)])
+            self.workspace.add_channels_to_pipeline_window(pipeline_widget, [(data_id, channel_name)])
             channel_pipeline = pipeline_widget._find_pipeline(data_id, channel_name)
         if channel_pipeline is None or not channel_pipeline.layers:
             return pipeline_widget
@@ -586,50 +411,45 @@ class DataProcessWidget(QWidget):
             tool_type,
             0,
         )
-        workspace.activate_pipeline_window(pipeline_widget)
+        self.workspace.activate_pipeline_window(pipeline_widget)
         return pipeline_widget
 
     def current_workspace(self) -> Optional[WorkspaceMdiArea]:
-        return self.pipeline_panel.current_workspace()
+        return self.workspace
 
     def init_data(self, data, data_id: int = 0):
         self.data_id = data_id
         self.em_data = data
-        self.pipeline_panel.init_data(data, data_id)
-        workspace = self.pipeline_panel.current_workspace()
-        if workspace is not None:
-            workspace.ensure_pipeline_window()
+        self.workspace.init_data(data, data_id)
+        self.workspace.ensure_pipeline_window()
 
     def set_context_resolver(
         self,
         resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
     ) -> None:
         self._context_resolver = resolver
-        self.pipeline_panel.set_context_resolver(resolver)
+        self.workspace.set_context_resolver(resolver)
 
     def set_selection_payload_resolver(
         self,
         resolver: Optional[Callable[[], Optional[dict]]],
     ) -> None:
         self._selection_payload_resolver = resolver
-        self.pipeline_panel.set_selection_payload_resolver(resolver)
+        self.workspace.set_selection_payload_resolver(resolver)
 
     def set_clear_checked_channels(
         self,
         clearer: Optional[Callable[[list[tuple[int, str]]], None]],
     ) -> None:
         self._clear_checked_channels = clearer
-        self.pipeline_panel.set_clear_checked_channels(clearer)
+        self.workspace.set_clear_checked_channels(clearer)
 
     def close_windows_for_data(self, data_id: int):
-        self.pipeline_panel.close_windows_for_data(data_id)
+        self.workspace.close_pipeline_windows_for_data(data_id)
 
     @property
     def pipeline_widget(self) -> Optional[DataProcessPipelineWidget]:
-        workspace = self.pipeline_panel.current_workspace()
-        if workspace is None:
-            return None
-        return workspace.active_pipeline_window() or workspace.last_pipeline_window()
+        return self.workspace.active_pipeline_window() or self.workspace.last_pipeline_window()
 
 
 if __name__ == "__main__":

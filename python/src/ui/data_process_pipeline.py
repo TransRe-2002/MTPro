@@ -1044,10 +1044,16 @@ class DataProcessPipelineWidget(QWidget):
         preview_button.clicked.connect(self._show_preview_summary)
         commit_button = QPushButton("commit", toolbar)
         commit_button.clicked.connect(self._commit_preview)
+        self.clear_blocks_after_commit_checkbox = QCheckBox("提交后清空 block", toolbar)
+        self.clear_blocks_after_commit_checkbox.setChecked(True)
+        self.clear_blocks_after_commit_checkbox.setToolTip(
+            "仅在至少一个 channel 成功提交后，清空当前 Pipeline 窗口内的全部 block。"
+        )
         export_button = QPushButton("export recipe", toolbar)
         export_button.clicked.connect(self._export_recipe)
         toolbar_layout.addWidget(preview_button)
         toolbar_layout.addWidget(commit_button)
+        toolbar_layout.addWidget(self.clear_blocks_after_commit_checkbox)
         toolbar_layout.addWidget(export_button)
         right_layout.addWidget(toolbar)
 
@@ -2231,6 +2237,12 @@ class DataProcessPipelineWidget(QWidget):
                     block.status = "configured" if block.params else "empty"
                     block.last_summary = "committed into baseline; rerun to regenerate"
 
+    def _clear_blocks_after_commit(self) -> None:
+        for pipeline in self.pipelines:
+            for layer in pipeline.layers:
+                layer.blocks.clear()
+        self.selected_block_id = ""
+
     def _unready_blocks(self) -> list[tuple[ChannelPipeline, PipelineLayer, PipelineBlock]]:
         result: list[tuple[ChannelPipeline, PipelineLayer, PipelineBlock]] = []
         for pipeline in self.pipelines:
@@ -2264,6 +2276,7 @@ class DataProcessPipelineWidget(QWidget):
             return
 
         changed_channels: list[str] = []
+        committed_pipelines: list[ChannelPipeline] = []
 
         for pipeline in self.pipelines:
             data = self._data_for(pipeline.data_id)
@@ -2283,13 +2296,21 @@ class DataProcessPipelineWidget(QWidget):
             updated_series.loc[target_series.index] = preview_snapshot
             data.set_channel_series(pipeline.channel, updated_series)
             changed_channels.append(f"#{pipeline.data_id} {pipeline.channel}")
-            self._reset_pipeline_after_commit(pipeline)
+            committed_pipelines.append(pipeline)
             self.change_finished_signal.emit(pipeline.data_id, pipeline.channel)
 
         if not changed_channels:
             QMessageBox.information(self, "Commit", "没有可提交的新 preview 结果。")
             self._refresh_all_pipeline_statuses()
             return
+
+        if self.clear_blocks_after_commit_checkbox.isChecked():
+            self._clear_blocks_after_commit()
+            commit_detail = "处理结果已合并到 baseline，当前窗口的 block 已清空。"
+        else:
+            for pipeline in committed_pipelines:
+                self._reset_pipeline_after_commit(pipeline)
+            commit_detail = "处理结果已合并到 baseline；继续处理时请重新打开对应 block。"
 
         self._rebuild_lanes()
         self._refresh_all_pipeline_statuses()
@@ -2299,7 +2320,8 @@ class DataProcessPipelineWidget(QWidget):
             "Commit",
             "已写回 channel:\n"
             + "\n".join(changed_channels)
-            + "\n\n处理结果已合并到 baseline；继续处理时请重新打开对应 block。",
+            + "\n\n"
+            + commit_detail,
         )
 
     def _refresh_selection(self):

@@ -446,11 +446,43 @@ def test_pipeline_preview_commit_replays_downstream_edit_on_updated_upstream():
         base + 12,
     )
     np.testing.assert_allclose(channel_pipeline.baseline_snapshot, base + 12)
-    assert first.output_slice is None
-    assert second.output_slice is None
+    assert pipeline_widget.clear_blocks_after_commit_checkbox.isChecked()
+    assert layer.blocks == []
     assert changed == [(1, "Ex1")]
 
     widget.close()
+
+
+def test_pipeline_commit_can_keep_blocks_when_clear_option_is_disabled(qtbot):
+    _app()
+    manager = DataManager()
+    data = DemoData("demo", ["Ex1"])
+    key = manager.add(data)
+    pipeline_widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(pipeline_widget)
+    pipeline_widget.add_channels([(key, "Ex1")])
+    pipeline_widget.clear_blocks_after_commit_checkbox.setChecked(False)
+
+    layer = pipeline_widget.pipelines[0].layers[0]
+    base = data.get_channel_series("Ex1").to_numpy(dtype=np.float64, copy=True)
+    block = PipelineBlock(
+        tool_id="remove_spike",
+        start=0,
+        end=base.size,
+        status="ready",
+        input_slice=base.copy(),
+        output_slice=base + 1,
+    )
+    layer.blocks.append(block)
+
+    with patch("ui.data_process_pipeline.QMessageBox.information"):
+        pipeline_widget._commit_preview()
+
+    assert layer.blocks == [block]
+    assert block.status == "empty"
+    assert block.input_slice is None
+    assert block.output_slice is None
+    pipeline_widget.close()
 
 
 def test_pipeline_replays_deletion_without_overwriting_unchanged_upstream_values():

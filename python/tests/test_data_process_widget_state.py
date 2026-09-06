@@ -362,6 +362,30 @@ def test_pipeline_drop_adds_block_from_shared_tool_payload():
     widget.close()
 
 
+def test_manual_removal_blocks_start_ready_with_an_identity_preview():
+    _app()
+    widget = DataProcessWidget()
+    data = DemoData("demo", ["Ex1"])
+    widget.init_data(data, 1)
+
+    pipeline_widget = widget.pipeline_widget
+    assert pipeline_widget is not None
+    channel_pipeline = pipeline_widget.pipelines[0]
+    first_layer = channel_pipeline.layers[0]
+    pipeline_widget._on_tool_dropped(1, "Ex1", first_layer.layer_id, "remove_spike", 0)
+
+    second_layer = channel_pipeline.add_layer()
+    pipeline_widget._on_tool_dropped(1, "Ex1", second_layer.layer_id, "remove_region", 0)
+
+    blocks = [first_layer.blocks[0], second_layer.blocks[0]]
+    for block in blocks:
+        assert block.status == "ready"
+        np.testing.assert_allclose(block.input_slice, block.output_slice)
+    assert pipeline_widget._unready_blocks() == []
+
+    widget.close()
+
+
 def test_pipeline_preview_commit_replays_downstream_edit_on_updated_upstream():
     _app()
     widget = DataProcessWidget()

@@ -67,6 +67,7 @@ ADD_ROW_H = 24
 RULER_H = 24
 HANDLE_W = 7
 MIN_BLOCK_SPAN = 100
+READY_BY_DEFAULT_INTERACTIVE_TOOLS = frozenset({"remove_spike", "remove_region"})
 
 
 def px_per_point(zoom: float) -> float:
@@ -1457,6 +1458,20 @@ class DataProcessPipelineWidget(QWidget):
             status="configured" if TOOL_META[tool_id].get("kind") == "param" else "empty",
         )
         layer.blocks.append(block)
+        if tool_id in READY_BY_DEFAULT_INTERACTIVE_TOOLS:
+            preview_before_block = self._compose_channel_preview(
+                data_id,
+                channel_name,
+                stop_before_block_id=block.block_id,
+                update_status=True,
+            )
+            block.input_slice = np.array(
+                preview_before_block[block.start:block.end],
+                copy=True,
+            )
+            block.output_slice = np.array(block.input_slice, copy=True)
+            block.status = "ready"
+            block.last_summary = "ready; no points or regions selected"
         self.selected_block_id = block.block_id
         self._refresh_selection()
 

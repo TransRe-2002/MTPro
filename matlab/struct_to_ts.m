@@ -34,6 +34,11 @@ function struct_to_ts(input_file, output_file)
     if isempty(tsObj.NCh) || isempty(tsObj.npts)
         [tsObj.NCh, tsObj.npts] = size(tsObj.data);
     end
+    % TS methods assume MATLAB's default double numeric type.  scipy-written
+    % structs can otherwise carry int64 values into these properties, causing
+    % datevec/datenum arithmetic in TS.findTime and TS.decimate to fail.
+    tsObj.NCh = double(tsObj.NCh);
+    tsObj.npts = double(tsObj.npts);
     if isempty(tsObj.endTime)
         tsObj.endTime = datevec(datenum(tsObj.startTime) + ...
             (tsObj.npts - 1) * (tsObj.dt / 86400));

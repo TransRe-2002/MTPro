@@ -204,6 +204,26 @@ class TestDecimate:
         assert np.isnan(ex[2])
         assert np.isfinite(ex[0]) and np.isfinite(ex[1]) and np.isfinite(ex[3])
 
+    def test_sparse_nan_uses_ts_boxcar_policy(self):
+        d = DemoData(100)
+        original = d.data["Ex"].to_numpy().copy()
+        d.data["Ex"][12] = np.nan  # 窗口 [10,15) 缺 1/5 = 20%
+        original[12] = np.nan
+
+        d.decimate(5)
+
+        assert d.data["Ex"].to_numpy()[2] == pytest.approx(
+            np.nanmean(original[10:15])
+        )
+
+    def test_custom_missing_threshold_can_be_strict(self):
+        d = DemoData(100)
+        d.data["Ex"][12] = np.nan
+
+        d.decimate(5, max_missing_fraction=0.0)
+
+        assert np.isnan(d.data["Ex"].to_numpy()[2])
+
     def test_all_nan_channel(self):
         d = DemoData(100)
         d.data["Hy"][:] = np.nan

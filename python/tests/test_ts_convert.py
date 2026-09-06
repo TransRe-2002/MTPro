@@ -116,6 +116,17 @@ def test_build_ts_struct_replaces_none_with_empty():
     assert isinstance(value, np.ndarray) and value.size == 0
 
 
+def test_build_mdict_writes_ts_dimensions_as_matlab_double():
+    """TS methods perform date arithmetic that fails when npts/NCh are int64."""
+    em = MatLoader.load(str(STRUCT_MAT))
+
+    mdict = MatSaver._build_mdict(em)
+    ts = mdict[em._struct_key]
+
+    assert ts["npts"][0, 0].dtype == np.float64
+    assert ts["NCh"][0, 0].dtype == np.float64
+
+
 # 新版 MATLAB（Windows）写出的 TS 对象文件带额外 table 属性，其中可能含
 # scipy 无法写回的 None——曾导致保存失败。本地数据条件覆盖。
 NE_NEW_LAYOUT_MAT = Path('/home/transen5/Works/数据处理/东北数据/22-20260601-20260720-dt2.mat')

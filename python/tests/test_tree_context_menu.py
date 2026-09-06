@@ -76,9 +76,28 @@ def test_channel_menu_contains_channel_items():
     menu, actions = viewer._build_channel_context_menu()
 
     texts = _menu_texts(menu)
-    assert texts == ["显示曲线", "序列对比", "重命名通道…", "删除通道"]
+    assert texts == ["显示曲线", "查看能量谱", "序列对比", "重命名通道…", "删除通道"]
     assert all(callable(actions[a]) for a in menu.actions() if not a.isSeparator())
     menu.close()
+    viewer.close()
+
+
+def test_open_energy_spectrum_creates_and_reuses_channel_panel():
+    _app()
+    dm = DataManager()
+    key = dm.add(DemoData())
+    viewer = DataTreeViewer(dm)
+
+    viewer._open_energy_spectrum(key, "Ex")
+
+    panel = viewer._spectrum_panels[(key, "Ex")]
+    assert panel.isWindow()
+    assert panel.sample_rate_hz == 1.0
+    assert panel.values.shape == (50,)
+    assert panel.status.text().startswith("采样率 1 Hz")
+
+    viewer._open_energy_spectrum(key, "Ex")
+    assert viewer._spectrum_panels[(key, "Ex")] is panel
     viewer.close()
 
 

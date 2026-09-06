@@ -1,5 +1,6 @@
 import sys
 import types
+import numpy as np
 import pandas as pd
 import xarray as xr
 
@@ -89,39 +90,55 @@ def test_data_view_waveform_axes_and_labels_survive_refresh():
         widget.init_data(data)
         QApplication.processEvents()
 
-        for ch, resources in widget.plot_rows.items():
-            plot = resources.widget
-            container = resources.row_container
-            assert plot is not None
-            assert container is not None
+        plots = {resources.widget for resources in widget.plot_rows.values()}
+        assert plots == {widget.plot_widget}
+        plot = widget.plot_widget
+        assert plot.getAxis("left").width() == LEFT_AXIS_WIDTH
+        assert plot.getAxis("bottom").height() == BOTTOM_AXIS_HEIGHT
+        assert set(plot.curves) == set(widget.plot_rows)
 
-            assert plot.getAxis("left").width() == LEFT_AXIS_WIDTH
-            assert plot.getAxis("bottom").height() == BOTTOM_AXIS_HEIGHT
-            assert plot.getAxis("bottom").labelText == ch
-            direct_labels = container.findChildren(
-                QLabel,
-                options=Qt.FindChildOption.FindDirectChildrenOnly,
-            )
-            assert ch not in [label.text() for label in direct_labels]
-
-        for ch, resources in widget.plot_rows.items():
-            plot = resources.widget
-            assert plot is not None
+        for ch in widget.plot_rows:
+            assert plot.curves[ch].isVisible()
+        plot.clear_curves()
+        for ch in widget.plot_rows:
             series = data.get_channel_series(ch)
-            if ch == "Ex":
-                plot.plot_item.showAxis("left", False)
-                plot.plot_item.showAxis("bottom", False)
-            plot.clear_curves()
             plot.add_curve(data.datetime_index, series.values, ch)
-            plot.update_plot(data.start_time, data.end_time)
+        plot.update_plot(data.start_time, data.end_time)
 
-        for ch, resources in widget.plot_rows.items():
-            plot = resources.widget
-            assert plot is not None
+        assert plot.getAxis("left").width() == LEFT_AXIS_WIDTH
+        assert plot.getAxis("bottom").height() == BOTTOM_AXIS_HEIGHT
+    finally:
+        widget.shutdown()
+        widget.close()
+        QApplication.processEvents()
 
-            assert plot.getAxis("left").width() == LEFT_AXIS_WIDTH
-            assert plot.getAxis("bottom").height() == BOTTOM_AXIS_HEIGHT
-            assert plot.getAxis("bottom").labelText == ch
+
+def test_unknown_channels_are_available_but_not_checked_by_default():
+    _app()
+    data = DemoData("demo", ["Ex", "Err", "Hy"], npts=900)
+    widget = DataViewWidget()
+
+    try:
+        widget.init_data(data)
+        QApplication.processEvents()
+
+        assert "Err" in widget._checkboxes
+        assert not widget._checkboxes["Err"].isChecked()
+        assert not widget.plot_widget.curves["Err"].isVisible()
+        legend_names = {label.text for _, label in widget.plot_widget.plot_item.legend.items}
+        assert "Err" not in legend_names
+
+        widget._checkboxes["Err"].setChecked(True)
+        QApplication.processEvents()
+
+        assert widget.plot_widget.curves["Err"].isVisible()
+        offsets = widget._stack_offsets
+        assert offsets["Ex"] != offsets["Err"] != offsets["Hy"]
+        legend_names = {label.text for _, label in widget.plot_widget.plot_item.legend.items}
+        assert "Err" in legend_names
+        for ch, offset in offsets.items():
+            _, values = widget.plot_widget.curves[ch].getData()
+            assert abs(float(np.nanmedian(values)) - offset) < 0.25
     finally:
         widget.shutdown()
         widget.close()

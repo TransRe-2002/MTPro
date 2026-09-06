@@ -132,6 +132,12 @@ def test_decimate_dialog_preview_updates():
     assert "5s" in preview or "5 s" in preview.replace("\xa0", " ")
     assert "20 点" in preview
     assert dlg.factor() == 5
+    assert dlg.max_missing_fraction() == 1.0
+    assert "100%" in preview
+
+    dlg._max_missing_spin.setValue(10)
+    assert dlg.max_missing_fraction() == 0.10
+    assert "10%" in dlg._preview_label.text()
     dlg.close()
 
 

@@ -62,7 +62,9 @@ class PlotPanel(TimeViewportMixin, QWidget):
         self.x_data = x_data
         self.y_data = y_data
         self.duration: Optional[pd.Timedelta] = (
-            (x_data[-1] - x_data[0]) if x_data is not None else None
+            (x_data[-1] - x_data[0])
+            if x_data is not None and len(x_data) > 0
+            else None
         )
 
         # PyQtGraph相关属性
@@ -74,6 +76,7 @@ class PlotPanel(TimeViewportMixin, QWidget):
         self._x_raw: Optional[np.ndarray] = None    # 原始时间戳数组（秒级浮点）
         self._y_raw: Optional[np.ndarray] = None    # 原始信号幅值数组
         self._pyramid: Optional[LODPyramid] = None  # LOD 缩放金字塔（按像素数查询）
+        self._has_plottable_data = False            # 至少存在一个有限幅值
 
         # 视口参数（Mixin 约定属性名为 x_view_start / x_view_size）
         self.x_view_start: Optional[pd.Timedelta] = None  # 横轴视口起点（相对数据首点偏移）
@@ -209,15 +212,27 @@ class PlotPanel(TimeViewportMixin, QWidget):
 
     def init_plot(self):
         """创建LOD金字塔、初始化视口、设置滚动条范围并触发首次显示。"""
-        if self.x_data is None or self.y_data is None:
+        if (
+            self.x_data is None
+            or self.y_data is None
+            or len(self.x_data) == 0
+            or len(self.y_data) == 0
+        ):
             self.add_text_placeholder("请先加载数据")
             return
 
         self.clear_plot()
-        self.set_time_range(pts_to_qdt(self.x_data[0]), pts_to_qdt(self.x_data[-1]))  # Mixin
-
         x_values = dti_to_numpy(self.x_data)
-        y_values = self.y_data.to_numpy()
+        y_values = self.y_data.to_numpy(dtype=np.float64)
+        finite_values = y_values[np.isfinite(y_values)]
+        if finite_values.size == 0:
+            self.add_text_placeholder("该通道没有有效数据")
+            self.zoom_in_action.setEnabled(False)
+            self.zoom_out_action.setEnabled(False)
+            return
+
+        self._has_plottable_data = True
+        self.set_time_range(pts_to_qdt(self.x_data[0]), pts_to_qdt(self.x_data[-1]))  # Mixin
         self._x_raw = x_values
         self._y_raw = y_values
         # 构建LOD金字塔：将全量数据预抽稀为多级LOD，后续按像素数查询对应分辨率的数据
@@ -247,10 +262,13 @@ class PlotPanel(TimeViewportMixin, QWidget):
         self.scroll_x.setValue(0)
 
         # 初始化 y 视口
-        y_min = float(np.nanmin(self.y_data))
-        y_max = float(np.nanmax(self.y_data))
+        y_min = float(finite_values.min())
+        y_max = float(finite_values.max())
         y_center = (y_max + y_min) / 2
         y_diff = (y_max - y_min) / 2
+        if y_diff == 0.0:
+            # 常量（包括全 0）通道也需要一个非零显示范围。
+            y_diff = max(abs(y_center) * 0.05, 1.0)
         ymin = y_center - y_diff * 1.05
         ymax = y_center + y_diff * 1.05
         yrange = ymax - ymin
@@ -294,7 +312,7 @@ class PlotPanel(TimeViewportMixin, QWidget):
 
     def update_display(self):
         """更新绘图显示范围：LOD金字塔查询 + setXRange + setYRange。"""
-        if self.x_data is None or self.y_data is None:
+        if not self._has_plottable_data:
             return
 
         x_start = min(self.x_data[0] + self.x_view_start, self.x_data[-1])
@@ -331,10 +349,15 @@ class PlotPanel(TimeViewportMixin, QWidget):
 
     def update_y_viewport_size(self):
         """缩放比例变化 → 同步更新 y 视口大小和滚动条参数。"""
-        if self.x_data is None:
+        if not self._has_plottable_data:
             return
-        y_min = float(np.nanmin(self.y_data))
-        y_max = float(np.nanmax(self.y_data))
+        finite_values = self._y_raw[np.isfinite(self._y_raw)]
+        y_min = float(finite_values.min())
+        y_max = float(finite_values.max())
+        if y_max == y_min:
+            padding = max(abs(y_min) * 0.05, 1.0)
+            y_min -= padding
+            y_max += padding
 
         if self.zoom_ratio < 1.0:
             # 放大状态：视口小于数据范围，启用滚动条

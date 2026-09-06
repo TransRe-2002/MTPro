@@ -15,14 +15,30 @@ from PySide6.QtGui import QFont, QPen
 import pyqtgraph as pg
 from pyqtgraph import PlotWidget, DateAxisItem
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from typing import Optional
 
 from utils.series import dti_to_numpy
-from utils.theme import configure_pyqtgraph_theme, pg_background, subtle_pen, transparent_legend_brush
+from utils.theme import (
+    configure_pyqtgraph_theme,
+    pg_background,
+    pg_foreground,
+    subtle_pen,
+    transparent_legend_brush,
+)
 
 LEFT_AXIS_WIDTH = 62
 BOTTOM_AXIS_HEIGHT = 34
+
+
+class PassiveLegendSample(pg.ItemSample):
+    """Legend sample that displays a curve but never toggles it."""
+
+    def mouseClickEvent(self, event) -> None:
+        event.accept()
+
+    def wheelEvent(self, event) -> None:
+        event.accept()
 
 
 class BriefPlot(PlotWidget):
@@ -31,6 +47,8 @@ class BriefPlot(PlotWidget):
     支持折线图 (plot) 和柱状图 (bar) 两种类型，
     自动根据 label 哈希生成稳定的曲线颜色。
     """
+
+    vertical_gain_changed = Signal(float)
 
     def __init__(
             self,
@@ -51,6 +69,10 @@ class BriefPlot(PlotWidget):
         self.setBackground(pg_background(self))
         self.label = label
         self.curves: dict[str, pg.GraphicsObject] = {}
+        self._stack_labels: dict[str, pg.TextItem] = {}
+        self._kp_bar: Optional[pg.BarGraphItem] = None
+        self._kp_view: Optional[pg.ViewBox] = None
+        self._kp_axis: Optional[pg.AxisItem] = None
         self.show_curves: dict[str, bool] = {}
         self.x_start: Optional[pd.Timestamp] = None
         self.x_end: Optional[pd.Timestamp] = None
@@ -61,6 +83,127 @@ class BriefPlot(PlotWidget):
         self.setMouseEnabled(x=False, y=False)
         self.sync_axis_layout()
         self.hideButtons()
+        self.init_plot()
+
+    def wheelEvent(self, event) -> None:
+        """Use the mouse wheel for vertical waveform gain only."""
+        delta = event.angleDelta().y()
+        if delta:
+            self.vertical_gain_changed.emit(1.15 ** (delta / 120.0))
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def init_kp_axis(self) -> None:
+        """Add the secondary right-axis ViewBox used by the Kp overlay."""
+        if self._kp_view is not None:
+            return
+        self._kp_view = pg.ViewBox()
+        self._kp_view.setZValue(-10)
+        self._kp_axis = pg.AxisItem("right")
+        self.plot_item.layout.addItem(self._kp_axis, 2, 3)
+        self.plot_item.scene().addItem(self._kp_view)
+        self._kp_axis.linkToView(self._kp_view)
+        self._kp_view.setXLink(self.plot_item.vb)
+        self._kp_view.setMouseEnabled(x=False, y=False)
+
+        def sync_kp_view():
+            self._kp_view.setGeometry(self.plot_item.vb.sceneBoundingRect())
+            self._kp_view.linkedViewChanged(self.plot_item.vb, self._kp_view.XAxis)
+
+        self.plot_item.vb.sigResized.connect(sync_kp_view)
+        sync_kp_view()
+        self._kp_axis.setLabel("Kp")
+        self._kp_axis.setRange(0, 9)
+        self._kp_axis.setPen(subtle_pen(self))
+        self._kp_axis.setStyle(tickLength=4)
+        self._kp_axis.setTickFont(QFont("Arial", 8))
+        self._kp_axis.setWidth(48)
+
+    def set_stacked_layout(
+        self,
+        visible_channels: list[str],
+        offsets: dict[str, float],
+        scale_height: float,
+    ) -> None:
+        """Arrange visible channels on evenly spaced display baselines."""
+        visible = set(visible_channels)
+        for ch, curve in self.curves.items():
+            curve.setVisible(ch in visible)
+        for ch in list(self._stack_labels):
+            if ch not in visible:
+                self.plot_item.removeItem(self._stack_labels.pop(ch))
+        for ch in visible_channels:
+            offset = offsets[ch]
+            if ch not in self._stack_labels:
+                label = pg.TextItem(ch, anchor=(1, 1), color=(0, 0, 0))
+                self._stack_labels[ch] = label
+                self.plot_item.addItem(label)
+            marker_x = self.x_start.timestamp() if self.x_start else 0
+            self._stack_labels[ch].setPos(marker_x, offset + scale_height * 0.85)
+        if visible_channels:
+            low = min(offsets[ch] for ch in visible_channels) - scale_height
+            high = max(offsets[ch] for ch in visible_channels) + scale_height
+            self.setYRange(low, high, padding=0.02)
+        else:
+            self.setYRange(-1, 1, padding=0)
+
+    def sync_legend_visibility(self, visible_channels: list[str]) -> None:
+        """Make the legend reflect checkbox state without making it interactive."""
+        if self.plot_item.legend is None:
+            return
+        visible = set(visible_channels)
+        legend = self.plot_item.legend
+        for _, label_item in list(legend.items):
+            if label_item.text not in visible:
+                legend.removeItem(label_item.text)
+        existing = {label_item.text for _, label_item in legend.items}
+        for channel in visible_channels:
+            curve = self.curves.get(channel)
+            if curve is not None and channel not in existing:
+                legend.addItem(curve, channel)
+
+    def set_channel_offset(self, channel: str, offset: float, scale: float) -> None:
+        """Apply a channel's display scale and vertical offset to its curve."""
+        curve = self.curves.get(channel)
+        if curve is None or not isinstance(curve, pg.PlotCurveItem):
+            return
+        data = getattr(curve, "_mtpro_data", None)
+        if data is not None:
+            x_values, y_values = data
+            curve.setData(x_values, np.asarray(y_values) / max(scale, 1e-12) + offset)
+
+    def add_kp_overlay(self, x_data, y_data) -> None:
+        """Draw semi-transparent Kp bars in the secondary right-axis ViewBox."""
+        self.init_kp_axis()
+        if self._kp_bar is not None:
+            self._kp_view.removeItem(self._kp_bar)
+            self._kp_bar = None
+        x_values = dti_to_numpy(x_data)
+        y_values = np.asarray(y_data, dtype=float)
+        if len(x_values) == 0:
+            return
+        width = float(np.nanmedian(np.diff(x_values))) if len(x_values) > 1 else 3600.0
+        brushes = [pg.mkBrush(52, 152, 219, 35) if v < 4 else
+                   pg.mkBrush(243, 156, 18, 35) if v < 6 else
+                   pg.mkBrush(231, 76, 60, 35) for v in y_values]
+        self._kp_bar = pg.BarGraphItem(
+            x0=x_values - width, height=y_values, width=width,
+            brushes=brushes, pen=None,
+        )
+        self._kp_view.addItem(self._kp_bar)
+        self._kp_view.setYRange(0, 9, padding=0)
+
+    def set_kp_visible(self, visible: bool) -> None:
+        if self._kp_bar is not None:
+            self._kp_bar.setVisible(visible)
+        if self._kp_axis is not None:
+            self._kp_axis.show()
+            self._kp_axis.setLabel("Kp" if visible else "")
+            self._kp_axis.setStyle(
+                tickLength=4 if visible else 0,
+                showValues=visible,
+            )
 
     def sync_axis_layout(self) -> None:
         """Restore axis sizing and labels after pyqtgraph item/layout updates."""
@@ -68,7 +211,7 @@ class BriefPlot(PlotWidget):
         self.plot_item.showAxis('bottom', True)
         left_axis = self.getAxis('left')
         left_axis.show()
-        left_axis.setStyle(tickLength=4)
+        left_axis.setStyle(tickLength=0, showValues=False)
         left_axis.setTickFont(QFont('Arial', 8))
         left_axis.setWidth(LEFT_AXIS_WIDTH)
         bottom_axis = self.getAxis('bottom')
@@ -76,6 +219,9 @@ class BriefPlot(PlotWidget):
         bottom_axis.setStyle(tickLength=4)
         bottom_axis.setTickFont(QFont('Arial', 8))
         bottom_axis.setHeight(BOTTOM_AXIS_HEIGHT)
+        bottom_axis.setTextPen(pg.mkPen(pg_foreground(self)))
+        bottom_axis.setPen(pg.mkPen(pg_foreground(self), width=1))
+        bottom_axis.setLabel('Time')
         if self.label is not None:
             self.plot_item.setLabel('bottom', self.label)
         self.plot_item.updateGeometry()
@@ -101,12 +247,12 @@ class BriefPlot(PlotWidget):
         """初始化绘图区域：设置网格线、图例样式及其锚定位置。"""
         self.hideButtons()  # 隐藏默认的缩放按钮
         grid_pen = subtle_pen(self, alpha=180, width=1)
-        grid_pen.setStyle(Qt.PenStyle.DashLine)
+        grid_pen.setStyle(Qt.PenStyle.SolidLine)
         # 开启 X/Y 方向网格，透明度 0.3
         self.plot_item.showGrid(x=True, y=True, alpha=0.3)
         self.plot_item.getAxis('bottom').setPen(grid_pen)
         self.plot_item.getAxis('left').setPen(grid_pen)
-        self.plot_item.addLegend()
+        self.plot_item.addLegend(sampleType=PassiveLegendSample)
         legend = self.plot_item.legend
         # 锚定在右上角
         legend.anchor((1, 0), (1, 0))
@@ -266,6 +412,9 @@ class BriefPlot(PlotWidget):
         self.setXRange(x_start, x_end)
         self.x_start = x_viewport_start
         self.x_end = x_viewport_end
+        label_x = x_start + (x_end - x_start) * 0.005
+        for ch, label in self._stack_labels.items():
+            label.setPos(label_x, label.pos().y())
 
     def hide_curve(self, label: str) -> None:
         """隐藏指定 label 的曲线（不删除数据，仅设置不可见）。"""
@@ -281,4 +430,9 @@ class BriefPlot(PlotWidget):
         self.clear()
         self.curves.clear()
         self.show_curves.clear()
+        self._stack_labels.clear()
+        if self._kp_view is not None and self._kp_bar is not None:
+            self._kp_view.removeItem(self._kp_bar)
+            self._kp_bar = None
+        self.set_kp_visible(False)
         self.sync_axis_layout()

@@ -7,6 +7,14 @@ from PySide6.QtWidgets import QApplication, QWidget
 import pyqtgraph as pg
 
 
+# pyqtgraph canvases are intentionally kept in the application's original
+# light style.  Unlike ordinary Qt widgets, signal plots need to remain easy
+# to compare across machines and screenshots, regardless of the OS theme.
+_PG_BACKGROUND = QColor("white")
+_PG_FOREGROUND = QColor("black")
+_PG_SUBTLE = QColor(120, 120, 120)
+
+
 def configure_matplotlib_fonts() -> None:
     """配置 matplotlib 中文字体，优先使用方正黑体。"""
     matplotlib.rcParams["font.sans-serif"] = [
@@ -34,14 +42,21 @@ def palette_color(role: QPalette.ColorRole, widget: QWidget | None = None) -> QC
 
 
 def pg_background(widget: QWidget | None = None) -> QColor:
-    return palette_color(QPalette.ColorRole.Base, widget)
+    """Return the fixed background colour for pyqtgraph PlotWidgets.
+
+    ``widget`` is kept for API compatibility with existing callers; the
+    widget palette must not affect a plot canvas.
+    """
+    return QColor(_PG_BACKGROUND)
 
 
 def pg_foreground(widget: QWidget | None = None) -> QColor:
-    return palette_color(QPalette.ColorRole.Text, widget)
+    """Return the fixed foreground colour for pyqtgraph PlotWidgets."""
+    return QColor(_PG_FOREGROUND)
 
 
 def configure_pyqtgraph_theme(widget: QWidget | None = None) -> None:
+    """Configure pyqtgraph to use its fixed, theme-independent light style."""
     pg.setConfigOptions(antialias=True)
     pg.setConfigOption("background", pg_background(widget))
     pg.setConfigOption("foreground", pg_foreground(widget))
@@ -54,7 +69,8 @@ def transparent_legend_brush(widget: QWidget | None = None, alpha: int = 230) ->
 
 
 def subtle_pen(widget: QWidget | None = None, alpha: int = 180, width: float = 1.0):
-    color = palette_color(QPalette.ColorRole.Mid, widget)
+    """Return the fixed subtle grid/border pen used inside PlotWidgets."""
+    color = QColor(_PG_SUBTLE)
     color.setAlpha(alpha)
     return pg.mkPen(color, width=width)
 

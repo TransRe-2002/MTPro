@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -7,31 +8,25 @@ import numpy as np
 import pandas as pd
 
 from PySide6.QtCore import (
-    QByteArray,
-    QItemSelectionModel,
-    QMimeData,
-    QModelIndex,
     QPoint,
     QRect,
     Qt,
+    QObject,
     Signal,
 )
 from PySide6.QtGui import (
     QColor,
-    QDrag,
     QFont,
     QPainter,
     QPalette,
     QPen,
-    QStandardItem,
-    QStandardItemModel,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -42,8 +37,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
-    QTextEdit,
-    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -57,7 +50,13 @@ from core.pipeline_model import (
     SnapEngine,
     uid,
 )
+from core.recipe import recipe_from_pipeline, save_recipe
+from plugin_api import ChannelBlock, ChannelMeta
+from ui.plugin_adapter import PluginParamDialog, run_plugin_process
+from ui.data_process_shared import CLASSIC_TOOL_MIME, PIPELINE_TOOL_MIME
 from ui.tools import registry as tool_registry
+from utils.decimate import LODPyramid, PYRAMID_MAX_FINEST_POINTS
+from utils.qt_bridge import run as run_in_pool
 
 
 LAYER_H = 34
@@ -67,8 +66,6 @@ ADD_ROW_H = 24
 RULER_H = 24
 HANDLE_W = 7
 MIN_BLOCK_SPAN = 100
-OVERVIEW_MAX_BUCKETS = 65536
-PIPELINE_TOOL_MIME = "application/x-pipeline-tool"
 
 
 def px_per_point(zoom: float) -> float:
@@ -80,11 +77,10 @@ def points_to_pixels(points: int, zoom: float) -> float:
 
 
 def _is_pipeline_capable(spec) -> bool:
-    if spec.kind == "interactive":
-        return spec.pipeline_editor_factory is not None
-    if spec.kind == "param":
-        return bool(spec.fields)
-    return False
+    # Pipeline block 必须产出与输入同长的单通道序列。robust estimate 与
+    # remote reference 属于站级 output 工具，虽然有参数表单，却产出阻抗等
+    # 新物理量，不能伪装成单通道变换 block。
+    return tool_registry.get_plugin(spec.tool_id) is not None
 
 
 def _build_tool_meta() -> Dict[str, Dict[str, object]]:
@@ -102,18 +98,20 @@ def _build_tool_meta() -> Dict[str, Dict[str, object]]:
 TOOL_META: Dict[str, Dict[str, object]] = _build_tool_meta()
 
 
+def refresh_tool_meta() -> None:
+    """Refresh the pipeline catalogue after startup plugin discovery."""
+
+    TOOL_META.clear()
+    TOOL_META.update(_build_tool_meta())
+
+
 BLOCK_STATUS_STYLE: Dict[str, Dict[str, str]] = {
     "empty": {"accent": "#8b8f97", "label": "待处理"},
     "configured": {"accent": "#7e8b99", "label": "已配置"},
     "ready": {"accent": "#778f7c", "label": "就绪"},
     "stale": {"accent": "#9a7b7b", "label": "需刷新"},
+    "error": {"accent": "#b34b4b", "label": "执行失败"},
 }
-
-TOOL_KIND_LABELS: Dict[str, str] = {
-    "interactive": "交互工具",
-    "param": "参数工具",
-}
-
 
 class PipelineParamDialog(QDialog):
     def __init__(
@@ -183,42 +181,57 @@ class PreviewChannelSlice:
         return self.cts.index
 
 
-class PipelineToolTreeView(QTreeView):
-    def __init__(self, parent=None):
+class _PluginTaskBridge(QObject):
+    """Relay a worker result through a QObject-bound queued signal."""
+
+    done = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, metadata, parent=None):
         super().__init__(parent)
-        self.setHeaderHidden(True)
-        self.setRootIsDecorated(True)
-        self.setItemsExpandable(True)
-        self.setUniformRowHeights(True)
-        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.setDragEnabled(True)
+        self.metadata = metadata
 
-    def startDrag(self, supported_actions):
-        index = self.currentIndex()
-        if not index.isValid():
-            return
+    def relay_done(self, payload):
+        self.done.emit((self.metadata, payload))
 
-        tool_id = index.data(Qt.ItemDataRole.UserRole)
-        if not tool_id:
-            return
+    def relay_failed(self, exc):
+        self.failed.emit((self.metadata, exc))
 
-        mime_data = QMimeData()
-        mime_data.setData(PIPELINE_TOOL_MIME, QByteArray(str(tool_id).encode()))
-        drag = QDrag(self)
-        drag.setMimeData(mime_data)
-        drag.exec(supported_actions, Qt.DropAction.CopyAction)
+
+def pipeline_tool_id_from_mime(mime_data) -> Optional[str]:
+    """Read a tool id from either the shared or legacy Pipeline drag MIME."""
+    for mime_type in (PIPELINE_TOOL_MIME, CLASSIC_TOOL_MIME):
+        if not mime_data.hasFormat(mime_type):
+            continue
+        try:
+            tool_id = bytes(mime_data.data(mime_type)).decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if tool_id:
+            return tool_id
+    return None
 
 
 class ChannelOverviewWidget(QWidget):
+    """Viewport-aware LOD envelope for one Pipeline channel.
+
+    Pipeline lanes can be much wider than their visible scroll-area viewport.
+    Rendering only the visible LOD section keeps long channels responsive while
+    preserving extrema through the min/max pyramid.
+    """
+
     def __init__(self, samples: np.ndarray, data_len: int, parent=None):
         super().__init__(parent)
-        self._samples = np.asarray(samples, dtype=np.float64)
         self._data_len = max(1, data_len)
         self._zoom = 6.0
-        self._envelope_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._samples = np.empty(0, dtype=np.float64)
+        self._pyramid: LODPyramid | None = None
+        self._y_min = -0.5
+        self._y_max = 0.5
+        self._show_baseline = False
         self.setFixedHeight(CHANNEL_HEADER_H)
         self.setMinimumWidth(600)
+        self.set_samples(samples)
 
     def set_zoom(self, zoom: float):
         self._zoom = zoom
@@ -227,72 +240,56 @@ class ChannelOverviewWidget(QWidget):
 
     def set_samples(self, samples: np.ndarray):
         self._samples = np.asarray(samples, dtype=np.float64)
-        self._envelope_cache.clear()
+        if self._samples.size:
+            x_data = np.arange(self._samples.size, dtype=np.float64)
+            self._pyramid = LODPyramid(
+                x_data,
+                self._samples,
+                max_finest_points=PYRAMID_MAX_FINEST_POINTS,
+            )
+            finite = self._samples[np.isfinite(self._samples)]
+            if finite.size:
+                self._y_min = float(finite.min())
+                self._y_max = float(finite.max())
+            else:
+                self._y_min, self._y_max = -0.5, 0.5
+        else:
+            self._pyramid = None
+            self._y_min, self._y_max = -0.5, 0.5
         self.update()
 
-    def _get_envelope(self, bucket_count: int) -> tuple[np.ndarray, np.ndarray]:
-        bucket_count = max(1, bucket_count)
-        cached = self._envelope_cache.get(bucket_count)
-        if cached is not None:
-            return cached
+    def set_baseline_visible(self, visible: bool) -> None:
+        self._show_baseline = bool(visible)
+        self.update()
 
-        samples = self._samples
-        if samples.size == 0:
-            mins = np.zeros(bucket_count, dtype=np.float64)
-            maxs = np.zeros(bucket_count, dtype=np.float64)
-            self._envelope_cache[bucket_count] = (mins, maxs)
-            return mins, maxs
+    def _visible_lod(self, left_px: int, right_px: int) -> tuple[np.ndarray, np.ndarray]:
+        if self._pyramid is None or self._samples.size == 0:
+            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+        scale = px_per_point(self._zoom)
+        start = max(0.0, float(left_px) / scale)
+        end = min(float(self._samples.size - 1), float(right_px + 1) / scale)
+        return self._pyramid.get(start, end, max(1, right_px - left_px + 1))
 
-        if bucket_count >= samples.size:
-            finite = np.isfinite(samples)
-            clean = np.where(finite, samples, np.nan)
-            mins = np.nan_to_num(clean.copy(), nan=0.0)
-            maxs = np.nan_to_num(clean.copy(), nan=0.0)
-            self._envelope_cache[bucket_count] = (mins, maxs)
-            return mins, maxs
-
-        edges = np.linspace(0, samples.size, bucket_count + 1, dtype=int)
-        mins = np.zeros(bucket_count, dtype=np.float64)
-        maxs = np.zeros(bucket_count, dtype=np.float64)
-        for index in range(bucket_count):
-            start = edges[index]
-            end = edges[index + 1]
-            segment = samples[start:end]
-            finite_segment = segment[np.isfinite(segment)]
-            if finite_segment.size == 0:
-                mins[index] = 0.0
-                maxs[index] = 0.0
-                continue
-            mins[index] = float(finite_segment.min())
-            maxs[index] = float(finite_segment.max())
-
-        self._envelope_cache[bucket_count] = (mins, maxs)
-        return mins, maxs
-
-    def paintEvent(self, _event) -> None:
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         palette = self.palette()
         painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
 
-        if self.width() <= 2:
+        rect = event.rect()
+        if rect.width() <= 0:
             painter.end()
             return
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 1))
 
-        requested_buckets = max(1, min(self.width() - 2, OVERVIEW_MAX_BUCKETS))
-        mins, maxs = self._get_envelope(requested_buckets)
-        bucket_count = max(1, mins.size)
-
-        all_values = np.concatenate((mins, maxs))
-        finite = all_values[np.isfinite(all_values)]
-        if finite.size == 0:
+        x_lod, y_lod = self._visible_lod(rect.left(), rect.right())
+        finite = np.isfinite(y_lod)
+        if not finite.any():
             painter.end()
             return
 
-        y_min = float(finite.min())
-        y_max = float(finite.max())
+        y_min, y_max = self._y_min, self._y_max
         span = y_max - y_min
         if span < 1e-12:
             span = 1.0
@@ -307,14 +304,25 @@ class ChannelOverviewWidget(QWidget):
             ratio = (value - y_min) / span
             return int(bottom - ratio * height)
 
-        width_span = max(1, self.width() - 3)
-        for index in range(bucket_count):
-            x_pos = 1 + int(index * width_span / max(1, bucket_count - 1))
-            painter.drawLine(x_pos, to_y(mins[index]), x_pos, to_y(maxs[index]))
+        scale = px_per_point(self._zoom)
+        x_pixels = np.rint(x_lod[finite] * scale).astype(np.int64)
+        values = y_lod[finite]
+        order = np.argsort(x_pixels, kind="stable")
+        x_pixels = x_pixels[order]
+        values = values[order]
+        starts = np.r_[0, np.flatnonzero(np.diff(x_pixels)) + 1]
+        ends = np.r_[starts[1:], x_pixels.size]
+        for start, end in zip(starts, ends):
+            x_pos = int(x_pixels[start])
+            if x_pos < rect.left() or x_pos > rect.right():
+                continue
+            bucket = values[start:end]
+            painter.drawLine(x_pos, to_y(float(bucket.min())), x_pos, to_y(float(bucket.max())))
 
-        painter.setPen(palette.color(QPalette.ColorRole.Mid))
-        mid_y = self.height() // 2
-        painter.drawLine(0, mid_y, self.width(), mid_y)
+        if self._show_baseline and y_min <= 0.0 <= y_max:
+            painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 1))
+            baseline_y = to_y(0.0)
+            painter.drawLine(rect.left(), baseline_y, rect.right(), baseline_y)
         painter.end()
 
 
@@ -483,23 +491,23 @@ class PipelineTrackWidget(QWidget):
         )
 
     def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasFormat(PIPELINE_TOOL_MIME):
+        if pipeline_tool_id_from_mime(event.mimeData()) is not None:
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        if event.mimeData().hasFormat(PIPELINE_TOOL_MIME):
+        if pipeline_tool_id_from_mime(event.mimeData()) is not None:
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event) -> None:
-        if not event.mimeData().hasFormat(PIPELINE_TOOL_MIME):
+        tool_id = pipeline_tool_id_from_mime(event.mimeData())
+        if tool_id is None:
             event.ignore()
             return
 
-        tool_id = bytes(event.mimeData().data(PIPELINE_TOOL_MIME)).decode()
         start = self._px_to_pts(event.position().toPoint().x())
         self.tool_dropped.emit(self.pipeline.data_id, self.pipeline.channel, self.layer.layer_id, tool_id, start)
         event.acceptProposedAction()
@@ -789,6 +797,7 @@ class ChannelPipelineWidget(QWidget):
         samples: np.ndarray,
         data_len: int,
         snap: SnapEngine,
+        show_baseline: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -797,6 +806,7 @@ class ChannelPipelineWidget(QWidget):
         self.data_len = data_len
         self.snap = snap
         self.zoom = 6.0
+        self._show_baseline = bool(show_baseline)
         self._tracks: list[PipelineTrackWidget] = []
         self.overview_widget: Optional[ChannelOverviewWidget] = None
         self._build()
@@ -839,6 +849,7 @@ class ChannelPipelineWidget(QWidget):
         left_layout.addWidget(header_left)
 
         self.overview_widget = ChannelOverviewWidget(self.samples, self.data_len, right)
+        self.overview_widget.set_baseline_visible(self._show_baseline)
         self.overview_widget.set_zoom(self.zoom)
         right_layout.addWidget(self.overview_widget)
 
@@ -888,6 +899,11 @@ class ChannelPipelineWidget(QWidget):
         for track in self._tracks:
             track.set_zoom(zoom)
 
+    def set_baseline_visible(self, visible: bool) -> None:
+        self._show_baseline = bool(visible)
+        if self.overview_widget is not None:
+            self.overview_widget.set_baseline_visible(visible)
+
     def set_selected(self, block_id: str):
         for track in self._tracks:
             track.set_selected(block_id)
@@ -915,50 +931,25 @@ class DataProcessPipelineWidget(QWidget):
         self.data_id = 0
         self.em_data: Optional[EMData] = None
         self._channel_refs: list[tuple[int, str]] = []
-        self.selected_tool_id: Optional[str] = None
         self.selected_block_id: str = ""
         self.pipelines: list[ChannelPipeline] = []
         self._lane_widgets: list[ChannelPipelineWidget] = []
         self._editor_dialogs: list[QDialog] = []
+        self._plugin_tasks: dict[str, int] = {}
+        self._plugin_bridges: dict[str, _PluginTaskBridge] = {}
+        self._plugin_generation = 0
+        self._pending_lane_rebuild = False
         self._zoom = 6.0
+        self._overview_baseline_visible = False
         self._snap = SnapEngine()
         self._ruler_widget: Optional[RulerWidget] = None
-        self.tool_tree: Optional[PipelineToolTreeView] = None
-        self.tool_model: Optional[QStandardItemModel] = None
+        self.pipeline_hint: Optional[QLabel] = None
         self._build_ui()
 
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        left_panel = QWidget(self)
-        left_panel.setFixedWidth(210)
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.setSpacing(8)
-
-        title = QLabel("Pipeline Tools")
-        left_layout.addWidget(title)
-
-        self.tool_tree = PipelineToolTreeView(left_panel)
-        self.tool_model = self._build_tool_model(self.tool_tree)
-        self.tool_tree.setModel(self.tool_model)
-        self.tool_tree.expandAll()
-        self.tool_tree.selectionModel().currentChanged.connect(self._on_tool_changed)
-        left_layout.addWidget(self.tool_tree)
-
-        self.info_text = QTextEdit(left_panel)
-        self.info_text.setReadOnly(True)
-        self.info_text.setPlainText(
-            "选择左侧工具，然后点击某个 step 轨道空白处放置 block。\n"
-            "交互式 block 双击会打开真实编辑器，参数型 block 双击会打开参数面板。"
-        )
-        left_layout.addWidget(self.info_text, 1)
-
-        clear_tool_button = QPushButton("clear tool", left_panel)
-        clear_tool_button.clicked.connect(self._clear_selected_tool)
-        left_layout.addWidget(clear_tool_button)
 
         right_panel = QWidget(self)
         right_layout = QVBoxLayout(right_panel)
@@ -969,6 +960,13 @@ class DataProcessPipelineWidget(QWidget):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(8, 6, 8, 6)
         toolbar_layout.setSpacing(8)
+
+        self.pipeline_hint = QLabel(
+            "将左侧“数据处理工具”拖到某个 step 轨道以添加 block。",
+            toolbar,
+        )
+        toolbar_layout.addWidget(self.pipeline_hint)
+        toolbar_layout.addSpacing(8)
 
         toolbar_layout.addWidget(QLabel("zoom"))
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal, toolbar)
@@ -988,6 +986,11 @@ class DataProcessPipelineWidget(QWidget):
         self.snap_checkbox.toggled.connect(self._on_snap_toggled)
         toolbar_layout.addWidget(self.snap_checkbox)
 
+        self.overview_baseline_checkbox = QCheckBox("show zero baseline", toolbar)
+        self.overview_baseline_checkbox.setChecked(self._overview_baseline_visible)
+        self.overview_baseline_checkbox.toggled.connect(self._on_overview_baseline_toggled)
+        toolbar_layout.addWidget(self.overview_baseline_checkbox)
+
         toolbar_layout.addWidget(QLabel("grid"))
         self.grid_spin = QSpinBox(toolbar)
         self.grid_spin.setRange(50, 5000)
@@ -1003,8 +1006,11 @@ class DataProcessPipelineWidget(QWidget):
         preview_button.clicked.connect(self._show_preview_summary)
         commit_button = QPushButton("commit", toolbar)
         commit_button.clicked.connect(self._commit_preview)
+        export_button = QPushButton("export recipe", toolbar)
+        export_button.clicked.connect(self._export_recipe)
         toolbar_layout.addWidget(preview_button)
         toolbar_layout.addWidget(commit_button)
+        toolbar_layout.addWidget(export_button)
         right_layout.addWidget(toolbar)
 
         self.scroll = QScrollArea(right_panel)
@@ -1018,90 +1024,10 @@ class DataProcessPipelineWidget(QWidget):
         self.scroll.setWidget(self.scroll_content)
         right_layout.addWidget(self.scroll, 1)
 
-        root.addWidget(left_panel)
         root.addWidget(right_panel, 1)
-
-    def _build_tool_model(self, parent: QWidget) -> QStandardItemModel:
-        model = QStandardItemModel(parent)
-        root_item = model.invisibleRootItem()
-        groups: dict[str, QStandardItem] = {}
-
-        for kind, label in TOOL_KIND_LABELS.items():
-            group_item = QStandardItem(label)
-            group_item.setEditable(False)
-            group_item.setSelectable(False)
-            group_item.setDragEnabled(False)
-            group_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            root_item.appendRow(group_item)
-            groups[kind] = group_item
-
-        for tool_id, meta in TOOL_META.items():
-            kind = str(meta.get("kind", "param"))
-            parent_item = groups[kind]
-            tool_item = QStandardItem(str(meta["name"]))
-            tool_item.setEditable(False)
-            tool_item.setData(tool_id, Qt.ItemDataRole.UserRole)
-            tool_item.setFlags(
-                Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
-            )
-            parent_item.appendRow(tool_item)
-
-        return model
-
-    def _tool_id_from_index(self, index: QModelIndex) -> Optional[str]:
-        if not index.isValid():
-            return None
-        value = index.data(Qt.ItemDataRole.UserRole)
-        return None if value is None else self._canonical_tool_id(str(value))
-
-    def _tool_index_from_id(self, tool_id: str) -> QModelIndex:
-        if self.tool_model is None:
-            return QModelIndex()
-
-        tool_id = self._canonical_tool_id(tool_id)
-        root_item = self.tool_model.invisibleRootItem()
-        for row in range(root_item.rowCount()):
-            group_item = root_item.child(row)
-            for child_row in range(group_item.rowCount()):
-                child_item = group_item.child(child_row)
-                if child_item.data(Qt.ItemDataRole.UserRole) == tool_id:
-                    return child_item.index()
-        return QModelIndex()
-
-    def _set_selected_tool(self, tool_id: Optional[str]):
-        self.selected_tool_id = None if tool_id is None else self._canonical_tool_id(tool_id)
-        if self.tool_tree is not None:
-            if self.selected_tool_id is None:
-                self.tool_tree.clearSelection()
-                self.tool_tree.setCurrentIndex(QModelIndex())
-            else:
-                index = self._tool_index_from_id(self.selected_tool_id)
-                if index.isValid():
-                    self.tool_tree.setCurrentIndex(index)
-                    self.tool_tree.selectionModel().select(
-                        index,
-                        QItemSelectionModel.SelectionFlag.ClearAndSelect
-                        | QItemSelectionModel.SelectionFlag.Rows,
-                    )
-        self._update_tool_info()
 
     def _canonical_tool_id(self, tool_id: str) -> str:
         return tool_registry.canonical_id(tool_id)
-
-    def _update_tool_info(self):
-        if self.selected_tool_id is None:
-            self.info_text.setPlainText("请选择一个工具，然后点击或拖到某个 step 轨道中放置 block。")
-            return
-
-        meta = TOOL_META.get(self.selected_tool_id, {})
-        kind = TOOL_KIND_LABELS.get(str(meta.get("kind", "unknown")), str(meta.get("kind", "unknown")))
-        self.info_text.setPlainText(
-            f"当前工具：{meta.get('name', self.selected_tool_id)}\n"
-            f"类型：{kind}\n"
-            "点击轨道空白处或直接拖到轨道中即可放置 block。"
-        )
 
     def init_data(self, data, data_id: int = 0) -> None:
         self.data_id = data_id
@@ -1353,7 +1279,8 @@ class DataProcessPipelineWidget(QWidget):
                 self._pipeline_baseline(pipeline),
                 data_len,
                 self._snap,
-                self.scroll_content,
+                show_baseline=self._overview_baseline_visible,
+                parent=self.scroll_content,
             )
             lane.set_zoom(self._zoom)
             lane.add_layer_requested.connect(self._on_add_layer_requested)
@@ -1367,14 +1294,6 @@ class DataProcessPipelineWidget(QWidget):
             lane.block_geometry_changed.connect(self._on_block_geometry_changed)
             self._lane_widgets.append(lane)
             self.scroll_layout.insertWidget(self.scroll_layout.count() - 1, lane)
-
-    def _on_tool_changed(self, current: QModelIndex, previous: QModelIndex):
-        del previous
-        self.selected_tool_id = self._tool_id_from_index(current)
-        self._update_tool_info()
-
-    def _clear_selected_tool(self):
-        self._set_selected_tool(None)
 
     def _on_zoom_changed(self, value: int):
         self._zoom = float(value)
@@ -1392,6 +1311,11 @@ class DataProcessPipelineWidget(QWidget):
         if self._ruler_widget is not None:
             self._ruler_widget.update()
         self._refresh_lane_tracks()
+
+    def _on_overview_baseline_toggled(self, checked: bool):
+        self._overview_baseline_visible = bool(checked)
+        for lane in self._lane_widgets:
+            lane.set_baseline_visible(checked)
 
     def _on_grid_changed(self, value: int):
         self._snap.grid_pts = value
@@ -1462,9 +1386,12 @@ class DataProcessPipelineWidget(QWidget):
 
     def _add_block_with_tool(self, data_id: int, channel_name: str, layer_id: str, start: int, tool_id: Optional[str]):
         if tool_id is None:
-            QMessageBox.information(self, "提示", "请先在左侧选择一个工具。")
+            QMessageBox.information(self, "提示", "请将“数据处理工具”拖到 step 轨道。")
             return
         tool_id = self._canonical_tool_id(tool_id)
+        if tool_id not in TOOL_META:
+            QMessageBox.information(self, "提示", "该工具暂不支持单通道 Pipeline block。")
+            return
 
         found = self._find_layer(data_id, channel_name, layer_id)
         if found is None:
@@ -1497,12 +1424,30 @@ class DataProcessPipelineWidget(QWidget):
         self._refresh_selection()
 
     def _on_add_block_requested(self, data_id: int, channel_name: str, layer_id: str, start: int):
-        self._add_block_with_tool(data_id, channel_name, layer_id, start, self.selected_tool_id)
+        del data_id, channel_name, layer_id, start
+        QMessageBox.information(self, "提示", "请将“数据处理工具”拖到 step 轨道。")
 
     def _on_tool_dropped(self, data_id: int, channel_name: str, layer_id: str, tool_id: str, start: int):
         canonical_tool_id = self._canonical_tool_id(tool_id)
-        self._set_selected_tool(canonical_tool_id)
         self._add_block_with_tool(data_id, channel_name, layer_id, start, canonical_tool_id)
+
+    def drop_tool_at_global_position(self, tool_id: str, global_pos: QPoint) -> bool:
+        """Route a workspace-level tool drop to the track beneath the cursor."""
+        target = QApplication.widgetAt(global_pos)
+        while target is not None and not isinstance(target, PipelineTrackWidget):
+            target = target.parentWidget()
+        if not isinstance(target, PipelineTrackWidget) or target._owner() is not self:
+            return False
+
+        local_pos = target.mapFromGlobal(global_pos)
+        self._on_tool_dropped(
+            target.pipeline.data_id,
+            target.pipeline.channel,
+            target.layer.layer_id,
+            tool_id,
+            target._px_to_pts(local_pos.x()),
+        )
+        return True
 
     def _on_block_selected(self, block_id: str):
         self.selected_block_id = block_id
@@ -1515,6 +1460,7 @@ class DataProcessPipelineWidget(QWidget):
         if self.selected_block_id == block_id:
             self.selected_block_id = ""
         self._broadcast_guides([])
+        self._refresh_all_pipeline_statuses()
         self._refresh_selection()
 
     def _broadcast_guides(self, guides: list[int]):
@@ -1526,9 +1472,12 @@ class DataProcessPipelineWidget(QWidget):
             lane.refresh_tracks()
 
     def _invalidate_block_cache(self, block: PipelineBlock, reason: str):
+        self._plugin_tasks.pop(block.block_id, None)
         block.input_slice = None
         block.output_slice = None
-        if TOOL_META.get(block.tool_id, {}).get("kind") == "interactive":
+        if tool_registry.get_plugin(block.tool_id) is not None and block.params:
+            block.status = "stale"
+        elif TOOL_META.get(block.tool_id, {}).get("kind") == "interactive":
             block.status = "empty"
         else:
             block.status = "configured" if block.params else "empty"
@@ -1615,7 +1564,9 @@ class DataProcessPipelineWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         tool_id = self._canonical_tool_id(block.tool_id)
-        editor = tool_registry.create_pipeline_editor(tool_id, preview_channel, dialog)
+        editor = tool_registry.create_pipeline_editor(
+            tool_id, preview_channel, dialog, params=block.params,
+        )
         if editor is None:
             dialog.deleteLater()
             return
@@ -1635,18 +1586,26 @@ class DataProcessPipelineWidget(QWidget):
             dialog.deleteLater()
             return
         result_signal.connect(_on_editor_result)
+        params_applied = getattr(editor, "params_applied", None)
+        if params_applied is not None:
+            params_applied.connect(
+                lambda values, _broadcast, current_id=block_id:
+                self._on_plugin_params_applied(current_id, values)
+            )
 
         # 同步信号：交互式编辑器勾选"应用到所有通道/所有数据集"时触发
-        slice_index = preview_channel.cts.index
         channel_sync = getattr(editor, "channel_sync_requested", None)
         if channel_sync is not None:
             channel_sync.connect(
-                lambda _did, ch_name, result, idx=slice_index:
-                self._on_editor_channel_sync(pipeline.data_id, ch_name, result, idx)
+                lambda _did, _channel, _result, current_id=block_id:
+                self._on_editor_channel_sync(current_id)
             )
         region_sync = getattr(editor, "region_sync_requested", None)
         if region_sync is not None:
-            region_sync.connect(self._on_editor_region_sync)
+            region_sync.connect(
+                lambda _params, current_id=block_id:
+                self._on_editor_region_sync(current_id)
+            )
 
         layout.addWidget(editor)
         self._register_editor_dialog(dialog)
@@ -1658,14 +1617,29 @@ class DataProcessPipelineWidget(QWidget):
         layer: PipelineLayer,
         block: PipelineBlock,
     ):
-        dialog = PipelineParamDialog(f"#{pipeline.data_id} {pipeline.channel}", layer.label, block, self)
+        plugin = tool_registry.get_plugin(block.tool_id)
+        if plugin is not None:
+            dialog = PluginParamDialog(plugin.info, block.params, self)
+        else:
+            dialog = PipelineParamDialog(
+                f"#{pipeline.data_id} {pipeline.channel}", layer.label, block, self
+            )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         block.params = dialog.params
         block.status = "configured"
         block.last_summary = f"params: {block.params}"
+        self._refresh_all_pipeline_statuses()
         self._refresh_selection()
+
+    def _on_plugin_params_applied(self, block_id: str, params: object) -> None:
+        found = self._find_block(block_id)
+        if found is None or not isinstance(params, dict):
+            return
+        _pipeline, _layer, block = found
+        block.params = dict(params)
+        block.status = "configured"
 
     def _on_block_double_clicked(self, block_id: str):
         found = self._find_block(block_id)
@@ -1703,6 +1677,9 @@ class DataProcessPipelineWidget(QWidget):
         block.output_slice = np.array(result_array, copy=True)
         block.status = "ready"
         block.last_summary = f"cached {result_array.size} pts in [{range_start}, {range_end})"
+        if self._pending_lane_rebuild:
+            self._pending_lane_rebuild = False
+            self._rebuild_lanes()
         self._refresh_all_pipeline_statuses()
         self.selected_block_id = block.block_id
         self._refresh_selection()
@@ -1710,72 +1687,325 @@ class DataProcessPipelineWidget(QWidget):
 
     # ─── 编辑器同步（通道同步 / 跨数据集区域同步）─────────────
 
+    def _synced_block_range(
+        self,
+        source_pipeline: ChannelPipeline,
+        source_block: PipelineBlock,
+        target_pipeline: ChannelPipeline,
+    ) -> Optional[tuple[int, int]]:
+        """Map a block's inclusive timestamp span to a target channel slice."""
+        source = self._channel_slice(source_pipeline.data_id, source_pipeline.channel)
+        target = self._channel_slice(target_pipeline.data_id, target_pipeline.channel)
+        if source.empty or target.empty:
+            return None
+
+        source_start = max(0, min(source_block.start, len(source)))
+        source_end = max(source_start, min(source_block.end, len(source)))
+        if source_end <= source_start:
+            return None
+
+        source_index = source.index
+        target_index = target.index
+        start_time = source_index[source_start]
+        end_time = source_index[source_end - 1]
+        target_start = int(target_index.searchsorted(start_time, side="left"))
+        target_end = int(target_index.searchsorted(end_time, side="right"))
+        target_start = max(0, min(target_start, len(target)))
+        target_end = max(target_start, min(target_end, len(target)))
+        if target_end <= target_start:
+            return None
+        return target_start, target_end
+
+    def _synced_block_params(
+        self,
+        source_pipeline: ChannelPipeline,
+        source_block: PipelineBlock,
+        target_pipeline: ChannelPipeline,
+        target_range: tuple[int, int],
+    ) -> Optional[dict]:
+        """Copy serializable params, translating manual spike picks by time."""
+        params = deepcopy(source_block.params)
+        if source_block.tool_id != "remove_spike":
+            return params
+
+        source = self._channel_slice(source_pipeline.data_id, source_pipeline.channel)
+        target = self._channel_slice(target_pipeline.data_id, target_pipeline.channel)
+        source_start = max(0, min(source_block.start, len(source)))
+        source_end = max(source_start, min(source_block.end, len(source)))
+        picked = []
+        for value in params.get("indices", []):
+            try:
+                position = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= position < source_end - source_start:
+                picked.append(position)
+        if not picked:
+            return None
+
+        picked_times = source.index[source_start + np.asarray(picked, dtype=int)]
+        target_start, target_end = target_range
+        target_index = target.index[target_start:target_end]
+        params["indices"] = np.flatnonzero(target_index.isin(picked_times)).astype(int).tolist()
+        if not params["indices"]:
+            return None
+        return params
+
+    def _clone_block_to_pipelines(
+        self,
+        source_block_id: str,
+        target_pipelines: list[ChannelPipeline],
+        scope_label: str,
+    ) -> int:
+        """Stage synchronized blocks without writing any EMData channel.
+
+        A Pipeline confirmation persists only a block definition.  In
+        particular, an editor's old Classic ``channel_sync`` signal must not
+        turn into an immediate NaN write here: every target receives its own
+        block, cache, and preview computation instead.
+        """
+        found = self._find_block(source_block_id)
+        if found is None:
+            return 0
+        source_pipeline, source_layer, source_block = found
+        if not source_block.params:
+            return 0
+        if source_block.tool_id == "remove_spike" and not source_block.params.get("indices"):
+            return 0
+        if source_block.tool_id == "remove_region" and not source_block.params.get("time_ranges"):
+            return 0
+
+        source_layer_index = source_pipeline.layers.index(source_layer)
+        cloned = 0
+        for target_pipeline in target_pipelines:
+            if target_pipeline is source_pipeline:
+                continue
+            target_range = self._synced_block_range(
+                source_pipeline, source_block, target_pipeline,
+            )
+            if target_range is None:
+                continue
+            params = self._synced_block_params(
+                source_pipeline, source_block, target_pipeline, target_range,
+            )
+            if params is None:
+                continue
+
+            while len(target_pipeline.layers) <= source_layer_index:
+                target_pipeline.add_layer()
+                self._pending_lane_rebuild = True
+            target_layer = target_pipeline.layers[source_layer_index]
+            start, end = target_range
+            target_layer.blocks.append(PipelineBlock(
+                tool_id=source_block.tool_id,
+                start=start,
+                end=end,
+                params=params,
+                status="configured",
+                last_summary=(
+                    f"{scope_label} from #{source_pipeline.data_id} "
+                    f"{source_pipeline.channel}; awaiting preview"
+                ),
+            ))
+            cloned += 1
+        return cloned
+
     def _on_editor_channel_sync(
         self,
-        data_id: int,
-        channel_name: str,
-        result_slice,
-        slice_index,
+        source_block_id: str,
     ) -> None:
-        """把 block 切片里的 NaN 位置按时间戳同步到同数据集的其他通道。"""
-        data = self._data_for(data_id)
-        if data is None:
+        """Stage a same-dataset block clone for each channel in this Pipeline."""
+        found = self._find_block(source_block_id)
+        if found is None:
             return
-        result_arr = np.asarray(result_slice, dtype=np.float64)
-        if result_arr.ndim != 1 or result_arr.size != len(slice_index):
+        source_pipeline, _source_layer, _source_block = found
+        targets = [
+            pipeline for pipeline in self.pipelines
+            if pipeline.data_id == source_pipeline.data_id
+        ]
+        self._clone_block_to_pipelines(
+            source_block_id,
+            targets,
+            "synchronized to Pipeline channels",
+        )
+
+    def _on_editor_region_sync(self, source_block_id: str) -> None:
+        """Stage a cross-dataset clone for channels already in this Pipeline."""
+        found = self._find_block(source_block_id)
+        if found is None:
             return
-        nan_timestamps = slice_index[np.isnan(result_arr)]
-        if len(nan_timestamps) == 0:
-            return
-
-        for ch in data.channel_names():
-            if ch == channel_name or not data.has_channel(ch):
-                continue
-            series = data.get_channel_series(ch)
-            mask = series.index.isin(nan_timestamps)
-            if not mask.any():
-                continue
-            vals = series.to_numpy(dtype=np.float64, copy=True)
-            vals[mask] = np.nan
-            data.set_channel_series(
-                ch, pd.Series(vals, index=series.index, name=series.name)
-            )
-            self.change_finished_signal.emit(data_id, ch)
-
-    def _on_editor_region_sync(self, params: dict) -> None:
-        """remove_region 跨数据集同步：按时间范围对所有数据集置 NaN。"""
-        from core.region_sync import apply_nan_intervals, compute_time_range_intervals
-
-        time_ranges = params.get("time_ranges", [])
-        source_id = params.get("source_data_id", -1)
-        if not time_ranges or self.data_manager is None:
-            return
-
-        for data_id, em_data in self.data_manager.items():
-            if data_id == source_id:
-                continue
-            start_ts = em_data.start_time.timestamp()
-            dt_sec = em_data.dt.total_seconds()
-            for ch in em_data.channel_names():
-                series = em_data.get_channel_series(ch)
-                intervals = compute_time_range_intervals(
-                    time_ranges, len(series), start_ts, dt_sec
-                )
-                if not intervals:
-                    continue
-                vals = apply_nan_intervals(
-                    series.to_numpy(dtype=np.float64, copy=True), intervals
-                )
-                em_data.set_channel_series(
-                    ch, pd.Series(vals, index=series.index, name=series.name)
-                )
-                self.change_finished_signal.emit(data_id, ch)
+        source_pipeline, _source_layer, _source_block = found
+        targets = [
+            pipeline for pipeline in self.pipelines
+            if pipeline.data_id != source_pipeline.data_id
+        ]
+        self._clone_block_to_pipelines(
+            source_block_id,
+            targets,
+            "synchronized to Pipeline datasets",
+        )
 
     def _refresh_all_pipeline_statuses(self):
+        previews: dict[tuple[int, str], np.ndarray] = {}
         for pipeline in self.pipelines:
-            self._compose_channel_preview(pipeline.data_id, pipeline.channel, update_status=True)
+            previews[pipeline.ref] = self._compose_channel_preview(
+                pipeline.data_id,
+                pipeline.channel,
+                update_status=True,
+            )
+        for lane in self._lane_widgets:
+            preview = previews.get(lane.pipeline.ref)
+            if preview is not None:
+                lane.samples = np.array(preview, copy=True)
+                if lane.overview_widget is not None:
+                    lane.overview_widget.set_samples(preview)
+            lane.refresh()
+
+    @staticmethod
+    def _input_fingerprint(values: np.ndarray) -> tuple[int, int]:
+        contiguous = np.ascontiguousarray(values, dtype=np.float64)
+        return contiguous.size, hash(contiguous.tobytes())
+
+    def _schedule_plugin_block(self, block: PipelineBlock, current_input: np.ndarray) -> None:
+        plugin = tool_registry.get_plugin(block.tool_id)
+        if plugin is None or block.block_id in self._plugin_tasks:
+            return
+        found = self._find_block(block.block_id)
+        if found is None:
+            return
+        pipeline, _layer, current_block = found
+        base_series = self._channel_slice(pipeline.data_id, pipeline.channel)
+        start = max(0, min(current_block.start, len(base_series)))
+        end = max(start, min(current_block.end, len(base_series)))
+        values = np.asarray(current_input, dtype=np.float64).copy()
+        if values.size != end - start:
+            return
+        series = pd.Series(
+            values,
+            index=base_series.index[start:end],
+            name=pipeline.channel,
+        )
+        if len(series.index) > 1:
+            dt = (series.index[1] - series.index[0]).total_seconds()
+        else:
+            dt = 0.0
+        channel_block = ChannelBlock(
+            pipeline.channel,
+            series,
+            ChannelMeta(sample_rate=(1.0 / dt if dt > 0 else 0.0)),
+        )
+        fingerprint = self._input_fingerprint(values)
+        self._plugin_generation += 1
+        generation = self._plugin_generation
+        self._plugin_tasks[block.block_id] = generation
+        block.last_summary = "processing plugin…"
+
+        bridge = _PluginTaskBridge(
+            (block.block_id, generation, fingerprint),
+            self,
+        )
+        self._plugin_bridges[block.block_id] = bridge
+        bridge.done.connect(self._on_plugin_task_done)
+        bridge.failed.connect(self._on_plugin_task_failed)
+
+        run_in_pool(
+            "compute",
+            run_plugin_process,
+            plugin,
+            channel_block,
+            dict(block.params),
+            on_done=bridge.relay_done,
+            on_error=bridge.relay_failed,
+            owner=bridge,
+        )
+
+    def _on_plugin_task_done(self, envelope) -> None:
+        metadata, payload = envelope
+        block_id, expected, fp = metadata
+        if self._plugin_tasks.get(block_id) != expected:
+            return
+        self._plugin_tasks.pop(block_id, None)
+        self._plugin_bridges.pop(block_id, None)
+        located = self._find_block(block_id)
+        if located is None:
+            return
+        target_pipeline, _target_layer, target = located
+        result, completed_params = payload
+        latest_snapshot = self._compose_channel_preview(
+            target_pipeline.data_id,
+            target_pipeline.channel,
+            stop_before_block_id=block_id,
+            update_status=False,
+        )
+        latest_input = latest_snapshot[target.start:target.end]
+        if self._input_fingerprint(latest_input) != fp:
+            target.status = "stale"
+            target.last_summary = "upstream changed while processing; rerunning"
+            self._refresh_all_pipeline_statuses()
+            return
+        target.params = dict(completed_params)
+        target.input_slice = np.array(latest_input, copy=True)
+        target.output_slice = result.series.to_numpy(dtype=np.float64, copy=True)
+        target.status = "ready"
+        target.last_summary = f"processed {target.output_slice.size} pts"
+        self._refresh_all_pipeline_statuses()
+        self._refresh_selection()
+
+    def _on_plugin_task_failed(self, envelope) -> None:
+        metadata, exc = envelope
+        block_id, expected, _fp = metadata
+        if self._plugin_tasks.get(block_id) != expected:
+            return
+        self._plugin_tasks.pop(block_id, None)
+        self._plugin_bridges.pop(block_id, None)
+        located = self._find_block(block_id)
+        if located is None:
+            return
+        located[2].status = "error"
+        located[2].last_summary = repr(exc)
+        self._refresh_selection()
         for lane in self._lane_widgets:
             lane.refresh()
+
+    @staticmethod
+    def _replay_cached_edit(
+        cached_input: np.ndarray,
+        cached_output: np.ndarray,
+        current_input: np.ndarray,
+    ) -> np.ndarray:
+        """把编辑器确认过的修改重放到新的上游输入。
+
+        交互编辑器返回的是确认前后的切片，而不是可序列化算法参数。这里把
+        两者的差异解释为一个确定性的编辑操作：有限值修改保存为加性校正，
+        删除操作保存为 NaN，其他非有限值转换保存为绝对替换。未被编辑器
+        修改的位置始终沿用新的上游输入。
+        """
+        cached_input = np.asarray(cached_input, dtype=np.float64)
+        cached_output = np.asarray(cached_output, dtype=np.float64)
+        current_input = np.asarray(current_input, dtype=np.float64)
+        if not (
+            cached_input.ndim == cached_output.ndim == current_input.ndim == 1
+            and cached_input.shape == cached_output.shape == current_input.shape
+        ):
+            raise ValueError("cached edit slices must be one-dimensional and equal length")
+
+        result = np.array(current_input, copy=True)
+        same = (cached_input == cached_output) | (
+            np.isnan(cached_input) & np.isnan(cached_output)
+        )
+        changed = ~same
+        additive = changed & np.isfinite(cached_input) & np.isfinite(cached_output)
+        result[additive] = (
+            current_input[additive]
+            + cached_output[additive]
+            - cached_input[additive]
+        )
+
+        # NaN 删除、NaN→数值恢复以及 inf 等少见转换不能表示为有限差值，
+        # 直接重放编辑器确认的目标值。
+        absolute = changed & ~additive
+        result[absolute] = cached_output[absolute]
+        return result
 
     def _apply_block_preview(
         self,
@@ -1783,13 +2013,7 @@ class DataProcessPipelineWidget(QWidget):
         current_snapshot: np.ndarray,
         update_status: bool,
     ) -> np.ndarray:
-        """把单个 block 的缓存结果叠加到当前快照上。
-
-        interactive 与 param block 统一走"切片缓存"：block 只存
-        ``[start:end]`` 的输入/输出切片。当前快照对应区段与缓存输入一致时
-        把输出切片拼回去；否则标记 stale。param block 未执行过时保持
-        configured，等待后台执行引擎生成缓存。
-        """
+        """把单个 block 的缓存修改叠加到当前快照上。"""
         tool_kind = TOOL_META.get(block.tool_id, {}).get("kind")
         n = current_snapshot.size
         start = max(0, min(block.start, n))
@@ -1799,31 +2023,56 @@ class DataProcessPipelineWidget(QWidget):
         has_cache = block.input_slice is not None and block.output_slice is not None
         if not has_cache:
             if update_status:
-                if tool_kind == "interactive":
+                if block.status == "error":
+                    return current_snapshot
+                if tool_kind == "interactive" and block.status == "empty":
                     block.status = "empty"
-                    block.last_summary = "double click to edit and cache result"
+                    block.last_summary = "double click to configure"
                 else:
-                    block.status = "configured" if block.params else "empty"
-                    block.last_summary = "param block waiting to run"
+                    block.status = "configured" if tool_kind == "param" or block.params else "empty"
+                    if block.status == "configured":
+                        self._schedule_plugin_block(block, current_snapshot[start:end])
             return current_snapshot
 
         if block.input_slice.size != region_len or block.output_slice.size != region_len:
             if update_status:
                 block.status = "stale"
                 block.last_summary = "block range changed; refresh result"
+                self._schedule_plugin_block(block, current_snapshot[start:end])
             return current_snapshot
 
-        if not np.array_equal(current_snapshot[start:end], block.input_slice, equal_nan=True):
+        current_input = current_snapshot[start:end]
+        cache_matches = np.array_equal(current_input, block.input_slice, equal_nan=True)
+        output_slice = block.output_slice
+        if not cache_matches:
+            # Compatibility for pre-plugin pipeline snapshots created by the
+            # previous WIP implementation (they contain no serialized params).
+            if not block.params:
+                output_slice = self._replay_cached_edit(
+                    block.input_slice,
+                    block.output_slice,
+                    current_input,
+                )
+                if update_status:
+                    block.input_slice = np.array(current_input, copy=True)
+                    block.output_slice = np.array(output_slice, copy=True)
+                    block.status = "ready"
+                    block.last_summary = f"replayed {output_slice.size} pts on legacy block"
+                out = np.array(current_snapshot, copy=True)
+                out[start:end] = output_slice
+                return out
             if update_status:
                 block.status = "stale"
-                block.last_summary = "upstream changed; refresh result"
+                block.last_summary = "upstream changed; rerunning plugin"
+                self._schedule_plugin_block(block, current_input)
             return current_snapshot
 
         if update_status:
             block.status = "ready"
-            block.last_summary = f"cached {block.output_slice.size} pts"
+            if cache_matches:
+                block.last_summary = f"cached {block.output_slice.size} pts"
         out = np.array(current_snapshot, copy=True)
-        out[start:end] = block.output_slice
+        out[start:end] = output_slice
         return out
 
     def _compose_channel_preview(
@@ -1866,13 +2115,12 @@ class DataProcessPipelineWidget(QWidget):
         if not self.pipelines:
             return
 
-        self._collect_preview_results(update_status=True)
+        self._refresh_all_pipeline_statuses()
         self._refresh_selection()
 
         lines = [
             "Preview 语义：每个 channel 从 baseline 开始，按 layer 顺序、再按 block 起点顺序串行叠加。",
-            "interactive block 只在当前输入快照匹配时生效；上游变化后会变成 stale。",
-            "param block 目前只保存参数，还不参与实际计算。",
+            "已确认 block 会在上游变化后自动重放；未确认或区间损坏的 block 不会被提交。",
             "",
         ]
         for pipeline in self.pipelines:
@@ -1887,6 +2135,38 @@ class DataProcessPipelineWidget(QWidget):
 
         QMessageBox.information(self, "Preview", "\n".join(lines))
 
+    def _export_recipe(self) -> None:
+        if not self.pipelines:
+            QMessageBox.information(self, "Export Recipe", "当前没有可导出的 pipeline。")
+            return
+        pipeline = self.pipelines[0]
+        if self.selected_block_id:
+            found = self._find_block(self.selected_block_id)
+            if found is not None:
+                pipeline = found[0]
+        data = self._data_for(pipeline.data_id)
+        if data is None or not data.has_channel(pipeline.channel):
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 Pipeline Recipe",
+            f"{pipeline.channel}-recipe.toml",
+            "MTPro Recipe (*.toml)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".toml"):
+            path += ".toml"
+        recipe = recipe_from_pipeline(
+            pipeline,
+            data.get_channel_series(pipeline.channel).index,
+            f"#{pipeline.data_id} {pipeline.channel}",
+        )
+        try:
+            save_recipe(recipe, path)
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", repr(exc))
+
     def _reset_pipeline_after_commit(self, pipeline: ChannelPipeline):
         for layer in pipeline.layers:
             for block in layer.blocks:
@@ -1899,11 +2179,38 @@ class DataProcessPipelineWidget(QWidget):
                     block.status = "configured" if block.params else "empty"
                     block.last_summary = "committed into baseline; rerun to regenerate"
 
+    def _unready_blocks(self) -> list[tuple[ChannelPipeline, PipelineLayer, PipelineBlock]]:
+        result: list[tuple[ChannelPipeline, PipelineLayer, PipelineBlock]] = []
+        for pipeline in self.pipelines:
+            for layer in pipeline.layers:
+                for block in layer.blocks:
+                    if block.status != "ready":
+                        result.append((pipeline, layer, block))
+        return result
+
     def _commit_preview(self) -> None:
         if not self.pipelines:
             return
 
         preview_results = self._collect_preview_results(update_status=True)
+        unready = self._unready_blocks()
+        if unready:
+            details = [
+                f"#{pipeline.data_id} {pipeline.channel} / {layer.label} / "
+                f"{TOOL_META.get(block.tool_id, {}).get('name', block.tool_id)}: "
+                f"{BLOCK_STATUS_STYLE.get(block.status, {}).get('label', block.status)}"
+                for pipeline, layer, block in unready[:8]
+            ]
+            if len(unready) > len(details):
+                details.append(f"……另有 {len(unready) - len(details)} 个 block")
+            QMessageBox.warning(
+                self,
+                "Pipeline 未完成",
+                "以下 block 尚未产生有效结果，已取消提交：\n" + "\n".join(details),
+            )
+            self._refresh_selection()
+            return
+
         changed_channels: list[str] = []
 
         for pipeline in self.pipelines:
@@ -1940,7 +2247,7 @@ class DataProcessPipelineWidget(QWidget):
             "Commit",
             "已写回 channel:\n"
             + "\n".join(changed_channels)
-            + "\n\ninteractive block 的缓存结果已经烘焙进 baseline，后续继续编辑需要重新打开对应 block。",
+            + "\n\n处理结果已合并到 baseline；继续处理时请重新打开对应 block。",
         )
 
     def _refresh_selection(self):
@@ -1948,25 +2255,22 @@ class DataProcessPipelineWidget(QWidget):
         if found is None:
             for lane in self._lane_widgets:
                 lane.set_selected("")
-            if self.selected_tool_id is None:
-                self.info_text.setPlainText("请选择一个工具，然后点击或拖到某个 step 轨道中放置 block。")
+            if self.pipeline_hint is not None:
+                self.pipeline_hint.setText(
+                    "将左侧“数据处理工具”拖到某个 step 轨道以添加 block。"
+                )
             return
 
         pipeline, layer, block = found
         for lane in self._lane_widgets:
             lane.set_selected(block.block_id)
 
-        meta = TOOL_META.get(block.tool_id, {})
-        self.info_text.setPlainText(
-            f"selected block\n"
-            f"channel: #{pipeline.data_id} {pipeline.channel}\n"
-            f"layer: {layer.label}\n"
-            f"tool: {meta.get('name', block.tool_id)}\n"
-            f"range: {block.start} ~ {block.end}\n"
-            f"status: {block.status}\n"
-            f"params: {block.params}\n"
-            f"summary: {block.last_summary or '-'}"
-        )
+        if self.pipeline_hint is not None:
+            meta = TOOL_META.get(block.tool_id, {})
+            self.pipeline_hint.setText(
+                f"#{pipeline.data_id} {pipeline.channel} / {layer.label} / "
+                f"{meta.get('name', block.tool_id)} / {block.status}"
+            )
 
     def _find_block(
         self,

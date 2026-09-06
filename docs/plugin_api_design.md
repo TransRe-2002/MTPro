@@ -1,6 +1,6 @@
 # MTPro 数据处理插件 API 设计文档
 
-> 状态：待评审
+> 状态：v1 已实施（2026-09-01）
 > 范围：数据处理工具的插件化框架（VST 式宿主 + 插件模型），以及 7 个变换类内置工具的迁移方案。
 > 读者：评审人（用户）与后续实施 AI。实施前请先通读"现状盘点"与"决议记录"两节。
 
@@ -96,7 +96,7 @@
 ### 3.2 分层
 
 ```
-第三方插件 / 一方插件（builtin_plugins/）
+第三方插件 / 一方插件（plugins/）
         │ 只依赖
         ▼
   plugin_api（瘦 API：dataclass + Protocol，无 Qt、无宿主内部模块）
@@ -321,7 +321,7 @@ entry = "despiker_pkg:SpikePlugin" # module:attr，attr 是插件类
 
 ### 5.2 扫描来源与顺序
 
-1. **内置一方插件**（代码内清单，不读 toml）：`python/src/builtin_plugins/__init__.py` 导出 `BUILTIN_PLUGINS: list[type]`，最优先。
+1. **内置一方插件**（代码内清单，不读 toml）：`python/src/plugins/` 按功能目录组织，`builtin_plugins/__init__.py` 导出 `BUILTIN_PLUGINS: list[type]` 作为集合，最优先加载。
 2. **entry points**：`importlib.metadata.entry_points(group="mtpro.plugins")`，value 即 `module:attr`。第三方插件的 `pyproject.toml`：
    ```toml
    [project.entry-points."mtpro.plugins"]
@@ -492,7 +492,7 @@ indices = []             # 空 = 自动检测（见"参数二态约定"）
 
 现状（`processor/remove_spike.py`，591 行）：`SpikePlotWidget`（框选/删点/撤销）+ `RemoveSpike` 窗口，删除 = 选中点置 NaN，确认 = 直接发结果 ndarray，另有"应用到所有通道"复选框。
 
-一方插件形态（`builtin_plugins/spike_removal.py`）：
+一方插件形态（`plugins/remove_spike/` 与 `builtin_plugins/spike_removal.py`）：
 
 ```python
 class SpikeRemovalPlugin:
@@ -640,9 +640,13 @@ class SpikeRemovalPlugin:
 7. **插件不装进程序安装目录**：默认目录 `~/.config/mtpro/plugins/`（用户可写）+ 可配置扫描路径列表（DAW 式）+ "从文件安装…"（宿主复制进插件目录，纯离线）。在线插件仓库（Factorio 式）需后端，推迟到 v2——届时只是给加载器加下载来源，架构不变。
 8. **批处理基于插件 API 组合实现，不引入新插件类别**：配方 = 步骤清单（plugin_id + params + 时间区间），执行 = 对目标列表循环调 `process()`；auto 工具必须支持参数二态（显式结果参数精确重放 / 空结果参数自动检测）；批处理结果只写回内存数据集，不落盘。
 
-## 12. 开放问题（评审时请表态）
+## 12. 已决议开放问题
 
-1. **一方插件的目录位置**：本文档提议 `python/src/builtin_plugins/`；也可塞进 `processor/` 内。倾向前者（与"宿主设施"区分开）。
-2. **`error` 状态**：新增 `PipelineBlock.status = "error"` 会触碰 `BLOCK_STATUS_STYLE` 与状态计数，是否接受？（不接受的替代：塞进 `stale` + `last_summary` 记异常，代价是视觉上分不清"待刷新"与"执行失败"。）
-3. **params 中的索引基准**：本文档定"点级用切片相对索引、区间用时间戳"。若你更希望统一用时间戳（更抗切片变化，但点级选择要依赖采样严格对齐），请在评审时指出。
-4. **zip 直扔（§5.5）是否纳入 v1**：实现代价低（zipfile + sys.path 原生能力），但多一条需要测试的分发形态。倾向纳入——插件分发即单文件，游戏模组体验。
+实施采用文档倾向方案：一方插件位于 `builtin_plugins/`；Pipeline 增加
+`error` 状态；点选择使用 block 相对索引、区间使用 ISO 时间戳；v1 支持
+zip 直扔。
+
+1. 一方插件位于 `python/src/builtin_plugins/`，与宿主设施分离。
+2. 接受 `PipelineBlock.status = "error"`，用于区分执行失败和待刷新。
+3. 点级参数使用 block 相对索引，区间参数使用带时区 ISO 时间戳。
+4. v1 纳入 zip 直扔形态；仅纯 Python 插件可从 zip 加载。

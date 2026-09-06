@@ -48,7 +48,7 @@ CI (`.github/workflows/`): `CI.yml` only builds/uploads `rust_lib` wheels via ma
 - **MAT format**: `io_utils/mat_io.py` reads/writes the legacy `tsStruct` dict with nested `(1,1)` MATLAB cell arrays (see `TS_STRUCT_TEMPLATE`). `MatSaver.save()` calls `em_data.update_meta()` to sync changes back into the raw `mat_meta` dict before writing. `core/mat_data.py` auto-fetches Kp-index data on construction from a local HDF5 file (`utils/fetch_kp.py`).
 - **Signal-driven flow**: `DataManager` signals → `MainWindow` slots → viewer/processor updates. UI is MDI-based; tools open as `QMdiSubWindow` children.
 - **Processing tools** (`processor/_base_processor.py` `BaseProcessorWidget`) share a pattern: load channel → interpolate NaN → history stack for undo → `_confirm_and_close()` restores NaN positions and emits `result_signal(ch_name, ndarray)`.
-- **Pipeline mode is disabled**: `ui/data_process.py` has `PIPELINE_ENABLED = False`; Classic mode is the active path.
+- **Plugin layer**: `plugin_api.py` is the Qt-free public contract; discovery/runtime live in `base/plugin_{loader,runtime}.py`; seven first-party transforms live in `builtin_plugins/`. Pipeline is enabled and deterministically executes plugin `process()` calls.
 - `core/db_data.py` `EMDBData` is a stub for future DB-backed loading.
 
 ## Conventions

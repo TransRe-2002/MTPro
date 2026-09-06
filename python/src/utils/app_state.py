@@ -24,6 +24,7 @@ class AppState:
     workspace_with_log_splitter_sizes: list[int] = field(default_factory=list)
     log_visible: bool = True
     recent_files: list[str] = field(default_factory=list)
+    plugin_paths: list[str] = field(default_factory=list)
 
 
 def default_app_state_path() -> Path:
@@ -81,6 +82,18 @@ def _normalize_int_list(values: list[object]) -> list[int]:
     return result
 
 
+def _normalize_path_list(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        path = _normalize_path(value)
+        if not path or path in seen:
+            continue
+        normalized.append(path)
+        seen.add(path)
+    return normalized
+
+
 def load_app_state(path: Path | None = None) -> AppState:
     state_path = default_app_state_path() if path is None else Path(path).expanduser()
     default_state = AppState(kp_hdf5_path=_default_kp_hdf5_path(state_path))
@@ -108,6 +121,8 @@ def load_app_state(path: Path | None = None) -> AppState:
     workspace_with_log_splitter_sizes_raw = app_section.get("workspace_with_log_splitter_sizes", [])
     recent_files_raw = recent_section.get("files", [])
     recent_files = recent_files_raw if isinstance(recent_files_raw, list) else []
+    plugin_paths_raw = paths_section.get("plugins", [])
+    plugin_paths = plugin_paths_raw if isinstance(plugin_paths_raw, list) else []
 
     return AppState(
         app_name=str(app_name),
@@ -123,6 +138,7 @@ def load_app_state(path: Path | None = None) -> AppState:
         ),
         log_visible=log_visible,
         recent_files=_normalize_recent_files([str(item) for item in recent_files]),
+        plugin_paths=_normalize_path_list([str(item) for item in plugin_paths]),
     )
 
 
@@ -138,6 +154,7 @@ def save_app_state(state: AppState, path: Path | None = None) -> Path:
         workspace_with_log_splitter_sizes=_normalize_int_list(state.workspace_with_log_splitter_sizes),
         log_visible=bool(state.log_visible),
         recent_files=_normalize_recent_files(state.recent_files),
+        plugin_paths=_normalize_path_list(state.plugin_paths),
     )
 
     lines = [
@@ -152,6 +169,7 @@ def save_app_state(state: AppState, path: Path | None = None) -> Path:
         "[paths]",
         f"kp_hdf5 = {json.dumps(normalized_state.kp_hdf5_path, ensure_ascii=False)}",
         f"last_open_dir = {json.dumps(normalized_state.last_open_dir, ensure_ascii=False)}",
+        f"plugins = {json.dumps(normalized_state.plugin_paths, ensure_ascii=False)}",
         "",
         "[recent]",
         f"files = {json.dumps(normalized_state.recent_files, ensure_ascii=False)}",

@@ -30,6 +30,7 @@ def test_app_state_roundtrip_toml(tmp_path):
             str(tmp_path / "a.mat"),
             str(tmp_path / "b.mat"),
         ],
+        plugin_paths=[str(tmp_path / "plugins"), str(tmp_path / "plugins")],
     )
 
     save_app_state(state, state_path)
@@ -47,6 +48,7 @@ def test_app_state_roundtrip_toml(tmp_path):
         str((tmp_path / "a.mat").resolve(strict=False)),
         str((tmp_path / "b.mat").resolve(strict=False)),
     ]
+    assert loaded.plugin_paths == [str((tmp_path / "plugins").resolve(strict=False))]
 
 
 def test_remember_recent_file_deduplicates_and_moves_to_front(tmp_path):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Callable, Optional
 
 from PySide6.QtWidgets import QWidget
@@ -22,12 +23,57 @@ class ToolSpec:
 
 
 _REGISTRY: dict[str, ToolSpec] = {}
+_PLUGINS: dict[str, object] = {}
+
+_COMPAT_ALIASES = {
+    "remove_step_diff": ("remove step", "remove_step"),
+    "remove_wavelet_denoise": ("remove pulse wavelet",),
+}
 
 
 def register(spec: ToolSpec) -> None:
     keys = (spec.tool_id, spec.display_name, *spec.aliases)
     for key in keys:
         _REGISTRY[key] = spec
+
+
+def toolspec_from_plugin(loaded_plugin) -> ToolSpec:
+    """Adapt a validated plugin instance to the existing tool registry."""
+
+    from ui.plugin_adapter import create_classic_plugin_widget, create_pipeline_plugin_editor
+
+    info = loaded_plugin.info
+    has_editor = callable(getattr(loaded_plugin.plugin, "create_editor", None))
+    fields = tuple(
+        (param.name, param.label, param.type, param.default)
+        for param in info.params_schema
+    )
+    return ToolSpec(
+        tool_id=info.plugin_id,
+        display_name=info.display_name,
+        category=info.category,
+        kind="interactive" if has_editor else "param",
+        requires_channel=True,
+        aliases=_COMPAT_ALIASES.get(info.plugin_id, ()),
+        fields=fields,
+        has_channel_sync="channel_sync" in info.capabilities,
+        has_region_sync="region_sync" in info.capabilities,
+        classic_factory=partial(create_classic_plugin_widget, loaded_plugin.plugin),
+        pipeline_editor_factory=partial(create_pipeline_plugin_editor, loaded_plugin.plugin),
+    )
+
+
+def register_loaded_plugins(loaded_plugins) -> None:
+    for loaded_plugin in loaded_plugins:
+        _PLUGINS[loaded_plugin.info.plugin_id] = loaded_plugin.plugin
+        register(toolspec_from_plugin(loaded_plugin))
+
+
+def get_plugin(key: str):
+    spec = get(key)
+    if spec is None:
+        return None
+    return _PLUGINS.get(spec.tool_id)
 
 
 def get(key: str) -> Optional[ToolSpec]:
@@ -76,6 +122,7 @@ def create_pipeline_editor(
     key: str,
     preview_channel,
     parent,
+    params: Optional[dict] = None,
 ) -> Optional[QWidget]:
     """为 pipeline block 创建交互式编辑器，并同步注入 block 切片数据。
 
@@ -95,6 +142,8 @@ def create_pipeline_editor(
         widget = factory(0, preview_channel.name)
     else:
         widget = factory(0)
+    if params is not None and hasattr(widget, "params"):
+        widget.params.update(params)
     loader = getattr(widget, "load_series", None)
     if callable(loader):
         loader(preview_channel.name, preview_channel.cts)
@@ -102,3 +151,9 @@ def create_pipeline_editor(
 
 
 import ui.tools._registrations  # noqa: F401,E402  registers built-in tools
+
+# Keep direct DataProcessWidget/test construction useful outside MainWindow.
+from base.plugin_loader import load_all_plugins  # noqa: E402
+
+_BUILTIN_REPORT = load_all_plugins(scan_paths=[], include_entry_points=False)
+register_loaded_plugins(_BUILTIN_REPORT.loaded)

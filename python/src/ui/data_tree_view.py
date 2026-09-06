@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import json
 
+import numpy as np
+
 from PySide6.QtWidgets import (
     QApplication, QDialog, QTreeView, QVBoxLayout, QWidget, QSplitter,
     QMenu, QPlainTextEdit, QLabel, QFrame, QGroupBox, QStackedWidget,
@@ -13,7 +15,12 @@ from PySide6.QtGui import QDrag, QFont
 from typing import Callable, Dict, Optional, Tuple
 
 from core.em_data import EMData
-from ui.data_process_shared import CLASSIC_TOOL_MIME, DATA_TREE_SELECTION_MIME, create_classic_tool_model
+from ui.data_process_shared import (
+    CLASSIC_TOOL_MIME,
+    DATA_TREE_SELECTION_MIME,
+    PIPELINE_TOOL_MIME,
+    create_classic_tool_model,
+)
 from ui.data_tree_model import DataTreeModel
 from ui.compare_widget import CompareWidget
 from ui.dialogs.channel_management_dialog import ChannelManagementDialog
@@ -22,6 +29,7 @@ from ui.dialogs.rename_channel_dialog import RenameChannelDialog
 from ui.dialogs.station_metadata_dialog import StationMetadataDialog
 from ui.dialogs.trim_dialog import TrimDialog
 from ui.plot_panel import PlotPanel
+from ui.energy_spectrum_widget import EnergySpectrumWidget
 from utils.signal_decimate import decimated_length
 from base.data_manager import DataManager
 
@@ -63,6 +71,7 @@ class ToolTreeView(QTreeView):
 
         mime_data = QMimeData()
         mime_data.setData(CLASSIC_TOOL_MIME, QByteArray(tool_type.encode("utf-8")))
+        mime_data.setData(PIPELINE_TOOL_MIME, QByteArray(tool_type.encode("utf-8")))
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.exec(supported_actions, Qt.DropAction.CopyAction)
@@ -84,6 +93,7 @@ class DataTreeViewer(QWidget):
         self.tool_model = None
         self.data_manager = data_manager
         self._plot_panels: Dict[tuple[int, str], PlotPanel] = {}
+        self._spectrum_panels: Dict[tuple[int, str], EnergySpectrumWidget] = {}
 
         self.activate_id = 0
         self.init_ui()
@@ -165,6 +175,9 @@ class DataTreeViewer(QWidget):
         for panel_key in [pk for pk in self._plot_panels if pk[0] == key]:
             plot_panel = self._plot_panels.pop(panel_key)
             plot_panel.close()
+        for panel_key in [pk for pk in self._spectrum_panels if pk[0] == key]:
+            spectrum_panel = self._spectrum_panels.pop(panel_key)
+            spectrum_panel.close()
 
     def on_current_changed(self, current: QModelIndex, previous: QModelIndex):
         del previous
@@ -186,6 +199,9 @@ class DataTreeViewer(QWidget):
         for panel_key in [panel_key for panel_key in self._plot_panels if panel_key[0] == key]:
             plot_panel = self._plot_panels.pop(panel_key)
             plot_panel.close()
+        for panel_key in [panel_key for panel_key in self._spectrum_panels if panel_key[0] == key]:
+            spectrum_panel = self._spectrum_panels.pop(panel_key)
+            spectrum_panel.close()
 
     def on_active_changed(self, key: int):
         self.activate_id = key
@@ -418,6 +434,7 @@ class DataTreeViewer(QWidget):
 
         for label, handler in (
             ("显示曲线", self._open_channel_plot),
+            ("查看能量谱", self._open_energy_spectrum),
             ("序列对比", self._action_compare_channel),
             ("重命名通道…", self._open_rename_channel_dialog),
             ("删除通道", self._confirm_delete_channel),
@@ -425,6 +442,33 @@ class DataTreeViewer(QWidget):
             actions[menu.addAction(label)] = handler
 
         return menu, actions
+
+    def _open_energy_spectrum(self, key: int, ch_name: str) -> None:
+        panel_key = (key, ch_name)
+        existing = self._spectrum_panels.get(panel_key)
+        if existing is not None:
+            existing.show()
+            existing.activateWindow()
+            existing.raise_()
+            return
+        em_data = self.data_manager.get(key)
+        if em_data is None or not em_data.has_channel(ch_name):
+            return
+        dt = em_data.dt.total_seconds()
+        if dt <= 0:
+            QMessageBox.warning(self, "无法计算能量谱", "采样间隔无效。")
+            return
+        units = em_data.e_units if ch_name.startswith("E") else em_data.m_units
+        panel = EnergySpectrumWidget(
+            em_data.get_channel_series(ch_name).to_numpy(dtype=np.float64, copy=True),
+            1.0 / dt,
+            f"#{key} {em_data.name} - {ch_name}",
+            units or "",
+            self,
+        )
+        panel.destroyed.connect(lambda *_, item=panel_key: self._spectrum_panels.pop(item, None))
+        self._spectrum_panels[panel_key] = panel
+        panel.show()
 
     def on_context_menu(self, pos):
         index = self.tree_view.indexAt(pos)
@@ -499,8 +543,19 @@ class DataTreeViewer(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         factor = dialog.factor()
+        max_missing_fraction = dialog.max_missing_fraction()
 
         new_npts = decimated_length(em_data.npts, factor)
+        if max_missing_fraction == 1.0:
+            missing_policy = (
+                "TS 兼容规则：窗口至少含 1 个有效样点即保留；"
+                "全缺失窗口输出 NaN。"
+            )
+        else:
+            missing_policy = (
+                f"每个窗口最多允许缺失 {max_missing_fraction * 100:g}%；"
+                "超过时输出 NaN。"
+            )
         reply = QMessageBox.question(
             self,
             "确认降采样",
@@ -508,6 +563,7 @@ class DataTreeViewer(QWidget):
             f"{em_data.npts} → {new_npts} 点，采样周期 "
             f"{em_data.dt.total_seconds():g}s → "
             f"{(em_data.dt * factor).total_seconds():g}s\n\n"
+            f"{missing_policy}\n\n"
             "此操作就地修改且不可撤销，是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -518,12 +574,17 @@ class DataTreeViewer(QWidget):
         self._close_processor_windows_for(data_id)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            em_data.decimate(factor)
+            em_data.decimate(
+                factor,
+                max_missing_fraction=max_missing_fraction,
+            )
         finally:
             QApplication.restoreOverrideCursor()
         self.logger.info(
-            "Dataset #%s decimated by %d: npts=%d dt=%ss",
-            data_id, factor, em_data.npts, em_data.dt.total_seconds(),
+            "Dataset #%s decimated by %d with max missing %.1f%%: "
+            "npts=%d dt=%ss",
+            data_id, factor, max_missing_fraction * 100,
+            em_data.npts, em_data.dt.total_seconds(),
         )
         self.data_manager.notify_changed(data_id, structural=True)
 

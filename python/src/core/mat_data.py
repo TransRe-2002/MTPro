@@ -229,11 +229,13 @@ class MatEMData(EMData):
         self._try_set(ts, 'endTime', write_end)
         self._try_set(ts, 'zeroTime', write_zero)
         self._try_set(ts, 'dt', np.array([self.dt.total_seconds()]))
-        self._try_set(ts, 'npts', np.array([[self.npts]]))
+        # MATLAB 数值默认是 double。若写成 NumPy/Python 整数，转换后的
+        # TS.npts/NCh 会成为 int64，TS.findTime 中的日期运算会失败。
+        self._try_set(ts, 'npts', np.array([[self.npts]], dtype=np.float64))
         try:
-            ts['NCh'][0, 0] = np.array([[self.NCh]])
+            ts['NCh'][0, 0] = np.array([[self.NCh]], dtype=np.float64)
         except ValueError:
-            self._try_set(ts, 'nch', np.array([[self.NCh]]))
+            self._try_set(ts, 'nch', np.array([[self.NCh]], dtype=np.float64))
 
         # ── 台站元数据与通道信息同步 ─────────────────────────
         # 写回布局与 __init__ 的读取表达式镜像：字段是 (1,1) object

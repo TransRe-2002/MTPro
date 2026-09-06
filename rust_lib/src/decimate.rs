@@ -2,6 +2,71 @@ use numpy::array::PyArray1;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+const PARALLEL_BOXCAR_MIN_POINTS: usize = 65_536;
+
+/// NaN-aware boxcar decimation used by the destructive data preprocessor.
+///
+/// Each non-overlapping chunk produces one output sample. Finite values are
+/// averaged in input order; a chunk is rejected when its missing fraction is
+/// above `max_missing_fraction`. `par_chunks` preserves chunk order when
+/// collected into a `Vec`, so the result is deterministic.
+fn nan_boxcar_decimate_core(y: &[f64], factor: usize, max_missing_fraction: f64) -> Vec<f64> {
+    let reduce_window = |window: &[f64]| {
+        let mut sum = 0.0_f64;
+        let mut good_count = 0usize;
+        for &value in window {
+            if value.is_finite() {
+                sum += value;
+                good_count += 1;
+            }
+        }
+        if good_count == 0 {
+            return f64::NAN;
+        }
+        let missing_fraction = 1.0 - good_count as f64 / window.len() as f64;
+        if missing_fraction <= max_missing_fraction {
+            sum / good_count as f64
+        } else {
+            f64::NAN
+        }
+    };
+
+    if y.len() < PARALLEL_BOXCAR_MIN_POINTS {
+        y.chunks(factor).map(reduce_window).collect()
+    } else {
+        y.par_chunks(factor).map(reduce_window).collect()
+    }
+}
+
+/// Python-callable NaN-aware boxcar decimation (zero-copy input, Rayon output).
+///
+/// The NumPy array stays read-borrowed while `py.detach` releases the GIL, so
+/// other Python threads can run while Rayon processes independent windows.
+#[pyfunction]
+#[pyo3(name = "nan_boxcar_decimate_rs")]
+#[pyo3(signature = (y, factor, max_missing_fraction=1.0))]
+pub fn nan_boxcar_decimate_rs<'py>(
+    py: Python<'py>,
+    y: numpy::PyReadonlyArray1<'py, f64>,
+    factor: usize,
+    max_missing_fraction: f64,
+) -> PyResult<Py<PyArray1<f64>>> {
+    if factor < 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "factor must be >= 2, got {factor}"
+        )));
+    }
+    if !max_missing_fraction.is_finite() || !(0.0..=1.0).contains(&max_missing_fraction) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "max_missing_fraction must be between 0 and 1, got {max_missing_fraction}"
+        )));
+    }
+
+    let input = y.as_slice()?;
+    let output = py.detach(|| nan_boxcar_decimate_core(input, factor, max_missing_fraction));
+    Ok(PyArray1::from_vec(py, output).unbind())
+}
+
 /// Min/max envelope decimation (Rust core, parallel).
 fn decimate_core(x: &[f64], y: &[f64], target_bins: usize) -> (Vec<f64>, Vec<f64>) {
     let n = x.len();
@@ -31,8 +96,14 @@ fn decimate_core(x: &[f64], y: &[f64], target_bins: usize) -> (Vec<f64>, Vec<f64
             let mut minv = f64::MAX;
             let mut maxv = f64::MIN;
             for (j, &v) in yc.iter().enumerate() {
-                if v < minv { minv = v; imin = j; }
-                if v > maxv { maxv = v; imax = j; }
+                if v < minv {
+                    minv = v;
+                    imin = j;
+                }
+                if v > maxv {
+                    maxv = v;
+                    imax = j;
+                }
             }
             let a = start + imin;
             let b = start + imax;
@@ -135,4 +206,32 @@ pub fn apply_nan_intervals_rs<'py>(
         slice[s..e].fill(f64::NAN);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nan_boxcar_decimate_core;
+
+    #[test]
+    fn boxcar_averages_complete_and_partial_windows() {
+        let y = [0.0, 1.0, 2.0, 3.0, 4.0];
+        let out = nan_boxcar_decimate_core(&y, 2, 0.25);
+        assert_eq!(out, vec![0.5, 2.5, 4.0]);
+    }
+
+    #[test]
+    fn boxcar_accepts_threshold_and_rejects_excess_missing() {
+        let y = [1.0, f64::NAN, 3.0, 4.0, 5.0, f64::NAN, f64::NAN, 8.0];
+        let out = nan_boxcar_decimate_core(&y, 4, 0.25);
+        assert_eq!(out[0], 8.0 / 3.0);
+        assert!(out[1].is_nan());
+    }
+
+    #[test]
+    fn boxcar_treats_non_finite_values_as_missing() {
+        let y = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0];
+        let out = nan_boxcar_decimate_core(&y, 2, 1.0);
+        assert!(out[0].is_nan());
+        assert_eq!(out[1], 1.0);
+    }
 }

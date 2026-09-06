@@ -344,8 +344,8 @@ class MatSaver(EMDataSaver):
             raise TypeError(f"{type(em_data).__name__} is missing 'mat_meta' attribute")
         else:
             ts = new_ts_struct()
-            ts["NCh"] = em_data.NCh
-            ts["npts"] = em_data.npts
+            ts["NCh"] = np.float64(em_data.NCh)
+            ts["npts"] = np.float64(em_data.npts)
             ts["startTime"] = np.array([pts_to_array(em_data.start_time)])
             ts["endTime"] = np.array([pts_to_array(em_data.end_time)])
             ts["zeroTime"] = np.array([pts_to_array(em_data.zero_time)])

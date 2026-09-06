@@ -33,7 +33,9 @@ from PySide6.QtWidgets import (
 )
 
 from base.data_manager import DataManager
+from base.plugin_loader import LoadReport, load_all_plugins
 from ui.data_process import DataProcessWidget
+from ui.data_process_pipeline import refresh_tool_meta
 from ui.data_tree_view import DataTreeViewer
 from ui.data_view_widget import DataViewWidget
 from ui.log_console import (
@@ -42,6 +44,9 @@ from ui.log_console import (
     configure_application_logging,
     log_session_banner,
 )
+from ui.plugin_manager_dialog import PluginManagerDialog
+from ui.impedance_output import ImpedanceOutputWidget
+from ui.impedance_preview import ImpedancePreviewWidget, ImpedanceResultPool
 from ui.welcome import Welcome
 from ui.dialogs.batch_save_dialog import BatchSaveDialog
 from ui.tools import registry as tool_registry
@@ -131,6 +136,9 @@ class MainWindow(QMainWindow):
         self.activate_id: int = 0
         self.data_viewers: Dict[int, DataViewWidget] = {}
         self.app_state: AppState = load_app_state()
+        self.plugin_report: LoadReport = load_all_plugins(state=self.app_state)
+        tool_registry.register_loaded_plugins(self.plugin_report.loaded)
+        refresh_tool_meta()
         self._log_last_nonzero_height = 120
         # 后台打开/保存的临时状态（供主线程槽函数读写）
         self._single_open_progress: Optional[QProgressDialog] = None
@@ -168,6 +176,11 @@ class MainWindow(QMainWindow):
         self.data_process_widget.set_selection_payload_resolver(self.data_tree_viewer.current_drag_payload)
         self.data_process_widget.set_clear_checked_channels(self.data_tree_viewer.clear_checked_channels)
         self.tab_widget.addTab(self.data_process_widget, "数据处理")
+        self.impedance_pool = ImpedanceResultPool(self)
+        self.impedance_output_widget = ImpedanceOutputWidget(self.data_manager, self.impedance_pool, self)
+        self.tab_widget.addTab(self.impedance_output_widget, "阻抗输出")
+        self.impedance_preview_widget = ImpedancePreviewWidget(self.impedance_pool, self)
+        self.tab_widget.addTab(self.impedance_preview_widget, "阻抗预览")
 
         self.log_console = LogConsoleWidget(self)
         self.log_console_handler = QtTextEditHandler()
@@ -213,6 +226,16 @@ class MainWindow(QMainWindow):
         self.data_manager.active_changed.connect(self.on_activate_changed)
         self.data_manager.data_removed.connect(self.on_data_removed)
         self.data_manager.data_changed.connect(self.on_data_changed)
+
+        # DataManager 可能在 MainWindow 创建前就已有活动数据集；此时不会
+        # 再发一次 active_changed，需主动同步数据处理页和阻抗输出页。
+        initial_active_id = self.data_manager.active_id()
+        if initial_active_id != 0:
+            initial_data = self.data_manager.get(initial_active_id)
+            if initial_data is not None:
+                self.activate_id = initial_active_id
+                self.data_process_widget.init_data(initial_data, initial_active_id)
+                self.impedance_output_widget.init_data(initial_data, initial_active_id)
 
         self.setCentralWidget(self.central_stack)
         self.central_stack.setCurrentWidget(self.welcome)
@@ -512,12 +535,23 @@ class MainWindow(QMainWindow):
         show_workspace_action.triggered.connect(self._continue_to_workspace)
         view_menu.addAction(show_workspace_action)
 
+        tools_menu = menubar.addMenu("工具(&T)")
+        plugin_manager_action = QAction("插件管理器(&P)…", self)
+        plugin_manager_action.setStatusTip("查看插件、管理扫描路径并安装本地插件")
+        plugin_manager_action.triggered.connect(self._show_plugin_manager)
+        tools_menu.addAction(plugin_manager_action)
+
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
         about_action = QAction("关于 MTPro(&A)", self)
         about_action.setStatusTip("查看软件版本与版权信息")
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+    def _show_plugin_manager(self) -> None:
+        dialog = PluginManagerDialog(self.app_state, self.plugin_report, self)
+        dialog.exec()
+        self.plugin_report = dialog.report
 
     def _show_about(self):
         QMessageBox.about(
@@ -1001,6 +1035,7 @@ class MainWindow(QMainWindow):
             data = self.data_manager.get(activate_id)
             if data is not None:
                 self.data_process_widget.init_data(data, activate_id)
+                self.impedance_output_widget.init_data(data, activate_id)
 
         if activate_id == 0:
             self.dataset_status_label.setText("未加载数据")
@@ -1062,6 +1097,7 @@ class MainWindow(QMainWindow):
 
         # 通道集可能已变：同步数据处理页上下文
         self.data_process_widget.init_data(em_data, data_id)
+        self.impedance_output_widget.init_data(em_data, data_id)
         self.logger.info("Dataset #%s restructured; viewer rebuilt", data_id)
 
     def on_data_removed(self, key: int):
@@ -1152,5 +1188,6 @@ class MainWindow(QMainWindow):
         self._continue_to_workspace()
         self.data_manager.set_active(data_id)
         self.data_process_widget.init_data(data, data_id)
+        self.impedance_output_widget.init_data(data, data_id)
         self.tab_widget.setCurrentWidget(self.data_process_widget)
         self.data_process_widget.open_tool_for(data_id, channel_name, tool_type)

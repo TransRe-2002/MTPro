@@ -1,0 +1,6 @@
+[plugin]
+id = "example.rolling_median"
+name = "Rolling Median"
+version = "1.0.0"
+api = 1
+entry = "rolling_median:RollingMedianPlugin"

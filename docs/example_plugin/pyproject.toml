@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mtpro-rolling-median-example"
+version = "1.0.0"
+dependencies = ["pandas"]
+
+[project.entry-points."mtpro.plugins"]
+rolling_median = "rolling_median:RollingMedianPlugin"
+
+[tool.setuptools]
+py-modules = ["rolling_median"]

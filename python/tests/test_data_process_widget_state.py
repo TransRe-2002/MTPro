@@ -13,7 +13,7 @@ from core.em_data import EMData
 from processor.remove_diurnal_sinusoid import RemoveDiurnalSinusoid
 from ui.data_process import DataProcessLegacyWidget, DataProcessWidget, ToolWindowState, WorkspaceMdiArea
 from ui.data_process_shared import DATA_TREE_SELECTION_MIME
-from ui.data_process_pipeline import DataProcessPipelineWidget, PipelineBlock
+from ui.data_process_pipeline import DataProcessPipelineWidget, PipelineBlock, TOOL_META
 from ui.data_tree_view import DataTreeViewer
 
 
@@ -251,7 +251,7 @@ def test_data_process_widget_opens_remote_reference_placeholder():
     widget.close()
 
 
-def test_data_process_host_keeps_classic_mode_when_pipeline_is_disabled():
+def test_data_process_host_switches_to_pipeline_mode():
     _app()
     widget = DataProcessWidget()
     data = DemoData("demo", ["Ex1", "Hy1"])
@@ -264,9 +264,9 @@ def test_data_process_host_keeps_classic_mode_when_pipeline_is_disabled():
     assert widget.pipeline_panel.workspace_tabs.count() == 2
 
     widget.set_mode("pipeline")
-    assert widget.current_mode() == "classic"
-    assert widget.mode_stack.currentWidget() is widget.classic_panel
-    assert widget.pipeline_button.isEnabled() is False
+    assert widget.current_mode() == "pipeline"
+    assert widget.mode_stack.currentWidget() is widget.pipeline_panel
+    assert widget.pipeline_button.isEnabled() is True
     assert widget.pipeline_widget is None
 
     widget.close()
@@ -302,8 +302,8 @@ def test_data_process_has_separate_workspace_tabs_per_mode():
 
     widget.set_mode("pipeline")
 
-    assert widget.current_mode() == "classic"
-    assert widget.mode_stack.currentWidget() is widget.classic_panel
+    assert widget.current_mode() == "pipeline"
+    assert widget.mode_stack.currentWidget() is widget.pipeline_panel
     assert widget.classic_panel.workspace_tabs is not widget.pipeline_panel.workspace_tabs
 
     widget.close()
@@ -315,7 +315,7 @@ def test_data_process_mode_buttons_and_new_workspace_tabs():
 
     assert widget.classic_button.text() == "Classic"
     assert widget.pipeline_button.text() == "Pipeline"
-    assert widget.pipeline_button.isEnabled() is False
+    assert widget.pipeline_button.isEnabled() is True
     assert len(widget.classic_panel._workspaces) == 1
     assert len(widget.pipeline_panel._workspaces) == 1
     assert widget.classic_panel.workspace_tabs.count() == 2
@@ -593,7 +593,7 @@ def test_pipeline_normalizes_range_index_series_to_datetime_index(qtbot):
     pipeline.close()
 
 
-def test_pipeline_tool_tree_selection_and_clear():
+def test_pipeline_uses_shared_tool_drag_instead_of_a_second_tool_tree():
     _app()
     widget = DataProcessWidget()
     data = DemoData("demo", ["Ex1"])
@@ -605,22 +605,14 @@ def test_pipeline_tool_tree_selection_and_clear():
     assert workspace is not None
     pipeline = workspace.create_pipeline_window([(1, "Ex1")])
     assert pipeline is not None
-    pipeline._set_selected_tool("remove_step_diff")
-
-    assert pipeline.selected_tool_id == "remove_step_diff"
-    assert pipeline.tool_tree is not None
-    assert pipeline.tool_tree.currentIndex().isValid()
-    assert "remove step diff" in pipeline.info_text.toPlainText()
-
-    pipeline._clear_selected_tool()
-
-    assert pipeline.selected_tool_id is None
-    assert not pipeline.tool_tree.currentIndex().isValid()
+    assert not hasattr(pipeline, "tool_tree")
+    assert pipeline.pipeline_hint is not None
+    assert "数据处理工具" in pipeline.pipeline_hint.text()
 
     widget.close()
 
 
-def test_pipeline_drop_adds_block_and_updates_selected_tool():
+def test_pipeline_drop_adds_block_from_shared_tool_payload():
     _app()
     widget = DataProcessWidget()
     data = DemoData("demo", ["Ex1"])
@@ -636,14 +628,13 @@ def test_pipeline_drop_adds_block_and_updates_selected_tool():
 
     pipeline._on_tool_dropped(1, "Ex1", layer.layer_id, "remove_step_diff", 100)
 
-    assert pipeline.selected_tool_id == "remove_step_diff"
     assert pipeline.block_count() == 1
     assert layer.blocks[0].tool_id == "remove_step_diff"
 
     widget.close()
 
 
-def test_pipeline_preview_commit_rebases_and_marks_downstream_stale():
+def test_pipeline_preview_commit_replays_downstream_edit_on_updated_upstream():
     _app()
     widget = DataProcessWidget()
     data = DemoData("demo", ["Ex1"])
@@ -681,12 +672,18 @@ def test_pipeline_preview_commit_rebases_and_marks_downstream_stale():
     np.testing.assert_allclose(preview[(1, "Ex1")], base + 3)
     assert first.status == "ready"
     assert second.status == "ready"
+    pipeline_widget._refresh_all_pipeline_statuses()
+    np.testing.assert_allclose(pipeline_widget._lane_widgets[0].samples, base + 3)
 
     first.output_slice = base + 10
     preview = pipeline_widget._collect_preview_results(update_status=True)
-    np.testing.assert_allclose(preview[(1, "Ex1")], base + 10)
+    np.testing.assert_allclose(preview[(1, "Ex1")], base + 12)
     assert first.status == "ready"
-    assert second.status == "stale"
+    assert second.status == "ready"
+    np.testing.assert_allclose(second.input_slice, base + 10)
+    np.testing.assert_allclose(second.output_slice, base + 12)
+    pipeline_widget._refresh_all_pipeline_statuses()
+    np.testing.assert_allclose(pipeline_widget._lane_widgets[0].samples, base + 12)
 
     changed = []
     pipeline_widget.change_finished_signal.connect(
@@ -697,11 +694,54 @@ def test_pipeline_preview_commit_rebases_and_marks_downstream_stale():
 
     np.testing.assert_allclose(
         data.get_channel_series("Ex1").to_numpy(dtype=np.float64, copy=True),
-        base + 10,
+        base + 12,
     )
-    np.testing.assert_allclose(channel_pipeline.baseline_snapshot, base + 10)
+    np.testing.assert_allclose(channel_pipeline.baseline_snapshot, base + 12)
     assert first.output_slice is None
     assert second.output_slice is None
     assert changed == [(1, "Ex1")]
 
     widget.close()
+
+
+def test_pipeline_replays_deletion_without_overwriting_unchanged_upstream_values():
+    cached_input = np.array([1.0, 2.0, 3.0, 4.0])
+    cached_output = np.array([1.0, np.nan, 5.0, 4.0])
+    updated_upstream = np.array([10.0, 20.0, 30.0, 40.0])
+
+    replayed = DataProcessPipelineWidget._replay_cached_edit(
+        cached_input,
+        cached_output,
+        updated_upstream,
+    )
+
+    np.testing.assert_allclose(replayed, [10.0, np.nan, 32.0, 40.0], equal_nan=True)
+
+
+def test_pipeline_only_lists_executable_channel_transform_tools():
+    assert "remove_spike" in TOOL_META
+    assert "remove_step_diff" in TOOL_META
+    assert "robust_estimate" not in TOOL_META
+    assert "remote_reference" not in TOOL_META
+
+
+def test_pipeline_commit_refuses_unprocessed_blocks(qtbot):
+    _app()
+    manager = DataManager()
+    data = DemoData("demo", ["Ex1"])
+    key = manager.add(data)
+    pipeline_widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(pipeline_widget)
+    pipeline_widget.add_channels([(key, "Ex1")])
+    pipeline_widget.pipelines[0].layers[0].blocks.append(
+        PipelineBlock(tool_id="remove_spike", start=0, end=3)
+    )
+    before = data.get_channel_series("Ex1").copy()
+
+    with patch("ui.data_process_pipeline.QMessageBox.warning") as warning:
+        pipeline_widget._commit_preview()
+
+    warning.assert_called_once()
+    pd.testing.assert_series_equal(data.get_channel_series("Ex1"), before)
+    assert pipeline_widget.pipelines[0].layers[0].blocks[0].status == "empty"
+    pipeline_widget.close()

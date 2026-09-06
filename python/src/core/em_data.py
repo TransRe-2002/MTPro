@@ -207,12 +207,18 @@ class EMData(ABC):
         mask = (col >= new_start) & (col <= new_end)
         self.kp_data = kp.loc[mask].reset_index(drop=True)
 
-    def decimate(self, factor: int) -> int:
-        """整数倍抗混叠降采样（就地，不可逆）。返回新 npts。
+    def decimate(
+        self,
+        factor: int,
+        max_missing_fraction: float = 1.0,
+    ) -> int:
+        """整数倍 boxcar 降采样（就地，不可逆）。返回新 npts。
 
-        逐通道做 NaN 感知的零相位滤波抽取（见
-        ``utils.signal_decimate``），新时间轴取原索引 [::factor]，
-        dt 乘以 factor。Kp 数据不变（3 小时周期与 EM 采样率无关）。
+        采用 ``TS.m::decimate`` 默认策略：逐通道对每个窗口的有限样点
+        求平均，缺失比例超过 ``max_missing_fraction`` 时该输出点为
+        NaN。默认值 1.0 忠实匹配 TS.m boxcar 的实际行为，即窗口至少有
+        一个有效样点就保留。新时间轴取原索引 [::factor]，dt 乘以
+        factor。Kp 数据不变（3 小时周期与 EM 采样率无关）。
         """
         if not isinstance(factor, int) or isinstance(factor, bool) or factor < 2:
             raise ValueError(f"降采样因子必须是 >= 2 的整数，得到 {factor!r}")
@@ -223,7 +229,12 @@ class EMData(ABC):
 
         new_npts = decimated_length(self.npts, factor)
         new_arrays: dict[str, np.ndarray] = {
-            ch: decimate_nan_aware(self.data[ch].to_numpy(), factor, new_npts)
+            ch: decimate_nan_aware(
+                self.data[ch].to_numpy(),
+                factor,
+                new_npts,
+                max_missing_fraction=max_missing_fraction,
+            )
             for ch in self.channel_names()
         }
         new_index = self.datetime_index[::factor]

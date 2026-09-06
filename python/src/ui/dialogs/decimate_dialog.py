@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QLabel,
     QSpinBox,
@@ -61,8 +62,10 @@ class DecimateDialog(QDialog):
         layout.setContentsMargins(20, 16, 20, 16)
 
         info_label = QLabel(
-            "对当前数据集做抗混叠整数倍抽取（就地修改，不可撤销）。\n"
-            "数据中的 NaN 缺口会保持：覆盖缺口的输出样点仍为 NaN。",
+            "按 TS.m 的 boxcar 策略对当前数据集做整数倍降采样"
+            "（就地修改，不可撤销）。\n"
+            "默认采用 TS 兼容规则：窗口至少有一个有效样点就求平均；"
+            "全缺失窗口输出 NaN。",
             self,
         )
         info_label.setWordWrap(True)
@@ -90,6 +93,17 @@ class DecimateDialog(QDialog):
         self._factor_spin.setSuffix(" 倍")
         self._factor_spin.setToolTip("整数抽取因子，如 5 表示 1s → 5s")
         form.addRow("降采样因子：", self._factor_spin)
+
+        self._max_missing_spin = QDoubleSpinBox(self)
+        self._max_missing_spin.setRange(0.0, 100.0)
+        self._max_missing_spin.setDecimals(0)
+        self._max_missing_spin.setValue(100.0)
+        self._max_missing_spin.setSingleStep(5.0)
+        self._max_missing_spin.setSuffix(" %")
+        self._max_missing_spin.setToolTip(
+            "TS.m 兼容值为 100%；低于此值会拒绝有效点较少的窗口"
+        )
+        form.addRow("最大允许缺失：", self._max_missing_spin)
 
         layout.addLayout(form)
 
@@ -119,6 +133,7 @@ class DecimateDialog(QDialog):
         layout.addWidget(button_box)
 
         self._factor_spin.valueChanged.connect(self._update_preview)
+        self._max_missing_spin.valueChanged.connect(self._update_preview)
         self._update_preview()
 
     # ------------------------------------------------------------------
@@ -127,6 +142,9 @@ class DecimateDialog(QDialog):
 
     def factor(self) -> int:
         return self._factor_spin.value()
+
+    def max_missing_fraction(self) -> float:
+        return self._max_missing_spin.value() / 100.0
 
     # ------------------------------------------------------------------
     # 私有槽
@@ -157,11 +175,18 @@ class DecimateDialog(QDialog):
                 f"✓ 低于建议上限 {format_points(MAX_POINTS_PER_CHANNEL)} 点/通道"
             )
 
+        missing_percent = self._max_missing_spin.value()
+        if missing_percent == 100.0:
+            missing_line = "窗口规则：TS 兼容（100%，至少 1 个有效样点）"
+        else:
+            missing_line = f"窗口最多允许缺失：{missing_percent:g}%"
+
         self._preview_label.setText(
             f"降采样后：采样周期 {new_dt.total_seconds():g}s "
             f"({format_sample_rate(new_dt)})，"
             f"{new_npts} 点，时长 {format_duration(duration)}\n"
             f"数据内存估计：{old_mb:.0f} MB → {new_mb:.0f} MB\n"
+            f"{missing_line}\n"
             f"{limit_line}"
         )
         self._error_label.hide()

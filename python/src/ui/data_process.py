@@ -34,11 +34,11 @@ from base.processing_broker import ProcessingBroker
 
 from base.data_manager import DataManager
 from core.em_data import EMData
-from ui.data_process_pipeline import DataProcessPipelineWidget
+from ui.data_process_pipeline import DataProcessPipelineWidget, pipeline_tool_id_from_mime
+from ui.batch_process_dialog import BatchProcessDialog
 from ui.data_process_shared import (
     CLASSIC_TOOL_MIME,
     DATA_TREE_SELECTION_MIME,
-    PIPELINE_TOOL_MIME,
     create_classic_tool_model,
 )
 from ui.tools import registry as tool_registry
@@ -377,7 +377,7 @@ class DataProcessLegacyWidget(QWidget):
             return
 
         # ── Phase 2: 线程池并行修改 + 预计算显示数据 ────
-        from processor._display_utils import decimate_for_display
+        from plugins.common.display import decimate_for_display
         from utils.series import dti_to_numpy, safe_nanmean
 
         def _modify(task):
@@ -619,7 +619,10 @@ class WorkspaceMdiArea(QMdiArea):
         self.setActiveSubWindow(sub_window)
 
     def dragEnterEvent(self, event):
-        if self.mode == "pipeline" and event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
+        if self.mode == "pipeline" and (
+            event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME)
+            or pipeline_tool_id_from_mime(event.mimeData()) is not None
+        ):
             event.acceptProposedAction()
         elif self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
             event.acceptProposedAction()
@@ -627,7 +630,10 @@ class WorkspaceMdiArea(QMdiArea):
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if self.mode == "pipeline" and event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
+        if self.mode == "pipeline" and (
+            event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME)
+            or pipeline_tool_id_from_mime(event.mimeData()) is not None
+        ):
             event.acceptProposedAction()
         elif self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
             event.acceptProposedAction()
@@ -638,6 +644,22 @@ class WorkspaceMdiArea(QMdiArea):
         if self.mode == "pipeline" and event.mimeData().hasFormat(DATA_TREE_SELECTION_MIME):
             self._handle_data_selection_drop(event)
             return
+
+        if self.mode == "pipeline":
+            tool_id = pipeline_tool_id_from_mime(event.mimeData())
+            if tool_id is not None:
+                drop_point = event.position().toPoint()
+                sub_window = self._subwindow_at(drop_point)
+                target = None if sub_window is None else sub_window.widget()
+                global_pos = self.mapToGlobal(drop_point)
+                if (
+                    isinstance(target, DataProcessPipelineWidget)
+                    and target.drop_tool_at_global_position(tool_id, global_pos)
+                ):
+                    event.acceptProposedAction()
+                    return
+                event.ignore()
+                return
 
         if self.mode == "classic" and event.mimeData().hasFormat(CLASSIC_TOOL_MIME):
             widget_type = event.mimeData().data(CLASSIC_TOOL_MIME).data().decode()
@@ -1002,7 +1024,7 @@ class WorkspaceTabPanel(QWidget):
 
 class DataProcessWidget(QWidget):
     change_finished_signal = Signal(int, str)
-    PIPELINE_ENABLED = False
+    PIPELINE_ENABLED = True
 
     def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
         super().__init__(parent)
@@ -1055,6 +1077,10 @@ class DataProcessWidget(QWidget):
         )
         self.pipeline_button.setEnabled(self.PIPELINE_ENABLED)
         self.pipeline_button.setToolTip("Pipeline 功能暂时屏蔽" if not self.PIPELINE_ENABLED else "")
+        self.batch_button = QToolButton(self)
+        self.batch_button.setText("批处理…")
+        self.batch_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.batch_button.clicked.connect(self._open_batch_process)
 
         self.mode_stack = QStackedWidget(self)
         self.classic_panel = WorkspaceTabPanel("classic", data_manager, self)
@@ -1071,6 +1097,7 @@ class DataProcessWidget(QWidget):
         header_layout.addWidget(self.classic_button)
         header_layout.addWidget(self.pipeline_button)
         header_layout.addStretch(1)
+        header_layout.addWidget(self.batch_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1079,6 +1106,13 @@ class DataProcessWidget(QWidget):
         layout.addWidget(self.mode_stack, 1)
 
         self.set_mode("classic")
+
+    def _open_batch_process(self) -> None:
+        if self.data_manager is None:
+            return
+        dialog = BatchProcessDialog(self.data_manager, self)
+        dialog.result_applied.connect(self.change_finished_signal)
+        dialog.exec()
 
     def _current_panel(self) -> WorkspaceTabPanel:
         return self.classic_panel if self._mode == "classic" else self.pipeline_panel

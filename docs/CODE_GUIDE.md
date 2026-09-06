@@ -56,6 +56,13 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 
 ## base 包 — 注册表与中介
 
+### `plugin_loader.py` / `plugin_runtime.py`
+- 插件按一方插件、`mtpro.plugins` entry point、`MTPRO_PLUGIN_PATH`、用户扫描路径、默认目录的顺序加载；目录和 zip 都支持，单个插件失败只进入 `LoadReport.failed`。
+- `plugin_runtime.run_plugin_process` 补齐默认参数并强制检查 `TransformResult` 与输入同长度、同 index，供 Classic、Pipeline 和批处理共用。
+
+### `batch_runner.py`
+- `BatchRunner` 对目标间并行、目标内按 recipe step 串行；单目标失败隔离。带点索引的步骤遇到采样间隔不一致时跳过并写诊断。
+
 ### `data_manager.py` `DataManager(QObject)`
 - 全局数据集注册表：`_em_datas: Dict[int, EMData]`，`_next_key` 自增，`_active_id` 活跃键。
 - 信号：`data_added(int)` / `data_removed(int)` / `active_changed(int)`。
@@ -119,7 +126,7 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 
 ### `app_state.py`
 - 应用持久化状态（TOML）。`APP_NAME="MTPro"`、`MAX_RECENT_FILES=8`。
-- `AppState` dataclass：`kp_hdf5_path/last_open_dir/active_tab(默认"波形浏览")/workspace_splitter_sizes/log_visible/recent_files` 等。
+- `AppState` dataclass：`kp_hdf5_path/last_open_dir/active_tab(默认"波形浏览")/workspace_splitter_sizes/log_visible/recent_files/plugin_paths` 等。
 - 路径解析：优先 env `MTPRO_APP_STATE_PATH`；Windows 用 `LOCALAPPDATA`；其他 `XDG_CONFIG_HOME` 或 `~/.config`；最终 `<base>/mtpro/app_state.toml`。
 - `load_app_state`：读 `[app]/[paths]/[recent]` 三段，路径 expanduser+resolve，recent 去重限 8。
 - `save_app_state`：手写 TOML（json.dumps 转义），自动建目录，失败静默。
@@ -164,6 +171,17 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 
 ## ui 包 — 用户界面
 
+### 插件宿主
+- `plugin_adapter.py`：自动参数对话框、Classic 接线壳与 compute-pool 执行桥；插件 Editor 只提交 JSON 参数，数据统一由 `process()` 产生。
+- `plugin_manager_dialog.py`：展示加载成功/失败、管理扫描路径、安装本地目录或 zip、重新扫描。
+- `batch_process_dialog.py`：加载 recipe，勾选多个已打开通道，执行后把成功结果写回内存数据集。
+- `plugins/`：按功能拆分的插件包（7 个单通道变换插件及 `output/` 下的输出工具）；`builtin_plugins/` 仅作为内置实现集合被加载器引用。
+
+### 第三方插件开发
+- 只从 `plugin_api.py` 导入 `PluginInfo`、`ParamSpec`、`ChannelBlock`、`TransformResult` 等稳定 API；`process()` 禁止触碰 Qt，必须容忍 NaN。
+- 目录形态需要根层 `plugin.toml`；打包安装可声明 `[project.entry-points."mtpro.plugins"]`。完整可运行示例见 `docs/example_plugin/`。
+- 参数必须可 JSON 序列化。点级决定用 block 相对索引；时间区间用带时区 ISO 字符串。
+
 ### `mainwindow.py` `MainWindow(QMainWindow)`
 - 应用顶层窗口：菜单/工具栏/状态栏、欢迎页↔工作区切换、文件打开/保存、最近文件、日志面板显隐、数据集激活/移除联动。
 - 持有 `DataManager`、`DataTreeViewer`、`DataProcessWidget`、`LogConsoleWidget`、`Welcome`、`AppState`。
@@ -189,7 +207,7 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 - `shutdown`/`closeEvent` 安全退出所有工作线程。
 
 ### `data_process.py` — 数据处理面板
-- Classic/Pipeline 模式切换 + MDI。**`PIPELINE_ENABLED = False`**（pipeline 按钮禁用，强行切回退 classic）。
+- Classic/Pipeline 模式切换 + MDI。**`PIPELINE_ENABLED = True`**；pipeline block 通过插件 `process()` 异步执行并可导出 recipe。
 - `DataProcessLegacyWidget`：Classic 宿主，管理 MDI 子窗口 + `ProcessingBroker`。`open_tool_window` 实例化具体 processor 并 `_wire_tool` 接到 broker。
 - `WorkspaceMdiArea`：单工作区 MDI，拖放 classic 工具（`CLASSIC_TOOL_MIME`）或 pipeline 通道（`DATA_TREE_SELECTION_MIME`，JSON payload）。
 - `WorkspaceTabPanel`：多工作区 tab，末尾常驻"+"tab 新建工作区。
@@ -316,10 +334,10 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 
 ### `remove_wavelet_denoise.py` — 小波多尺度去噪
 - 继承 `BaseProcessorWidget + RegionManagementMixin`。
-- 预设 `AUTO_PRESETS`：自定义/脉冲/尖峰/平滑降噪。
-- 参数：小波基、变换(DWT/Wavelet Packet)、分解层数、处理范围(局部/全通道)、模式(soft/hard/zero/manual)、阈值倍数、扩展点数、统一增益、WP 分组增益(低/中/高)。
+- 预设 `AUTO_PRESETS`：自适应保守（推荐）/常规宽带降噪/边界安全去噪，以及明确标记为旧版兼容的脉冲/尖峰/平滑降噪。
+- 参数：小波基、变换(DWT/SWT/Wavelet Packet)、分解层数或保护周期、处理范围(局部/全通道)、模式(soft/hard/zero/manual)、阈值策略(SureShrink/通用阈值)、秒或采样点 padding、统一增益、WP 分组增益(低/中/高)。
 - `_sync_gain_controls`：根据层数动态生成 D1..Dn / B1..Bn 增益 SpinBox。
-- `_update_level_limit`：用 `pywt.dwt_max_level` 计算最大层数，WP 上限 6，DWT 上限 12。
+- `_update_level_limit`：用 `pywt.dwt_max_level` 计算 DWT/WP 最大层数；SWT 按窗口长度限制。自动策略按采样率和保护周期换算层数。
 - `_run_denoise` 调 `wavelet_multiscale_denoise`；`_preview_fit` 不落盘，`_apply_correction` 走 `_save_history`。
 - 支持 TOML 预设导入/导出。
 - 主图三条曲线（原始/当前/预览）+ 橙色 InfiniteLine 标局部窗 + detail 能量柱状图。
@@ -346,9 +364,9 @@ MTPro 是一个基于 **PySide6** 的大地电磁（MT）时间序列处理与�
 - **鲁棒基线** `robust_baseline_destep`：`least_squares`(`soft_l1`) 两步拟合——pre-step 多项式基线 + post-step `_saturated_transition`(tⁿ 饱和) + 可选二阶平滑正则；f_scale 用 MAD×1.4826 估计。
 - **小波去噪** `wavelet_multiscale_denoise`：
   - 取局部窗口(≥16 点)，NaN 用 `np.interp` 填；`pywt.dwt_max_level` 限层数。
-  - DWT：`pywt.wavedec`，每细节层按 mode 处理：manual 乘增益；其他用背景 MAD 估 σ，阈值=`threshold_scale*σ*sqrt(2*log(N))`，调 `pywt.threshold`。仅修改局部区域系数(带 guard)。
+  - DWT/SWT：保留近似项；每细节层按 mode 处理。自动模式使用背景 MAD 估 σ，再使用逐层 SureShrink 或通用阈值；手动模式乘增益。SWT 对称补齐后以 `pywt.swt/iswt` 重构。
   - Wavelet Packet：`WaveletPacket.get_level(level, order='freq')`，每节点类似处理。
-  - 重构后余弦 ramp(`blend_width`) 边界混合避免接缝。返回 corrected/correction/detail_energy/band_labels/band_ranges_hz。
+  - `auto_by_period` 以保护周期和采样率选层，`padding_seconds` 优先换算为点数；重构后余弦 ramp(`blend_width`) 边界混合避免接缝。输入 NaN 只在计算时插值，输出仍保留 NaN。返回实际阈值、策略及 corrected/correction/detail_energy/band_labels/band_ranges_hz。
 - `wavelet_local_depulse` 是 DWT 简化封装。
 
 ### `step_plot_widget.py` `StepPlotWidget(pg.PlotWidget)`

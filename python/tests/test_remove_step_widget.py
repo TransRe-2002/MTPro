@@ -697,11 +697,31 @@ def test_remove_wavelet_denoise_preset_updates_controls(qtbot):
     widget = RemoveWaveletDenoise(data, "Ex1")
     qtbot.addWidget(widget)
 
-    widget.preset_combo.setCurrentText("尖峰")
+    widget.preset_combo.setCurrentText("尖峰（旧版固定）")
 
     assert widget.mode_combo.currentText() == "hard"
     assert widget.threshold_scale_spin.value() == 2.2
     assert widget.padding_spin.value() == 64
+
+
+def test_remove_wavelet_denoise_research_presets_configure_adaptive_strategy(qtbot):
+    data = PulseDemoData()
+    widget = RemoveWaveletDenoise(data, "Ex1")
+    qtbot.addWidget(widget)
+
+    widget.preset_combo.setCurrentText("自适应保守（推荐）")
+
+    assert widget.transform_combo.currentText() == "DWT"
+    assert widget.wavelet_combo.currentText() == "sym6"
+    assert widget._threshold_method() == "sure"
+    assert widget._level_policy() == "auto_by_period"
+    assert widget._padding_unit() == "seconds"
+    assert not widget.level_spin.isEnabled()
+
+    widget.preset_combo.setCurrentText("边界安全去噪")
+
+    assert widget._transform_kind() == "swt"
+    assert widget._threshold_method() == "sure"
 
 
 def test_remove_wavelet_denoise_preview_updates_energy_plot(qtbot):

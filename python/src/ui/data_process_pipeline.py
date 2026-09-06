@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import math
 from typing import Dict, Optional
 
 import numpy as np
@@ -74,6 +75,32 @@ def px_per_point(zoom: float) -> float:
 
 def points_to_pixels(points: int, zoom: float) -> float:
     return points * px_per_point(zoom)
+
+
+def _nice_tick_multiple(minimum: float) -> int:
+    """Return a 1/2/5-based integer multiple no smaller than ``minimum``."""
+    if minimum <= 1.0:
+        return 1
+    magnitude = 10 ** math.floor(math.log10(minimum))
+    for factor in (1, 2, 5, 10):
+        candidate = int(factor * magnitude)
+        if candidate >= minimum:
+            return candidate
+    return int(10 * magnitude)
+
+
+def ruler_tick_multipliers(
+    grid_points: int,
+    zoom: float,
+    *,
+    min_tick_pixels: float = 8.0,
+    min_label_pixels: float = 48.0,
+) -> tuple[int, int]:
+    """Choose minor and labeled-tick strides that stay legible at ``zoom``."""
+    grid_pixels = max(points_to_pixels(max(1, grid_points), zoom), 1e-6)
+    tick_multiple = _nice_tick_multiple(min_tick_pixels / grid_pixels)
+    label_multiple = _nice_tick_multiple(min_label_pixels / grid_pixels)
+    return tick_multiple, max(tick_multiple, label_multiple)
 
 
 def _is_pipeline_capable(spec) -> bool:
@@ -349,18 +376,28 @@ class RulerWidget(QWidget):
         palette = self.palette()
         painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
         painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 0.5))
-        painter.setFont(QFont("Courier New", 9))
+        ruler_font = QFont("Courier New", 9)
+        painter.setFont(ruler_font)
 
         step = max(50, self.snap.grid_pts)
+        label_width = painter.fontMetrics().horizontalAdvance(str(self.data_len))
+        tick_multiple, label_multiple = ruler_tick_multipliers(
+            step,
+            self.zoom,
+            min_label_pixels=max(48.0, label_width + 12.0),
+        )
+        tick_step = step * tick_multiple
+        label_step = step * label_multiple
         pts = 0
         while pts <= self.data_len:
             x_pos = int(points_to_pixels(pts, self.zoom))
-            painter.drawLine(x_pos, 16, x_pos, self.height())
-            if pts % (step * 2) == 0 or step >= 2000:
+            is_labeled_tick = pts % label_step == 0
+            painter.drawLine(x_pos, 10 if is_labeled_tick else 16, x_pos, self.height())
+            if is_labeled_tick:
                 painter.setPen(palette.color(QPalette.ColorRole.Text))
                 painter.drawText(x_pos + 2, 13, str(pts))
                 painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 0.5))
-            pts += step
+            pts += tick_step
         painter.end()
 
 

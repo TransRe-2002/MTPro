@@ -7,7 +7,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PySide6.QtWidgets import QApplication
 
-from ui.data_process_pipeline import ChannelOverviewWidget
+from ui.data_process_pipeline import (
+    ChannelOverviewWidget,
+    points_to_pixels,
+    ruler_tick_multipliers,
+)
 from utils.decimate import LODPyramid
 
 
@@ -42,3 +46,14 @@ def test_pipeline_overview_hides_zero_baseline_by_default_and_can_toggle_it():
     overview.set_baseline_visible(False)
     assert overview._show_baseline is False
     overview.close()
+
+
+def test_pipeline_ruler_widens_tick_and_label_spacing_at_low_zoom():
+    grid_points = 50
+    low_tick, low_label = ruler_tick_multipliers(grid_points, 1.0)
+    high_tick, high_label = ruler_tick_multipliers(grid_points, 20.0)
+
+    assert points_to_pixels(grid_points * low_tick, 1.0) >= 8.0
+    assert points_to_pixels(grid_points * low_label, 1.0) >= 48.0
+    assert low_tick > high_tick
+    assert low_label > high_label

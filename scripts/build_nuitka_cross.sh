@@ -3,13 +3,13 @@
 #
 # 原理: Nuitka 4.x 没有 Linux→Windows 的 --target 交叉模式,必须在
 # Windows 目标解释器下运行才能产出 PE。这里用 Wine 跑 python-build-standalone
-# 的 Windows CPython 3.13(默认 ~/.cross/python,可用 WIN_PY 覆盖),Nuitka
+# 的 Windows CPython 3.14(默认 ~/.cross/python,可用 WIN_PY 覆盖),Nuitka
 # 的 C 编译器用 winlibs gcc(Nuitka --assume-yes-for-downloads 自动下载,
 # 在 Wine 内原生运行)。
 #
 # 前置(与 build_nuitka.ps1 相同的依赖集合):
-#   - wine + ~/.cross/python 下的 Windows CPython 3.13
-#   - Windows wheels 已装入该 Python(scripts 依赖 + nuitka 4.1.3)
+#   - wine + ~/.cross/python 下的 Windows CPython 3.14
+#   - Windows wheels 已装入该 Python(scripts 依赖 + nuitka 4.2.x)
 #   - rust_lib.pyd 已放入其 site-packages(用 maturin --target
 #     x86_64-pc-windows-gnu 的产物改名,或 cargo 同样目标构建)
 #
@@ -28,11 +28,11 @@ DIST_NAME="mtpro-windows-x86_64"
 
 if [[ ! -f "$WIN_PY" ]]; then
   echo "Missing Windows target Python: $WIN_PY" >&2
-  echo "Set WIN_PY to a Windows CPython 3.13 python.exe" >&2
+  echo "Set WIN_PY to a Windows CPython 3.14 python.exe" >&2
   exit 1
 fi
 
-# scipy>=1.18 在 Nuitka 4.1.3 编译下导入 scipy.signal 会段错误(1.17.x 正常)。
+# 当前桌面构建组合固定使用 SciPy 1.17.1；升级时需同时复测 Nuitka 和 scipy.signal。
 # 环境必须钉 scipy==1.17.1,否则编出来的 exe 启动即崩。
 WIN_SCIPY="$(cd "$(dirname "$WIN_PY")" 2>/dev/null; wine "$WIN_PY" -c "import scipy;print(scipy.__version__)" 2>/dev/null | tail -1 | tr -d '\r')"
 if [[ "$WIN_SCIPY" != "1.17.1" ]]; then

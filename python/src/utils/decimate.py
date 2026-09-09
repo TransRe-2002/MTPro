@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 
@@ -67,8 +66,12 @@ def minmax_decimate(
             rx_parts.append(xc)
             ry_parts.append(yc)
             continue
-        imin = int(np.argmin(yc))
-        imax = int(np.argmax(yc))
+        try:
+            imin = int(np.nanargmin(yc))
+            imax = int(np.nanargmax(yc))
+        except ValueError:
+            # All-NaN bin: retain one NaN sample so gaps survive coarser LODs.
+            imin = imax = 0
         if imin < imax:
             rx_parts.append(np.array([xc[imin], xc[imax]]))
             ry_parts.append(np.array([yc[imin], yc[imax]]))

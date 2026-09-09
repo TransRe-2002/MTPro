@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, Mapping, Optional
+from typing import Any
+from collections.abc import Callable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -36,6 +38,21 @@ from utils.qt_bridge import run as run_in_pool
 
 
 logger = logging.getLogger(__name__)
+PIPELINE_LINK_ALL_TEXT = "应用到当前 Pipeline 的全部通道"
+
+
+def create_pipeline_link_all_checkbox(
+    parent: QWidget,
+    *,
+    checked: bool = False,
+) -> QCheckBox:
+    """Build the shared all-channel control used by every Pipeline editor."""
+    checkbox = QCheckBox(PIPELINE_LINK_ALL_TEXT, parent)
+    checkbox.setChecked(checked)
+    checkbox.setToolTip(
+        "各通道独立执行和缓存；修改公共设置时整组重新计算。"
+    )
+    return checkbox
 
 
 class PluginParamDialog(QDialog):
@@ -46,6 +63,9 @@ class PluginParamDialog(QDialog):
         info: PluginInfo,
         params: Mapping[str, Any] | None = None,
         parent=None,
+        *,
+        allow_link_all: bool = False,
+        link_all: bool = False,
     ):
         super().__init__(parent)
         self.info = info
@@ -77,13 +97,25 @@ class PluginParamDialog(QDialog):
             warning.setWordWrap(True)
             layout.addWidget(warning)
 
+        self.link_all_checkbox: QCheckBox | None = None
+        if allow_link_all:
+            self.link_all_checkbox = create_pipeline_link_all_checkbox(
+                self,
+                checked=link_all,
+            )
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             self,
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        if self.link_all_checkbox is not None:
+            action_row.addWidget(self.link_all_checkbox)
+        action_row.addWidget(buttons)
+        layout.addLayout(action_row)
 
     def _create_field(self, spec: ParamSpec, value: Any) -> QWidget | None:
         if spec.type is float:
@@ -274,6 +306,15 @@ class PluginSliceEditor(QWidget):
             except Exception as exc:
                 self._on_failed(exc)
                 return
+        elif bool(getattr(self.plugin, "pipeline_preview", False)):
+            from ui.filter_preview_editor import FilterPreviewEditor
+
+            self._editor = FilterPreviewEditor(
+                self._host,
+                block,
+                self.params,
+                self,
+            )
         if self._editor is not None:
             self._layout.addWidget(self._editor)
         else:
@@ -305,6 +346,74 @@ class PluginSliceEditor(QWidget):
     def _on_failed(self, exc: object) -> None:
         logger.error("Plugin %s failed: %r", self.plugin.info.plugin_id, exc)
         QMessageBox.critical(self, "插件处理失败", repr(exc))
+
+    def attach_pipeline_link_checkbox(self, checkbox: QCheckBox) -> bool:
+        """Place the Pipeline group control beside the editor's final action."""
+        roots: list[QWidget] = []
+        current = self._editor
+        while isinstance(current, QWidget) and current not in roots:
+            roots.append(current)
+            nested = getattr(current, "editor", None)
+            current = nested if isinstance(nested, QWidget) else None
+
+        for root in roots:
+            legacy_sync = getattr(root, "sync_checkbox", None)
+            if isinstance(legacy_sync, QCheckBox):
+                legacy_sync.hide()
+
+        action_button = None
+        for name in ("confirm_btn", "confirm_button", "apply_button", "apply_btn"):
+            for root in roots:
+                candidate = getattr(root, name, None)
+                if isinstance(candidate, QWidget):
+                    action_button = candidate
+                    break
+            if action_button is not None:
+                break
+        if action_button is None:
+            return False
+
+        located = self._find_widget_layout(self, action_button)
+        if located is None:
+            return False
+        container, index = located
+        if isinstance(container, QHBoxLayout):
+            container.insertWidget(index, checkbox)
+            return True
+        if isinstance(container, QVBoxLayout):
+            container.removeWidget(action_button)
+            row = QHBoxLayout()
+            row.addStretch(1)
+            row.addWidget(checkbox)
+            row.addWidget(action_button)
+            container.insertLayout(index, row)
+            return True
+        return False
+
+    @classmethod
+    def _find_widget_layout(cls, container: QWidget, target: QWidget):
+        root_layout = container.layout()
+        if root_layout is None:
+            return None
+
+        def walk(layout):
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                if item.widget() is target:
+                    return layout, index
+                child_layout = item.layout()
+                if child_layout is not None:
+                    found = walk(child_layout)
+                    if found is not None:
+                        return found
+                child_widget = item.widget()
+                if child_widget is not None and child_widget.layout() is not None:
+                    found = walk(child_widget.layout())
+                    if found is not None:
+                        return found
+            return None
+
+        return walk(root_layout)
 
 
 def create_pipeline_plugin_editor(

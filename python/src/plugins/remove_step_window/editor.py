@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 import pyqtgraph as pg
-from typing import Optional
 
 from plugins.common.base_processor import BaseProcessorWidget
 from plugins.common.step_algorithms import (
@@ -53,7 +52,7 @@ class RemoveStepByWindow(BaseProcessorWidget):
     def __init__(self, source, channel_name: str, parent=None):
         super().__init__(source, channel_name, parent)
 
-        self.diff_y_data: Optional[np.ndarray] = None
+        self.diff_y_data: np.ndarray | None = None
 
         self.plot_widget = StepPlotWidget()
         self.plot_item = self.plot_widget.getPlotItem()

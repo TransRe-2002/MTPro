@@ -11,7 +11,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -139,13 +138,13 @@ class ZFileData:
         return self.tf[1, ey, :] if ey < self.tf.shape[1] else np.zeros(self.nbt, dtype=np.complex128)
 
     @property
-    def Tzx(self) -> Optional[NDArray[np.complex128]]:
+    def Tzx(self) -> NDArray[np.complex128] | None:
         """Tzx tipper component, or None if no predicted Hz channel exists."""
         hz = self._predicted_index("HZ", default=-1)
         return self.tf[0, hz, :] if hz >= 0 and hz < self.tf.shape[1] else None
 
     @property
-    def Tzy(self) -> Optional[NDArray[np.complex128]]:
+    def Tzy(self) -> NDArray[np.complex128] | None:
         """Tzy tipper component, or None if no predicted Hz channel exists."""
         hz = self._predicted_index("HZ", default=-1)
         return self.tf[1, hz, :] if hz >= 0 and hz < self.tf.shape[1] else None
@@ -260,6 +259,11 @@ class ZFileData:
         with open(path, "r") as fh:
             lines = fh.readlines()
 
+        if len(lines) < 6:
+            raise ValueError(
+                f"Malformed EMTF Z-file {path}: expected at least six header lines, got {len(lines)}"
+            )
+
         data = cls()
         data.chead = lines[2].rstrip("\n").rstrip("\r").strip()
 
@@ -279,13 +283,30 @@ class ZFileData:
 
         # Number of channels / frequencies
         counts = re.search(
-            r"number of channels\s+(\d+)\s+number of frequencies\s+(\d+)",
+            r"number of channels\s+(-?\d+)\s+number of frequencies\s+(-?\d+)",
             lines[5],
         )
-        if counts:
-            data.nch = int(counts.group(1))
-            data.nbt = int(counts.group(2))
+        if counts is None:
+            raise ValueError(
+                f"Malformed EMTF Z-file {path}: missing channel/frequency count header"
+            )
+        data.nch = int(counts.group(1))
+        data.nbt = int(counts.group(2))
+        if data.nch < 4:
+            raise ValueError(
+                f"Malformed EMTF Z-file {path}: expected at least four channels, got {data.nch}"
+            )
+        if data.nbt < 0:
+            raise ValueError(
+                f"Malformed EMTF Z-file {path}: frequency count cannot be negative ({data.nbt})"
+            )
         data.nche = data.nch - 2
+
+        min_header_lines = 7 + data.nch
+        if len(lines) < min_header_lines:
+            raise ValueError(
+                f"Malformed EMTF Z-file {path}: incomplete channel-orientation header"
+            )
 
         # Channel orientations
         data.chid = []
@@ -566,7 +587,7 @@ def _fmt_e12(value: float) -> str:
     return s[:12].rjust(12)
 
 
-def _parse_fortran_e12_line(line: str, expected: Optional[int] = None) -> list[float]:
+def _parse_fortran_e12_line(line: str, expected: int | None = None) -> list[float]:
     """Parse space-delimited Fortran E12.4 values from one line."""
     values: list[float] = []
     for token in line.split():

@@ -20,7 +20,7 @@ By default, this module uses a standard 1 Hz band table.  Pass a custom
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -86,17 +86,17 @@ def estimate_single_station(
     hy: NDArray[np.float64],
     sample_rate_hz: float,
     *,
-    hz: Optional[NDArray[np.float64]] = None,
+    hz: NDArray[np.float64] | None = None,
     station_name: str = "STATION",
-    window_size: Optional[int] = None,
-    step_size: Optional[int] = None,           # ignored
+    window_size: int | None = None,
+    step_size: int | None = None,           # ignored
     max_missing_per_window: int = 0,           # ignored
     max_gap_fill: int = 0,                    # ignored
     huber_threshold: float = 1.5,              # passed through
     max_iterations: int = 25,                  # passed through
     tolerance: float = 1e-8,                   # ignored (Fortran uses its own)
-    decimation_levels: Optional[Sequence[DecimationLevel]] = None,
-    bands: Optional[Sequence[FrequencyBand]] = None,
+    decimation_levels: Sequence[DecimationLevel] | None = None,
+    bands: Sequence[FrequencyBand] | None = None,
     cleanup: bool = True,
 ) -> ZFileData:
     """Estimate MT impedance — drop-in replacement for ``emtf_rs.estimate_single_station``.
@@ -159,17 +159,17 @@ def estimate_remote_reference(
     remote_hy: NDArray[np.float64],
     sample_rate_hz: float,
     *,
-    hz: Optional[NDArray[np.float64]] = None,
+    hz: NDArray[np.float64] | None = None,
     station_name: str = "STATION",
-    window_size: Optional[int] = None,
-    step_size: Optional[int] = None,            # ignored
+    window_size: int | None = None,
+    step_size: int | None = None,            # ignored
     max_missing_per_window: int = 0,            # ignored
     max_gap_fill: int = 0,                     # ignored
     huber_threshold: float = 1.5,               # passed through
     max_iterations: int = 25,                   # passed through
     tolerance: float = 1e-8,                    # ignored
-    decimation_levels: Optional[Sequence[DecimationLevel]] = None,
-    bands: Optional[Sequence[FrequencyBand]] = None,
+    decimation_levels: Sequence[DecimationLevel] | None = None,
+    bands: Sequence[FrequencyBand] | None = None,
     cleanup: bool = True,
 ) -> ZFileData:
     """Estimate MT impedance with remote reference — drop-in replacement
@@ -217,14 +217,16 @@ def _estimate(
     station_name: str,
     sample_rate_hz: float,
     *,
-    hz: Optional[NDArray[np.float64]] = None,
-    remote_hx: Optional[NDArray[np.float64]] = None,
-    remote_hy: Optional[NDArray[np.float64]] = None,
-    decimation_levels: Optional[Sequence[DecimationLevel]] = None,
-    bands: Optional[Sequence[FrequencyBand]] = None,
+    hz: NDArray[np.float64] | None = None,
+    remote_hx: NDArray[np.float64] | None = None,
+    remote_hy: NDArray[np.float64] | None = None,
+    decimation_levels: Sequence[DecimationLevel] | None = None,
+    bands: Sequence[FrequencyBand] | None = None,
     cleanup: bool = True,
 ) -> ZFileData:
     # Validate
+    if not np.isfinite(sample_rate_hz) or sample_rate_hz <= 0:
+        raise ValueError("sample_rate_hz must be a positive finite value")
     n = len(ex)
     for name, arr in [("ey", ey), ("hx", hx), ("hy", hy)]:
         if len(arr) != n:
@@ -232,7 +234,13 @@ def _estimate(
     if hz is not None and len(hz) != n:
         raise ValueError(f"ex has {n} samples but hz has {len(hz)}")
 
+    if (remote_hx is None) != (remote_hy is None):
+        raise ValueError("remote_hx and remote_hy must be provided together")
     is_rr = remote_hx is not None and remote_hy is not None
+    if is_rr:
+        for name, arr in [("remote_hx", remote_hx), ("remote_hy", remote_hy)]:
+            if len(arr) != n:
+                raise ValueError(f"ex has {n} samples but {name} has {len(arr)}")
 
     levels = list(decimation_levels) if decimation_levels else _default_decimation(sample_rate_hz)
     band_list = list(bands) if bands else _default_bands(len(levels))
@@ -275,9 +283,8 @@ def _estimate(
         )
 
         # -- write remote ASC + SP if RR ----------------------------------
-        remote_files: list[Path] = []
+        rr_name: str | None = None
         if is_rr:
-            from emtf._runner import Workspace as _Ws
             rr_arrays = [np.asarray(remote_hx, dtype=np.float64),
                          np.asarray(remote_hy, dtype=np.float64)]
             rr_name = f"{station_name}_RR"
@@ -302,16 +309,30 @@ def _estimate(
         (ws.path / "FC").mkdir(parents=True, exist_ok=True)
 
         binary = resolve_binary("dnff")
-        stdin = render_dnff_stdin([asc_name])
+        dnff_inputs = [asc_name]
+        if rr_name is not None:
+            dnff_inputs.append(f"{rr_name}.asc")
+        stdin = render_dnff_stdin(dnff_inputs)
         result = _run(binary, stdin=stdin, workspace=ws, args=["-A"])
         if result.returncode != 0:
             raise RuntimeError(f"dnff failed: {result.stderr}")
 
         # -- find FC files -----------------------------------------------
         fc_dir = ws.path / "FC"
-        fc_files = sorted(fc_dir.glob("*.f*"))
+        fc_files = sorted(
+            path for path in fc_dir.iterdir()
+            if path.is_file() and path.name.startswith(f"{station_name}.f")
+        )
         if not fc_files:
-            raise RuntimeError(f"No FC files produced by dnff in {fc_dir}")
+            raise RuntimeError(f"No local FC files produced by dnff in {fc_dir}")
+        remote_files: list[Path] = []
+        if rr_name is not None:
+            remote_files = sorted(
+                path for path in fc_dir.iterdir()
+                if path.is_file() and path.name.startswith(f"{rr_name}.f")
+            )
+            if not remote_files:
+                raise RuntimeError(f"No remote-reference FC files produced by dnff in {fc_dir}")
 
         # -- run tranmt --------------------------------------------------
         options = ProcessingOptions(
@@ -327,20 +348,27 @@ def _estimate(
             options=options,
             num_channels=num_channels,
             remote_fc_files=remote_files if is_rr else None,
+            remote_num_channels=2 if is_rr else None,
             workspace=ws,
             cleanup=False,  # ws handles cleanup
         )
 
         # -- parse Z file ------------------------------------------------
-        z_files = sorted((ws.path / "MT").glob("Z.*"))
+        output_pattern = "*.zrr" if is_rr else "*.zss"
+        z_files = sorted((ws.path / "MT").glob(output_pattern))
         if not z_files:
-            z_files = sorted((ws.path / "MT").glob("*.zss"))
+            z_files = sorted((ws.path / "MT").glob("Z.*"))
         if not z_files:
-            z_files = sorted((ws.path / "MT").glob("*.zrr"))
-        if not z_files:
-            raise RuntimeError(f"No Z files produced by tranmt in {ws.path / 'MT'}")
+            mode_name = "remote-reference" if is_rr else "single-station"
+            raise RuntimeError(f"No {mode_name} Z files produced by tranmt in {ws.path / 'MT'}")
 
-        return ZFileData.read(z_files[0])
+        zdata = ZFileData.read(z_files[0])
+        if zdata.nbt == 0:
+            raise RuntimeError(
+                f"tranmt produced an empty Z file ({z_files[0].name}); "
+                "select a longer overlapping time range or shorter FFT window"
+            )
+        return zdata
 
     finally:
         if cleanup:
@@ -375,7 +403,7 @@ def _default_bands(num_levels: int) -> list[FrequencyBand]:
 
 def decimation_with_fft_window(
     sample_rate_hz: float,
-    fft_window_size: Optional[int],
+    fft_window_size: int | None,
 ) -> list[DecimationLevel]:
     levels = _default_decimation(sample_rate_hz)
     if fft_window_size is None:
@@ -407,7 +435,7 @@ def decimation_with_fft_window(
     ]
 
 
-def _decimation_from_window_size(window_size: Optional[int]) -> Optional[list[DecimationLevel]]:
+def _decimation_from_window_size(window_size: int | None) -> list[DecimationLevel] | None:
     if window_size is None:
         return None
     nwin = int(window_size)

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 import math
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 
 # ── Configuration types ────────────────────────────────────────────────────

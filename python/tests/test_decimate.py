@@ -112,6 +112,21 @@ def test_slice_visible_empty_range():
     assert len(xs) == 0 and len(ys) == 0
 
 
+def test_minmax_python_fallback_matches_rust_with_remainder_and_nan(monkeypatch):
+    x = np.arange(11, dtype=np.float64)
+    y = np.array(
+        [0.0, np.nan, 1.0, 3.0, 4.0, 6.0, 5.0, 7.0, np.nan, 10.0, 9.0],
+        dtype=np.float64,
+    )
+    rust_x, rust_y = minmax_decimate(x, y, target_bins=3)
+
+    monkeypatch.setattr(dec, "_HAS_RUST", False)
+    python_x, python_y = minmax_decimate(x, y, target_bins=3)
+
+    np.testing.assert_array_equal(rust_x, python_x)
+    np.testing.assert_array_equal(rust_y, python_y)
+
+
 def test_python_fallback_matches_rust_path(monkeypatch):
     """强制关闭 Rust 加速，验证 Python 回退路径行为一致。"""
     x, y = _spiky_series(50_000)

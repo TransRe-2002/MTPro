@@ -22,6 +22,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import core.mat_data as mat_data_module
+from core.algorithms.svd import svd_denoise_series
 from io_utils.bin_io import DAT_CH_FIELDS, DAT_DTYPE, BinLoader
 from io_utils.mat_io import MatLoader, new_ts_struct
 from processor._display_utils import apply_nan_intervals
@@ -160,6 +161,7 @@ def build_benchmarks(args: argparse.Namespace) -> list[Benchmark]:
         (args.npts // 2, args.npts // 2 + args.npts // 80),
     ]
     diurnal = _make_diurnal_series(args.diurnal_days, args.diurnal_freq)
+    signal_series = pd.Series(y, index=index, name="Ex")
     tempdir = tempfile.TemporaryDirectory(prefix="mtpro-profile-")
     tmp_path = Path(tempdir.name)
     dat_path = tmp_path / "synthetic.dat"
@@ -234,6 +236,15 @@ def build_benchmarks(args: argparse.Namespace) -> list[Benchmark]:
         Benchmark("step.remove_diff_by_count", lambda: remove_diff_steps_by_count(y, args.step_count)[0]),
         Benchmark("step.windowed_mean_destep", lambda: windowed_mean_destep(y, 1.0, 1000, args.step_count)[0]),
         Benchmark("step.robust_baseline_destep", bench_robust_baseline),
+        Benchmark(
+            "denoise.hankel_svd",
+            lambda: svd_denoise_series(
+                signal_series,
+                embedding_points=101,
+                rank=8,
+                min_segment_points=128,
+            ).cleaned,
+        ),
         Benchmark("diurnal.subtract_periodic", lambda: subtract_diurnal_signal_series(diurnal).cleaned),
     ]
     if not args.skip_wavelet:

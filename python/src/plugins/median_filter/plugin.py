@@ -5,6 +5,8 @@ from plugin_api import ParamSpec, PluginInfo, TransformResult
 
 
 class MedianFilterPlugin:
+    pipeline_preview = True
+
     info = PluginInfo(
         plugin_id="median_filter",
         display_name="滑动中值滤波",

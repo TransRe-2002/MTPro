@@ -18,7 +18,7 @@ import pandas as pd
 import xarray as xr
 import pyqtgraph as pg
 from PySide6 import QtWidgets, QtCore, QtGui
-from typing import List, Optional, Any, Tuple
+from typing import Any
 
 from plugins.common.base_processor import build_pkg_from_series
 from plugins.common.display import decimate_for_display, apply_nan_intervals
@@ -49,17 +49,17 @@ class RegionPlotWidget(pg.PlotWidget):
         super().__init__(*args, **kwargs, axisItems={'bottom': pg.DateAxisItem()})
 
         # 数据存储
-        self.x_data: Optional[np.ndarray] = None
-        self.y_data: Optional[np.ndarray] = None
-        self.origin_y_data: Optional[np.ndarray] = None
-        self._display_x: Optional[np.ndarray] = None
-        self._display_y: Optional[np.ndarray] = None
-        self.deletion_history: List[np.ndarray] = []
-        self.deletion_history_ranges: List[List[Tuple[float, float]]] = []  # 每次删除的时间范围
+        self.x_data: np.ndarray | None = None
+        self.y_data: np.ndarray | None = None
+        self.origin_y_data: np.ndarray | None = None
+        self._display_x: np.ndarray | None = None
+        self._display_y: np.ndarray | None = None
+        self.deletion_history: list[np.ndarray] = []
+        self.deletion_history_ranges: list[list[tuple[float, float]]] = []  # 每次删除的时间范围
 
         # 区域管理
-        self._regions: List[pg.LinearRegionItem] = []
-        self._plot_curve: Optional[pg.PlotCurveItem] = None
+        self._regions: list[pg.LinearRegionItem] = []
+        self._plot_curve: pg.PlotCurveItem | None = None
         self._current_cursor_shape = QtCore.Qt.CursorShape.ArrowCursor
         self._last_emitted_count: int = -1
         self.is_over_region: bool = False
@@ -141,7 +141,7 @@ class RegionPlotWidget(pg.PlotWidget):
         """兼容接口：RegionPlotWidget 不需要模式切换，空实现。"""
         pass
 
-    def add_region(self, start_x: Optional[float] = None) -> None:
+    def add_region(self, start_x: float | None = None) -> None:
         if self.x_data is None or len(self.x_data) == 0:
             return
 
@@ -190,7 +190,7 @@ class RegionPlotWidget(pg.PlotWidget):
         self._regions.clear()
         self._on_region_changed()
 
-    def get_region_time_ranges(self) -> List[Tuple[float, float]]:
+    def get_region_time_ranges(self) -> list[tuple[float, float]]:
         """返回所有蓝色区域的时间范围列表 [(start_ts, end_ts), ...]。"""
         ranges = []
         for region in self._regions:
@@ -203,11 +203,11 @@ class RegionPlotWidget(pg.PlotWidget):
 
     # ─── 区间计算 ────────────────────────────────────────────────
 
-    def _get_selected_intervals(self) -> List[Tuple[int, int]]:
+    def _get_selected_intervals(self) -> list[tuple[int, int]]:
         if self.x_data is None or len(self.x_data) == 0:
             return []
 
-        intervals: List[Tuple[int, int]] = []
+        intervals: list[tuple[int, int]] = []
         for region in self._regions:
             try:
                 xmin, xmax = region.getRegion()
@@ -223,7 +223,7 @@ class RegionPlotWidget(pg.PlotWidget):
             return []
 
         intervals.sort()
-        merged: List[Tuple[int, int]] = []
+        merged: list[tuple[int, int]] = []
         for start, end in intervals:
             if merged and start <= merged[-1][1]:
                 merged[-1] = (merged[-1][0], max(merged[-1][1], end))
@@ -476,15 +476,15 @@ class RemoveRegion(QtWidgets.QWidget):
         self.ch_name = channel_name
 
         # 待 _on_data_ready 填充
-        self.x_data: Optional[np.ndarray] = None
-        self.y_data: Optional[np.ndarray] = None
+        self.x_data: np.ndarray | None = None
+        self.y_data: np.ndarray | None = None
         self.all_channels: list[str] = []
         self.origin_all_channels: dict[str, np.ndarray] = {}
-        self._kp_times: Optional[np.ndarray] = None
+        self._kp_times: np.ndarray | None = None
 
-        self.plot_widget: Optional[RegionPlotWidget] = None
+        self.plot_widget: RegionPlotWidget | None = None
         self.plot_item = None
-        self._kp_viewbox: Optional[pg.ViewBox] = None
+        self._kp_viewbox: pg.ViewBox | None = None
         self._kp_bars: list = []
         self._kp_auto_restore = False
         self._kp_density_timer = QtCore.QTimer(self)

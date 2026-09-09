@@ -7,18 +7,16 @@ from __future__ import annotations
 调用 update_plot 设置。
 """
 
-import hashlib
 import numpy as np
 import pandas as pd
-import colorsys
 from PySide6.QtGui import QFont, QPen
 import pyqtgraph as pg
 from pyqtgraph import PlotWidget, DateAxisItem
 
 from PySide6.QtCore import Qt, Signal
-from typing import Optional
 
 from utils.series import dti_to_numpy
+from utils.plot_colors import DistinctColorAllocator
 from utils.theme import (
     configure_pyqtgraph_theme,
     pg_background,
@@ -29,6 +27,7 @@ from utils.theme import (
 
 LEFT_AXIS_WIDTH = 62
 BOTTOM_AXIS_HEIGHT = 34
+STACK_LABEL_BASELINE_OFFSET = 0.15
 
 
 class PassiveLegendSample(pg.ItemSample):
@@ -45,7 +44,7 @@ class BriefPlot(PlotWidget):
     """时间序列绘图控件，封装 pyqtgraph PlotWidget。
 
     支持折线图 (plot) 和柱状图 (bar) 两种类型，
-    自动根据 label 哈希生成稳定的曲线颜色。
+    使用共享颜色分配器为曲线分配并缓存区分明显的颜色。
     """
 
     vertical_gain_changed = Signal(float)
@@ -69,13 +68,14 @@ class BriefPlot(PlotWidget):
         self.setBackground(pg_background(self))
         self.label = label
         self.curves: dict[str, pg.GraphicsObject] = {}
+        self._color_allocator = DistinctColorAllocator()
         self._stack_labels: dict[str, pg.TextItem] = {}
-        self._kp_bar: Optional[pg.BarGraphItem] = None
-        self._kp_view: Optional[pg.ViewBox] = None
-        self._kp_axis: Optional[pg.AxisItem] = None
+        self._kp_bar: pg.BarGraphItem | None = None
+        self._kp_view: pg.ViewBox | None = None
+        self._kp_axis: pg.AxisItem | None = None
         self.show_curves: dict[str, bool] = {}
-        self.x_start: Optional[pd.Timestamp] = None
-        self.x_end: Optional[pd.Timestamp] = None
+        self.x_start: pd.Timestamp | None = None
+        self.x_end: pd.Timestamp | None = None
 
         self.plot_item = self.getPlotItem()
 
@@ -140,7 +140,9 @@ class BriefPlot(PlotWidget):
                 self._stack_labels[ch] = label
                 self.plot_item.addItem(label)
             marker_x = self.x_start.timestamp() if self.x_start else 0
-            self._stack_labels[ch].setPos(marker_x, offset + scale_height * 0.85)
+            self._stack_labels[ch].setPos(
+                marker_x, offset + scale_height * STACK_LABEL_BASELINE_OFFSET,
+            )
         if visible_channels:
             low = min(offsets[ch] for ch in visible_channels) - scale_height
             high = max(offsets[ch] for ch in visible_channels) + scale_height
@@ -261,18 +263,21 @@ class BriefPlot(PlotWidget):
 
         return None
 
+    def _random_distinct_curve_color(self, label: str) -> tuple[int, int, int]:
+        return self._color_allocator.color_for(label)
+
     def add_curve(self,
-        x_data: Optional[pd.Series | pd.DatetimeIndex],
-        y_data: Optional[pd.Series],
+        x_data: pd.Series | pd.DatetimeIndex | None,
+        y_data: pd.Series | None,
         label: str,
         graph_type: str = 'plot',
-        color: Optional[str] = None,
-        pen: Optional[QPen] = None,
+        color: str | None = None,
+        pen: QPen | None = None,
     ) -> None:
         """向绘图区域添加一条曲线或柱状图。
 
-        折线图模式：若未指定 color 和 pen，则根据 label 的 MD5 哈希值
-        计算 HSL 色相，保证同一 label 总是得到相同颜色。
+        折线图模式：若未指定 color 和 pen，则由共享颜色分配器
+        选择与当前曲线颜色尽量分离的 HSL 色相，并按 label 缓存，保证同一 label 总是得到相同颜色。
 
         Args:
             x_data: X 轴时间序列数据
@@ -341,12 +346,7 @@ class BriefPlot(PlotWidget):
         else:
             if pen is None:
                 if color is None:
-                    # 用 label 哈希生成稳定且互异的色相
-                    # MD5 摘要 → 取 360 整数模 → 映射到 HSL 色相 (0~1)
-                    # S=0.40, L=0.85 保证颜色偏亮、饱和度适中，易于区分
-                    h = (int(hashlib.md5(label.encode()).hexdigest(), 16) % 360) / 360.0
-                    r, g, b = colorsys.hls_to_rgb(h, 0.40, 0.85)
-                    color = (int(r * 255), int(g * 255), int(b * 255))
+                    color = self._random_distinct_curve_color(label)
                     pen = pg.mkPen(color=color, width=1)
                 else:
                     pen = pg.mkPen(color=color, width=1)

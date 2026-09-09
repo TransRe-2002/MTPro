@@ -1,7 +1,7 @@
 """Interactive preview for secular-variation baseline subtraction."""
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 import numpy as np
 import pyqtgraph as pg

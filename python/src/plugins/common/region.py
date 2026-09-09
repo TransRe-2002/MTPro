@@ -10,7 +10,6 @@ from __future__ import annotations
 - selection_status_label: QLabel
 """
 
-from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
@@ -22,7 +21,7 @@ class RegionManagementMixin:
     # 子类必须提供的属性声明（类型标注仅作文档用）
     signal_plot_item: pg.PlotItem
     x_data: np.ndarray
-    region_item: Optional[pg.LinearRegionItem]
+    region_item: pg.LinearRegionItem | None
     selected_indices: list[int]
     selection_status_label: object  # QLabel
 
@@ -43,7 +42,7 @@ class RegionManagementMixin:
             view_max = data_max
         return float(view_min), float(view_max)
 
-    def _region_bounds_around(self, center_x: Optional[float] = None) -> tuple[float, float]:
+    def _region_bounds_around(self, center_x: float | None = None) -> tuple[float, float]:
         view_min, view_max = self._current_view_region_bounds()
         visible_width = max(view_max - view_min, 1.0)
         region_width = max(1.0, visible_width * 0.2)

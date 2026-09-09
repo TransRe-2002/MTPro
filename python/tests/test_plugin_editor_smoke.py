@@ -24,6 +24,10 @@ BUILTIN_PLUGIN_IDS = (
     "remove_diurnal_sinusoid",
     "remove_secular_variation",
     "vmd_denoise",
+    "median_filter",
+    "morphological_filter",
+    "detrend",
+    "iir_filter",
 )
 
 

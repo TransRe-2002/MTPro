@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+from collections.abc import Callable, Mapping
 
 import pandas as pd
 
@@ -30,9 +31,9 @@ class ParamSpec:
     label: str
     type: type
     default: Any
-    minimum: Optional[float] = None
-    maximum: Optional[float] = None
-    options: Optional[tuple[str, ...]] = None
+    minimum: float | None = None
+    maximum: float | None = None
+    options: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -119,7 +120,7 @@ class EditorFactory(Protocol):
         host: EditorHost,
         block: ChannelBlock,
         params: Mapping[str, Any],
-    ) -> Optional["QWidget"]: ...
+    ) -> "QWidget" | None: ...
 
 
 class PluginProcessor(Processor, EditorFactory, Protocol):

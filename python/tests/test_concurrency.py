@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import Future
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -101,4 +102,19 @@ def test_run_convenience_wires_error_slot():
 
     run("compute", boom, on_error=collector.on_failed)
     collector.wait()
+    assert isinstance(collector.exc, ValueError)
+
+
+def test_run_queues_callback_for_an_already_completed_future(monkeypatch):
+    """即使任务在 attach 前已完成，回调也必须留到 Qt 事件循环执行。"""
+    _app()
+    collector = _Collector()
+    future = Future()
+    future.set_exception(ValueError("already done"))
+    monkeypatch.setattr("utils.qt_bridge._pool_submit", lambda *a, **k: future)
+
+    run("compute", lambda: None, on_error=collector.on_failed)
+
+    assert collector.exc is None
+    collector.wait(timeout_ms=1000)
     assert isinstance(collector.exc, ValueError)

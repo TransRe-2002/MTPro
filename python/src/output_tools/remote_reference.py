@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import importlib.util
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
@@ -16,6 +15,7 @@ from scipy.signal import detrend
 from core.station_metadata import StationMetadata
 from core.em_data import EMData
 from emtf.io.zfile import emtf_phase_deg
+from emtf.time_alignment import matching_remote_slice
 
 from ui.theme import configure_matplotlib_canvas, configure_matplotlib_fonts, configure_pyqtgraph_theme
 
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QDateTime, QTimer
 
+from ui.impedance_plot import draw_impedance_response, draw_tipper_response
 from output_tools.shared.emtf import (
     BACKEND_EMTF_PYWRAP,
     BACKEND_EMTF_RS,
@@ -52,10 +53,44 @@ from output_tools.shared.emtf import (
 from plugins.common.plotting import StepPlotWidget
 from ui.dialogs.figure_export import default_export_name, export_matplotlib_figure_with_dialog
 from utils.decimate import LODPyramid
+from utils.qt_bridge import run as run_in_pool
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from utils.geo import station_distance
 
 logger = logging.getLogger(__name__)
+
+
+def _estimate_remote_task(backend: str, arrays: tuple, channel_names: tuple, kwargs: dict, generation: int):
+    try:
+        if backend == BACKEND_EMTF_RS:
+            import emtf_rs as api
+        else:
+            import emtf as api
+        ex, ey, local_hx, local_hy, remote_hx, remote_hy, hz = arrays
+        processed = tuple(
+            preprocess_channel(values, name)
+            for values, name in zip(
+                (ex, ey, local_hx, local_hy, remote_hx, remote_hy),
+                channel_names[:6],
+            )
+        )
+        call_kwargs = dict(kwargs)
+        call_kwargs["hz"] = preprocess_channel(hz, str(channel_names[6])) if hz is not None else None
+        result = api.estimate_remote_reference_spectrum(*processed, **call_kwargs)
+        return generation, result, None
+    except BaseException as error:
+        return generation, None, error
+
+
+def _build_lod_task(side: str, entries: list[tuple], pixel_width: int, generation: int):
+    built = []
+    for tag, channel_name, electric, timestamps, values in entries:
+        values = np.asarray(values, dtype=np.float64)
+        mean = np.nanmean(values)
+        centered = values - (mean if np.isfinite(mean) else 0.0)
+        pyramid = LODPyramid(timestamps, centered)
+        built.append((tag, channel_name, electric, pyramid, pyramid.get_full_overview(pixel_width)))
+    return side, generation, built
 
 # ─── 供本文件内部代码使用的短别名（保持向后兼容）──────────────────
 _detect_channels = detect_channels
@@ -165,6 +200,8 @@ class RemoteReferenceWidget(QWidget):
     控制参数通过独立浮窗调节。
     """
     result_ready = Signal(object)
+    snapshot_save_requested = Signal(object)
+    preview_requested = Signal()
 
     data_requested = Signal(int, str)
     result_submitted = Signal(int, str, object)
@@ -172,7 +209,7 @@ class RemoteReferenceWidget(QWidget):
     def __init__(
         self,
         data_id: int = 0,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self.setObjectName("RemoteReferenceWidget")
@@ -190,6 +227,13 @@ class RemoteReferenceWidget(QWidget):
         self._result = None
         self._spectrum = None  # emtf_rs 原始 SpectrumResult
         self._bands = None     # to_bands 聚合后的 BandedResult
+        self._calculation_context: dict = {}
+        self._saved_current = True
+        self._pending_context: dict = {}
+        self._estimation_future = None
+        self._task_generation = 0
+        self._local_plot_generation = 0
+        self._remote_plot_generation = 0
         self._curves_local: dict[str, pg.PlotDataItem] = {}
         self._curves_remote: dict[str, pg.PlotDataItem] = {}
         self._lod_local: dict[str, LODPyramid] = {}   # 本地站每通道 LOD 金字塔
@@ -197,9 +241,9 @@ class RemoteReferenceWidget(QWidget):
         self._updating_range = False
         self._syncing_region = False  # 防止两个 LinearRegionItem 递归同步
         self._syncing_xrange = False  # 防止两个图 X 轴递归同步
-        self._ts_array: Optional[np.ndarray] = None
-        self._ts_remote_array: Optional[np.ndarray] = None
-        self._control_dialog: Optional[RemoteReferenceControlDialog] = None
+        self._ts_array: np.ndarray | None = None
+        self._ts_remote_array: np.ndarray | None = None
+        self._control_dialog: RemoteReferenceControlDialog | None = None
 
         # LOD 视口刷新防抖定时器（60fps）
         self._lod_timer = QTimer(self)
@@ -422,6 +466,10 @@ class RemoteReferenceWidget(QWidget):
             self.tol_spin,
         ]
         self._on_backend_changed()
+        for control in (self.window_combo, self.fft_window_combo):
+            control.currentIndexChanged.connect(self._mark_parameters_changed)
+        for control in (self.step_pct_spin, self.huber_spin, self.max_iter_spin, self.tol_spin):
+            control.valueChanged.connect(self._mark_parameters_changed)
 
         # ── 运行按钮 ──
         self._btn_widget = QWidget()
@@ -429,8 +477,20 @@ class RemoteReferenceWidget(QWidget):
         btn_layout.setContentsMargins(0, 0, 0, 0)
         self.run_button = QPushButton("运行远参考估计")
         self.run_button.clicked.connect(self._run_estimation)
+        self.save_preview_btn = QPushButton("保存到阻抗预览")
+        self.save_preview_btn.setEnabled(False)
+        self.save_preview_btn.clicked.connect(self._save_to_preview)
+        self.view_preview_btn = QPushButton("查看阻抗预览")
+        self.view_preview_btn.setVisible(False)
+        self.view_preview_btn.clicked.connect(self.preview_requested)
+        self.cancel_button = QPushButton("取消计算")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self._cancel_estimation)
         btn_layout.addStretch()
         btn_layout.addWidget(self.run_button)
+        btn_layout.addWidget(self.cancel_button)
+        btn_layout.addWidget(self.save_preview_btn)
+        btn_layout.addWidget(self.view_preview_btn)
 
         self.status_label = QLabel("")
 
@@ -447,11 +507,6 @@ class RemoteReferenceWidget(QWidget):
         self.table.customContextMenuRequested.connect(self._on_table_context_menu)
         self.table.keyPressEvent = self._table_key_press_event
 
-        self.export_edi_btn = QPushButton("输出阻抗")
-        self.export_edi_btn.clicked.connect(self._export_edi)
-        self.export_figure_btn = QPushButton("输出图像")
-        self.export_figure_btn.clicked.connect(self._export_current_figure)
-        self.export_figure_btn.setVisible(False)
         self.tune_btn = QPushButton("参数调整")
         self.tune_btn.clicked.connect(self._show_control_dialog)
 
@@ -480,21 +535,19 @@ class RemoteReferenceWidget(QWidget):
         self.tipper_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tipper_table.customContextMenuRequested.connect(self._on_table_context_menu)
         self.tipper_table.keyPressEvent = self._table_key_press_event
-        self._tipper_tab_index: Optional[int] = None
+        self._tipper_tab_index: int | None = None
 
         self.tipper_fig = Figure(figsize=(6, 4), tight_layout=True)
         self.tipper_canvas = FigureCanvas(self.tipper_fig)
         self.tipper_canvas.setParent(self)
         configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-        self._tipper_plot_tab_index: Optional[int] = None
+        self._tipper_plot_tab_index: int | None = None
 
         self.result_tabs = QTabWidget()
         tab_corner = QWidget()
         tab_corner_layout = QHBoxLayout(tab_corner)
         tab_corner_layout.setContentsMargins(0, 0, 4, 0)
-        tab_corner_layout.addWidget(self.export_figure_btn)
         tab_corner_layout.addWidget(self.tune_btn)
-        tab_corner_layout.addWidget(self.export_edi_btn)
         self.tipper_mode_combo = QComboBox(self)
         self.tipper_mode_combo.addItem("倾子：实部/虚部", "re_im")
         self.tipper_mode_combo.addItem("倾子：幅值/相位", "amp_phase")
@@ -565,6 +618,23 @@ class RemoteReferenceWidget(QWidget):
             self._control_dialog.activateWindow()
 
     def closeEvent(self, event):
+        if self._estimation_future is not None:
+            reply = QMessageBox.question(
+                self, "计算正在运行", "远参考计算仍在后台运行，关闭后将丢弃计算结果。仍要关闭吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._cancel_estimation()
+        if self._bands is not None and not self._saved_current:
+            reply = QMessageBox.question(
+                self, "结果尚未保存", "当前计算结果尚未保存到阻抗预览，仍要关闭吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         if self._control_dialog is not None:
             self._control_dialog.close()
         super().closeEvent(event)
@@ -624,7 +694,13 @@ class RemoteReferenceWidget(QWidget):
             if self._data_id != 0:
                 idx = self.local_station_combo.findData(self._data_id)
                 if idx >= 0:
+                    self.local_station_combo.blockSignals(True)
                     self.local_station_combo.setCurrentIndex(idx)
+                    self.local_station_combo.blockSignals(False)
+            self._apply_local_station_data()
+            remote_id = self.remote_station_combo.currentData()
+            if remote_id is not None:
+                self.data_requested.emit(remote_id, "")
         elif data_id == local_id:
             self._local_pkg = pkg
             self._apply_local_station_data()
@@ -635,6 +711,7 @@ class RemoteReferenceWidget(QWidget):
     def _populate_stations(self):
         prev_local = self.local_station_combo.currentData()
         prev_remote = self.remote_station_combo.currentData()
+        target_local = prev_local if prev_local is not None else self._data_id
         stations = self._local_pkg.get('stations', [])
 
         valid_local: list[tuple[str, int]] = []
@@ -651,25 +728,26 @@ class RemoteReferenceWidget(QWidget):
         for name, key in valid_local:
             self.local_station_combo.addItem(name, key)
         self.local_station_combo.blockSignals(False)
-        if prev_local is not None and self.local_station_combo.findData(prev_local) >= 0:
+        if target_local is not None and self.local_station_combo.findData(target_local) >= 0:
             self.local_station_combo.blockSignals(True)
-            self.local_station_combo.setCurrentIndex(self.local_station_combo.findData(prev_local))
+            self.local_station_combo.setCurrentIndex(self.local_station_combo.findData(target_local))
             self.local_station_combo.blockSignals(False)
         elif self.local_station_combo.count() > 0:
             self.local_station_combo.blockSignals(True)
             self.local_station_combo.setCurrentIndex(0)
             self.local_station_combo.blockSignals(False)
-            self._on_local_station_changed(0)
 
+        local_id = self.local_station_combo.currentData()
         self.remote_station_combo.blockSignals(True)
         self.remote_station_combo.clear()
         for name, key in valid_remote:
-            self.remote_station_combo.addItem(name, key)
+            if key != local_id:
+                self.remote_station_combo.addItem(name, key)
         self.remote_station_combo.blockSignals(False)
         if prev_remote is not None and self.remote_station_combo.findData(prev_remote) >= 0:
+            self.remote_station_combo.blockSignals(True)
             self.remote_station_combo.setCurrentIndex(self.remote_station_combo.findData(prev_remote))
-        elif self.remote_station_combo.count() > 0:
-            self._on_remote_station_changed(0)
+            self.remote_station_combo.blockSignals(False)
 
     def _current_local_data(self):
         return _PkgWrapper(self._local_pkg) if self._local_pkg else None
@@ -759,7 +837,7 @@ class RemoteReferenceWidget(QWidget):
                     combo.setCurrentIndex(idx_)
             combo.blockSignals(False)
 
-    def _selected_remote_channels(self) -> dict[str, Optional[str]]:
+    def _selected_remote_channels(self) -> dict[str, str | None]:
         return {
             "Hx": self.ch_combo_remote_hx.currentData(),
             "Hy": self.ch_combo_remote_hy.currentData(),
@@ -768,6 +846,7 @@ class RemoteReferenceWidget(QWidget):
     # ─── 台站切换 ──────────────────────────────────────────────────
 
     def _on_local_station_changed(self, _idx: int):
+        self._mark_parameters_changed()
         new_id = self.local_station_combo.currentData()
         if new_id is not None:
             self.data_requested.emit(new_id, "")
@@ -802,6 +881,7 @@ class RemoteReferenceWidget(QWidget):
         self._refresh_plots()
 
     def _on_remote_station_changed(self, _idx: int):
+        self._mark_parameters_changed()
         new_id = self.remote_station_combo.currentData()
         if new_id is not None:
             self.data_requested.emit(new_id, "")
@@ -814,6 +894,7 @@ class RemoteReferenceWidget(QWidget):
         self._refresh_plots()
 
     def _on_channel_changed(self):
+        self._mark_parameters_changed()
         self._sync_tipper_tab_visibility()
         self._refresh_plots()
 
@@ -855,7 +936,7 @@ class RemoteReferenceWidget(QWidget):
         return None
 
     def _sync_result_actions(self, _index: int = -1) -> None:
-        self.export_figure_btn.setVisible(self._current_matplotlib_export_target() is not None)
+        pass
 
     def _export_current_figure(self) -> None:
         target = self._current_matplotlib_export_target()
@@ -876,7 +957,7 @@ class RemoteReferenceWidget(QWidget):
 
     # ─── 波形图 ────────────────────────────────────────────────────
 
-    def _selected_local_channels(self) -> dict[str, Optional[str]]:
+    def _selected_local_channels(self) -> dict[str, str | None]:
         return {
             "Ex": self.ch_combo_ex.currentData(),
             "Ey": self.ch_combo_ey.currentData(),
@@ -904,41 +985,22 @@ class RemoteReferenceWidget(QWidget):
         if data is None:
             return
 
-        t = np.array([ts.timestamp() for ts in data.datetime_index])
+        datetime_index = pd.DatetimeIndex(data.datetime_index)
+        t = datetime_index.asi8.astype(np.float64) / 1_000_000_000.0
         self._ts_array = t
         pw = max(self.local_plot.width(), 800)
 
+        entries = []
         for tag, ch_name in self._selected_local_channels().items():
             if ch_name is None:
                 continue
             y = data.get_channel_series(ch_name).to_numpy()
-            y = y - np.nanmean(y)
-
-            # 构建 LOD 金字塔（Rust build_lod_pyramid_rs 加速）
-            pyramid = LODPyramid(t, y)
-            self._lod_local[tag] = pyramid
-            ox, oy = pyramid.get_full_overview(pw)
-
-            colour = CH_COLOURS.get(tag, (100, 100, 100))
-            pen = pg.mkPen(color=colour, width=1)
-            label = f"{tag} ({ch_name})"
-
-            if _is_e_channel(ch_name):
-                curve = pg.PlotDataItem(ox, oy, pen=pen, name=label,
-                                        autoDownsample=False, clipToView=False,
-                                        connect='finite')
-                curve.setParentItem(self._local_plot_item.vb)
-                curve.forgetViewBox()
-                self._local_plot_item.vb.addItem(curve)
-            else:
-                curve = pg.PlotDataItem(ox, oy, pen=pen, name=label,
-                                        autoDownsample=False, clipToView=False,
-                                        connect='finite')
-                curve.setParentItem(self._local_b_viewbox)
-                curve.forgetViewBox()
-                self._local_b_viewbox.addItem(curve)
-            self._local_legend.addItem(curve, label)
-            self._curves_local[tag] = curve
+            entries.append((tag, ch_name, _is_e_channel(ch_name), t, y))
+        self._local_plot_generation += 1
+        run_in_pool(
+            "compute", _build_lod_task, "local", entries, pw, self._local_plot_generation,
+            on_done=self._on_lod_build_done, on_error=self._on_lod_build_failed, owner=self,
+        )
 
         if len(t) > 1:
             self.region_item.blockSignals(True)
@@ -962,32 +1024,49 @@ class RemoteReferenceWidget(QWidget):
         if data is None:
             return
 
-        t = np.array([ts.timestamp() for ts in data.datetime_index])
+        datetime_index = pd.DatetimeIndex(data.datetime_index)
+        t = datetime_index.asi8.astype(np.float64) / 1_000_000_000.0
         self._ts_remote_array = t
         pw = max(self.remote_plot.width(), 800)
 
+        entries = []
         for tag, ch_name in self._selected_remote_channels().items():
             if ch_name is None:
                 continue
             y = data.get_channel_series(ch_name).to_numpy()
-            y = y - np.nanmean(y)
+            entries.append((tag, ch_name, False, t, y))
+        self._remote_plot_generation += 1
+        run_in_pool(
+            "compute", _build_lod_task, "remote", entries, pw, self._remote_plot_generation,
+            on_done=self._on_lod_build_done, on_error=self._on_lod_build_failed, owner=self,
+        )
 
-            # 构建 LOD 金字塔
-            pyramid = LODPyramid(t, y)
-            self._lod_remote[tag] = pyramid
-            ox, oy = pyramid.get_full_overview(pw)
-
+    def _on_lod_build_done(self, completed: tuple) -> None:
+        side, generation, built = completed
+        if side == "local" and generation != self._local_plot_generation:
+            return
+        if side == "remote" and generation != self._remote_plot_generation:
+            return
+        for tag, ch_name, electric, pyramid, (ox, oy) in built:
             colour = CH_COLOURS.get(tag, (100, 100, 100))
-            pen = pg.mkPen(color=colour, width=1)
-            label = f"{tag} ({ch_name})"
-            curve = pg.PlotDataItem(ox, oy, pen=pen, name=label,
-                                    autoDownsample=False, clipToView=False,
-                                    connect='finite')
-            curve.setParentItem(self._remote_plot_item.vb)
-            curve.forgetViewBox()
-            self._remote_plot_item.vb.addItem(curve)
-            self._remote_legend.addItem(curve, label)
-            self._curves_remote[tag] = curve
+            curve = pg.PlotDataItem(
+                ox, oy, pen=pg.mkPen(color=colour, width=1), name=f"{tag} ({ch_name})",
+                autoDownsample=False, clipToView=False, connect="finite",
+            )
+            if side == "local":
+                self._lod_local[tag] = pyramid
+                viewbox = self._local_plot_item.vb if electric else self._local_b_viewbox
+                curve.setParentItem(viewbox); curve.forgetViewBox(); viewbox.addItem(curve)
+                self._local_legend.addItem(curve, f"{tag} ({ch_name})")
+                self._curves_local[tag] = curve
+            else:
+                self._lod_remote[tag] = pyramid
+                curve.setParentItem(self._remote_plot_item.vb); curve.forgetViewBox(); self._remote_plot_item.vb.addItem(curve)
+                self._remote_legend.addItem(curve, f"{tag} ({ch_name})")
+                self._curves_remote[tag] = curve
+
+    def _on_lod_build_failed(self, error: BaseException) -> None:
+        logger.error("Remote-reference waveform LOD build failed: %r", error, exc_info=error)
 
     # ─── LOD 视口刷新 ──────────────────────────────────────────────
 
@@ -1094,6 +1173,7 @@ class RemoteReferenceWidget(QWidget):
         self._set_dt_from_indices(val, self.end_spin.value())
         self._update_range_info()
         self._update_warning()
+        self._mark_parameters_changed()
 
     def _on_spin_end_changed(self, val: int):
         if self._updating_range:
@@ -1102,6 +1182,7 @@ class RemoteReferenceWidget(QWidget):
         self._set_dt_from_indices(self.start_spin.value(), val)
         self._update_range_info()
         self._update_warning()
+        self._mark_parameters_changed()
 
     def _on_dt_start_changed(self, qdt: QDateTime):
         if self._updating_range:
@@ -1253,6 +1334,15 @@ class RemoteReferenceWidget(QWidget):
     # ─── 远参考估计 ──────────────────────────────────────────────
 
     def _run_estimation(self):
+        if self._estimation_future is not None:
+            return
+        if self._bands is not None and not self._saved_current:
+            reply = QMessageBox.question(
+                self, "替换未保存结果", "当前结果尚未保存到阻抗预览，重新计算会替换它。继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         local = self._current_local_data()
         remote = self._current_remote_data()
         if local is None:
@@ -1288,13 +1378,21 @@ class RemoteReferenceWidget(QWidget):
         if ch_hx_remote is None or ch_hy_remote is None:
             QMessageBox.warning(self, "错误", "请选择远参考站 Hx 和 Hy 通道。")
             return
+        local_channels = [ch_ex, ch_ey, ch_hx_local, ch_hy_local]
+        if len(set(local_channels)) != len(local_channels):
+            QMessageBox.warning(self, "错误", "本地站 Ex、Ey、Hx、Hy 必须映射到四个不同通道。")
+            return
+        if ch_hz is not None and ch_hz in local_channels:
+            QMessageBox.warning(self, "错误", "Hz 必须与本地站的 Ex、Ey、Hx、Hy 通道不同。")
+            return
+        if ch_hx_remote == ch_hy_remote:
+            QMessageBox.warning(self, "错误", "远参考 Hx 和 Hy 必须映射到不同通道。")
+            return
+        if self.local_station_combo.currentData() == self.remote_station_combo.currentData():
+            QMessageBox.warning(self, "错误", "远参考站必须与本地站不同。")
+            return
 
         try:
-            if backend == BACKEND_EMTF_RS:
-                import emtf_rs
-            else:
-                import emtf as emtf_rs
-
             start = self.start_spin.value()
             end = self.end_spin.value()
             if end <= start:
@@ -1310,44 +1408,16 @@ class RemoteReferenceWidget(QWidget):
             if ch_hz is not None:
                 hz_arr = local.get_channel_series(ch_hz).to_numpy()[start:end]
 
-            # 远参考站数据：按时间对齐
-            local_start_ts = local.datetime_index[start]
-            local_end_ts = local.datetime_index[end - 1]
-            remote_idx = remote.datetime_index
-            remote_start = int(np.searchsorted(remote_idx, local_start_ts))
-            remote_end = int(np.searchsorted(remote_idx, local_end_ts))
-            remote_end = min(remote_end, remote.npts)
+            # 远参考回归必须逐样点同步，不能仅按长度截断后配对。
+            remote_start, remote_end = matching_remote_slice(
+                local.datetime_index,
+                remote.datetime_index,
+                start,
+                end,
+            )
 
             remote_hx_arr = remote.get_channel_series(ch_hx_remote).to_numpy()[remote_start:remote_end]
             remote_hy_arr = remote.get_channel_series(ch_hy_remote).to_numpy()[remote_start:remote_end]
-
-            if len(remote_hx_arr) == 0 or len(remote_hy_arr) == 0:
-                QMessageBox.warning(
-                    self, "时间范围不匹配",
-                    "远参考站在选定时间范围内无数据，请调整时间范围。",
-                )
-                return
-
-            min_len = min(len(ex_arr), len(remote_hx_arr))
-            if min_len < len(ex_arr):
-                ex_arr = ex_arr[:min_len]
-                ey_arr = ey_arr[:min_len]
-                local_hx_arr = local_hx_arr[:min_len]
-                local_hy_arr = local_hy_arr[:min_len]
-                if hz_arr is not None:
-                    hz_arr = hz_arr[:min_len]
-            if min_len < len(remote_hx_arr):
-                remote_hx_arr = remote_hx_arr[:min_len]
-                remote_hy_arr = remote_hy_arr[:min_len]
-
-            ex_arr = preprocess_channel(ex_arr, ch_ex)
-            ey_arr = preprocess_channel(ey_arr, ch_ey)
-            local_hx_arr = preprocess_channel(local_hx_arr, ch_hx_local)
-            local_hy_arr = preprocess_channel(local_hy_arr, ch_hy_local)
-            remote_hx_arr = preprocess_channel(remote_hx_arr, ch_hx_remote)
-            remote_hy_arr = preprocess_channel(remote_hy_arr, ch_hy_remote)
-            if hz_arr is not None:
-                hz_arr = preprocess_channel(hz_arr, str(ch_hz))
 
             sample_rate = local_sr
             window_size = self.window_combo.currentData()
@@ -1362,7 +1432,7 @@ class RemoteReferenceWidget(QWidget):
 
             self.status_label.setText("正在计算...")
             self.run_button.setEnabled(False)
-            QApplication.processEvents()
+            self.cancel_button.setEnabled(True)
 
             kwargs = build_spectrum_kwargs(
                 sample_rate=sample_rate,
@@ -1377,35 +1447,104 @@ class RemoteReferenceWidget(QWidget):
                 n_bands=self.bands_spin.value(),
                 station_name=local.name,
             )
-            result = emtf_rs.estimate_remote_reference_spectrum(
-                ex_arr, ey_arr,
-                local_hx_arr, local_hy_arr,
-                remote_hx_arr, remote_hy_arr,
-                **kwargs,
-            )
-
-            self._spectrum = result
-            self._result = result
-            self._build_bands()
-            self._display_result(result)
-            self.result_ready.emit(result)
-            self.status_label.setText(
-                f"完成 — {len(result.frequencies_hz)} 个频率, {result.segment_count} 个时间窗"
+            start_time = local.datetime_index[start] if start < len(local.datetime_index) else ""
+            end_time = local.datetime_index[end - 1] if end > 0 and end <= len(local.datetime_index) else ""
+            station_meta = local.station_metadata
+            context = {
+                "method": "remote reference",
+                "station_name": local.name,
+                "remote_station_name": remote.name,
+                "latitude": getattr(station_meta, "latitude", 0.0) or 0.0,
+                "longitude": getattr(station_meta, "longitude", 0.0) or 0.0,
+                "elevation": getattr(station_meta, "elevation", 0.0) or 0.0,
+                "range_start": start_time,
+                "range_end": end_time,
+                "channels": {
+                    "Ex": ch_ex, "Ey": ch_ey, "local Hx": ch_hx_local,
+                    "local Hy": ch_hy_local, "Hz": ch_hz,
+                    "remote Hx": ch_hx_remote, "remote Hy": ch_hy_remote,
+                },
+                "parameters": {
+                    "start": start, "end": end, "backend": backend, "window_size": window_size,
+                    "fft_window_size": self.fft_window_combo.currentData(),
+                    "local_station_id": self.local_station_combo.currentData(),
+                    "remote_station_id": self.remote_station_combo.currentData(),
+                    "step_pct": self.step_pct_spin.value(), "bands": self.bands_spin.value(),
+                    "huber_threshold": self.huber_spin.value(),
+                    "max_iterations": self.max_iter_spin.value(), "tolerance": self.tol_spin.value(),
+                },
+            }
+            self._pending_context = context
+            self._task_generation += 1
+            generation = self._task_generation
+            arrays = (ex_arr, ey_arr, local_hx_arr, local_hy_arr, remote_hx_arr, remote_hy_arr, hz_arr)
+            channel_names = (ch_ex, ch_ey, ch_hx_local, ch_hy_local, ch_hx_remote, ch_hy_remote, ch_hz)
+            self._estimation_future = run_in_pool(
+                "compute", _estimate_remote_task, backend, arrays, channel_names, kwargs, generation,
+                on_done=self._on_estimation_done,
+                on_error=self._on_estimation_error,
+                owner=self,
             )
 
         except Exception as e:
             logger.exception("Remote reference estimation failed")
             QMessageBox.critical(self, "估计失败", str(e))
             self.status_label.setText("失败")
-        finally:
             self.run_button.setEnabled(True)
+            self.cancel_button.setEnabled(False)
 
-    def _build_bands(self):
+    def _on_estimation_done(self, completed: tuple) -> None:
+        generation, result, error = completed
+        if generation != self._task_generation:
+            return
+        if error is not None:
+            self._on_estimation_error(error)
+            return
+        self._estimation_future = None
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self._spectrum = result
+        self._result = result
+        self._calculation_context = self._pending_context
+        self._build_bands(
+            backend=self._calculation_context["parameters"]["backend"],
+            window_size=self._calculation_context["parameters"]["window_size"],
+            n_bands=self._calculation_context["parameters"]["bands"],
+        )
+        self._display_result(result)
+        self._saved_current = False
+        self.save_preview_btn.setEnabled(self._bands is not None)
+        self.save_preview_btn.setText("保存到阻抗预览")
+        self.view_preview_btn.setVisible(False)
+        self.status_label.setText(f"完成 — {len(result.frequencies_hz)} 个频率, {result.segment_count} 个时间窗")
+
+    def _on_estimation_error(self, error: BaseException) -> None:
+        if self._estimation_future is None:
+            return
+        self._estimation_future = None
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        logger.error("Remote reference estimation failed", exc_info=error)
+        QMessageBox.critical(self, "估计失败", str(error))
+        self.status_label.setText("失败")
+
+    def _cancel_estimation(self) -> None:
+        if self._estimation_future is None:
+            return
+        self._task_generation += 1
+        self._estimation_future.cancel()
+        self._estimation_future = None
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self.status_label.setText("已取消；后台原生调用若已开始会在完成后丢弃结果")
+
+    def _build_bands(self, backend=None, window_size=None, n_bands=None):
         """从 spectrum 构建 BandedResult，period 范围 2*dt ~ w*dt 对数均分。"""
         if self._spectrum is None:
             self._bands = None
             return
-        if self._current_backend() == BACKEND_EMTF_PYWRAP:
+        backend = backend or self._current_backend()
+        if backend == BACKEND_EMTF_PYWRAP:
             from emtf.io import from_result
 
             self._bands = from_result(self._spectrum, station_name=self._spectrum.station_name, mode="rr")
@@ -1415,8 +1554,8 @@ class RemoteReferenceWidget(QWidget):
             self._bands = None
             return
         dt = data.dt.total_seconds()
-        w = self.window_combo.currentData()
-        n_bands = self.bands_spin.value()
+        w = window_size or self.window_combo.currentData()
+        n_bands = n_bands or self.bands_spin.value()
         periods = np.logspace(np.log10(2 * dt), np.log10(w * dt), n_bands)
         band_configs = build_band_configs(periods)
         self._bands = self._spectrum.to_bands(band_configs)
@@ -1428,9 +1567,38 @@ class RemoteReferenceWidget(QWidget):
         """频带数量变更时重建 bands 并刷新对比图。"""
         if self._spectrum is None:
             return
-        self._build_bands()
-        self._display_tipper_result()
-        self._draw_comparison_plot()
+        self._mark_parameters_changed()
+
+    def _mark_parameters_changed(self, *_args) -> None:
+        if not self._calculation_context or self._spectrum is None:
+            return
+        if self._current_calculation_signature() != self._saved_calculation_signature():
+            self.save_preview_btn.setEnabled(False)
+            self.status_label.setText("参数、台站或通道已更改，请重新运行后再保存")
+
+    def _current_calculation_signature(self) -> tuple:
+        return (
+            self.start_spin.value(), self.end_spin.value(), self._current_backend(),
+            self.window_combo.currentData(), self.fft_window_combo.currentData(),
+            self.step_pct_spin.value(), self.huber_spin.value(), self.max_iter_spin.value(),
+            self.tol_spin.value(), self.bands_spin.value(), self.local_station_combo.currentData(),
+            self.remote_station_combo.currentData(), self.ch_combo_ex.currentData(),
+            self.ch_combo_ey.currentData(), self.ch_combo_hx.currentData(), self.ch_combo_hy.currentData(),
+            self.ch_combo_hz.currentData(), self.ch_combo_remote_hx.currentData(),
+            self.ch_combo_remote_hy.currentData(),
+        )
+
+    def _saved_calculation_signature(self) -> tuple:
+        params = self._calculation_context.get("parameters", {})
+        channels = self._calculation_context.get("channels", {})
+        return (
+            params.get("start"), params.get("end"), params.get("backend"), params.get("window_size"),
+            params.get("fft_window_size"), params.get("step_pct"), params.get("huber_threshold"),
+            params.get("max_iterations"), params.get("tolerance"), params.get("bands"),
+            params.get("local_station_id"), params.get("remote_station_id"), channels.get("Ex"),
+            channels.get("Ey"), channels.get("local Hx"), channels.get("local Hy"), channels.get("Hz"),
+            channels.get("remote Hx"), channels.get("remote Hy"),
+        )
 
     def _display_tipper_result(self):
         """Fill the tipper table from the banded result used by EDI/Z-file export."""
@@ -1472,79 +1640,9 @@ class RemoteReferenceWidget(QWidget):
         self._draw_tipper_plot()
 
     def _draw_tipper_plot(self):
-        """Draw Tzx/Tzy real and imaginary components with error bars."""
-        result = self._bands
-        if result is None or not self._hz_channel_selected():
-            self.tipper_fig.clear()
-            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-            self.tipper_canvas.draw()
-            return
-
-        tzx = getattr(result, "tzx", None)
-        tzy = getattr(result, "tzy", None)
-        tzx_se = getattr(result, "tzx_se", None)
-        tzy_se = getattr(result, "tzy_se", None)
-        if tzx is None or tzy is None or tzx_se is None or tzy_se is None:
-            self.tipper_fig.clear()
-            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-            self.tipper_canvas.draw()
-            return
-
-        p = np.asarray(result.periods, dtype=float)
-        tzx = np.asarray(tzx, dtype=np.complex128)
-        tzy = np.asarray(tzy, dtype=np.complex128)
-        tzx_se = np.asarray(tzx_se, dtype=float)
-        tzy_se = np.asarray(tzy_se, dtype=float)
-        n = min(len(p), len(tzx), len(tzy), len(tzx_se), len(tzy_se))
-        finite = (
-            np.isfinite(p[:n]) & (p[:n] > 0)
-            & np.isfinite(tzx[:n].real) & np.isfinite(tzx[:n].imag)
-            & np.isfinite(tzy[:n].real) & np.isfinite(tzy[:n].imag)
-        )
-        if not finite.any():
-            self.tipper_fig.clear()
-            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-            self.tipper_canvas.draw()
-            return
-
-        p = p[:n][finite]
-        tzx = tzx[:n][finite]
-        tzy = tzy[:n][finite]
-        tzx_se = tzx_se[:n][finite]
-        tzy_se = tzy_se[:n][finite]
-
-        self.tipper_fig.clear()
-        ax1, ax2 = self.tipper_fig.subplots(2, 1)
-        amp_phase = getattr(self, "tipper_mode_combo", None)
-        amp_phase = amp_phase is not None and amp_phase.currentData() == "amp_phase"
-        if amp_phase:
-            ax1.errorbar(p, np.abs(tzx), yerr=tzx_se, fmt='o', color='purple', capsize=3, markersize=5, label='|Tzx|')
-            ax1.errorbar(p, np.abs(tzy), yerr=tzy_se, fmt='s', color='green', capsize=3, markersize=5, label='|Tzy|')
-        else:
-            ax1.errorbar(p, tzx.real, yerr=tzx_se, fmt='o', color='purple', capsize=3, markersize=5, label='Re(Tzx)')
-            ax1.errorbar(p, tzy.real, yerr=tzy_se, fmt='s', color='green', capsize=3, markersize=5, label='Re(Tzy)')
-        ax1.set_xscale('log')
-        ax1.set_ylabel('Amplitude' if amp_phase else 'Real')
-        ax1.set_title('倾子响应幅值' if amp_phase else '倾子响应实部')
-        ax1.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
-        ax1.grid(True, alpha=0.3)
-
-        if amp_phase:
-            ax2.errorbar(p, emtf_phase_deg(tzx), yerr=np.degrees(tzx_se / np.maximum(np.abs(tzx), 1e-20)), fmt='o', color='purple', capsize=3, markersize=5, label='arg(Tzx)')
-            ax2.errorbar(p, emtf_phase_deg(tzy), yerr=np.degrees(tzy_se / np.maximum(np.abs(tzy), 1e-20)), fmt='s', color='green', capsize=3, markersize=5, label='arg(Tzy)')
-        else:
-            ax2.errorbar(p, tzx.imag, yerr=tzx_se, fmt='o', color='purple', capsize=3, markersize=5, label='Im(Tzx)')
-            ax2.errorbar(p, tzy.imag, yerr=tzy_se, fmt='s', color='green', capsize=3, markersize=5, label='Im(Tzy)')
-        ax2.set_xscale('log')
-        ax2.set_xlabel('Period (s)')
-        ax2.set_ylabel('Phase (°)' if amp_phase else 'Imaginary')
-        ax2.set_title('倾子响应相位' if amp_phase else '倾子响应虚部')
-        ax2.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
-        ax2.grid(True, alpha=0.3)
-        configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-        self.tipper_canvas.draw()
-
-    # ─── 结果展示 ──────────────────────────────────────────────────
+        result = self._bands if self._hz_channel_selected() else None
+        mode = self.tipper_mode_combo.currentData() if hasattr(self, "tipper_mode_combo") else "re_im"
+        draw_tipper_response(self.tipper_fig, self.tipper_canvas, result, str(mode), self)
 
     def _display_result(self, result):
         """将 SpectrumResult 填充到表格中，并用 to_bands 后的 BandedResult 画图。"""
@@ -1592,68 +1690,7 @@ class RemoteReferenceWidget(QWidget):
         self._draw_comparison_plot()
 
     def _draw_comparison_plot(self):
-        """用 matplotlib 绘制视电阻率和相位的误差棒对比图。"""
-        if self._bands is None:
-            self.mpl_fig.clear()
-            configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
-            self.mpl_canvas.draw()
-            return
-
-        result = self._bands
-
-        p = np.array(result.periods)
-        finite = np.isfinite(p) & (p > 0)
-        if not finite.any():
-            self.mpl_fig.clear()
-            configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
-            self.mpl_canvas.draw()
-            return
-
-        p = p[finite]
-        rho_xy = np.array(result.rho_xy)[finite]
-        rho_xy_se = np.array(result.rho_xy_se)[finite]
-        phi_xy = emtf_phase_deg(np.asarray(result.zxy))[finite]
-        phi_xy_se = np.array(result.phi_xy_se)[finite]
-        rho_yx = np.array(result.rho_yx)[finite]
-        rho_yx_se = np.array(result.rho_yx_se)[finite]
-        phi_yx = emtf_phase_deg(np.asarray(result.zyx))[finite]
-        phi_yx_se = np.array(result.phi_yx_se)[finite]
-
-        self.mpl_fig.clear()
-        ax1, ax2 = self.mpl_fig.subplots(2, 1)
-
-        ax1.errorbar(p, rho_xy, yerr=rho_xy_se,
-                     fmt='o', color='red', capsize=3, markersize=5,
-                     label='ρxy (Ω·m)')
-        ax1.errorbar(p, rho_yx, yerr=rho_yx_se,
-                     fmt='s', color='blue', capsize=3, markersize=5,
-                     label='ρyx (Ω·m)')
-        ax1.set_yscale('log')
-        ax1.set_xscale('log')
-        ax1.set_ylabel('Apparent Resistivity (Ω·m)')
-        ax1.set_xlabel('Period (s)')
-        ax1.set_title('视电阻率')
-        ax1.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
-        ax1.grid(True, alpha=0.3)
-
-        ax2.errorbar(p, phi_xy, yerr=phi_xy_se,
-                     fmt='o', color='red', capsize=3, markersize=5,
-                     label='φxy (°)')
-        ax2.errorbar(p, phi_yx, yerr=phi_yx_se,
-                     fmt='s', color='blue', capsize=3, markersize=5,
-                     label='φyx (°)')
-        ax2.set_xscale('log')
-        ax2.set_xlabel('Period (s)')
-        ax2.set_ylabel('Phase (°)')
-        ax2.set_title('相位')
-        # 与 EMTF MATLAB 的 set_lims/pltrhom 对齐；仅限制绘图区间，
-        # 不修改结果对象中的 phi_se 标准误。
-        ax2.set_ylim(-180.0, 180.0)
-        ax2.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
-        ax2.grid(True, alpha=0.3)
-
-        configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
-        self.mpl_canvas.draw()
+        draw_impedance_response(self.mpl_fig, self.mpl_canvas, self._bands, self)
 
     def result(self):
         return self._result
@@ -1667,18 +1704,33 @@ class RemoteReferenceWidget(QWidget):
             QTableWidget.keyPressEvent(self.table, event)
 
     def _on_table_context_menu(self, pos):
-        """右键菜单：复制 / 输出阻抗。"""
+        """右键菜单：复制。"""
         table = self.sender()
         if not isinstance(table, QTableWidget):
             table = self.table
         menu = QMenu()
         copy_action = menu.addAction("复制")
-        edi_action = menu.addAction("输出阻抗...")
         action = menu.exec(table.viewport().mapToGlobal(pos))
         if action is copy_action:
             self._copy_selection()
-        elif action is edi_action:
-            self._export_edi()
+
+    def _save_to_preview(self) -> None:
+        if self._bands is None or not self._calculation_context:
+            QMessageBox.warning(self, "无结果", "请先运行估计。")
+            return
+        if self._saved_current:
+            return
+        if self._current_calculation_signature() != self._saved_calculation_signature():
+            QMessageBox.warning(self, "参数已更改", "参数、台站或通道已更改，请重新运行后再保存。")
+            return
+        payload = dict(self._calculation_context)
+        payload["bands"] = self._bands
+        self.snapshot_save_requested.emit(payload)
+        self._saved_current = True
+        self.save_preview_btn.setEnabled(False)
+        self.save_preview_btn.setText("已保存到阻抗预览")
+        self.view_preview_btn.setVisible(True)
+        self.status_label.setText(self.status_label.text() + "；已暂存")
 
     def _copy_selection(self):
         table = self.result_tabs.currentWidget()

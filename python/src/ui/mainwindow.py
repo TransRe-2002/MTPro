@@ -5,7 +5,6 @@ import os
 from collections.abc import Callable
 from concurrent.futures import as_completed
 from pathlib import Path
-from typing import Dict, Optional
 
 from PySide6.QtCore import Qt, QEventLoop, QObject, Signal
 from PySide6.QtGui import QAction, QFont, QIcon
@@ -99,7 +98,7 @@ class _BatchOpenSignals(QObject):
     advanced = Signal(int, int, str)   # (已完成数, 总数, 当前文件名)
 
 
-def _estimate_open_memory_gb(filenames: list[str]) -> tuple[float, Optional[float]]:
+def _estimate_open_memory_gb(filenames: list[str]) -> tuple[float, float | None]:
     """估算批量打开的内存开销。
 
     返回 (预估占用 GB, 系统可用 GB)。MAT v7.3 带压缩，实测内存
@@ -113,7 +112,7 @@ def _estimate_open_memory_gb(filenames: list[str]) -> tuple[float, Optional[floa
         except OSError:
             continue
     est_gb = total_disk * 2 / 1e9
-    avail_gb: Optional[float] = None
+    avail_gb: float | None = None
     try:
         with open("/proc/meminfo", encoding="ascii") as fh:
             for line in fh:
@@ -134,25 +133,25 @@ class MainWindow(QMainWindow):
         self.logger = logging.getLogger(__name__)
         self.data_tree_viewer = DataTreeViewer(self.data_manager, self)
         self.activate_id: int = 0
-        self.data_viewers: Dict[int, DataViewWidget] = {}
+        self.data_viewers: dict[int, DataViewWidget] = {}
         self.app_state: AppState = load_app_state()
         self.plugin_report: LoadReport = load_all_plugins(state=self.app_state)
         tool_registry.register_loaded_plugins(self.plugin_report.loaded)
         refresh_tool_meta()
         self._log_last_nonzero_height = 120
         # 后台打开/保存的临时状态（供主线程槽函数读写）
-        self._single_open_progress: Optional[QProgressDialog] = None
-        self._single_open_ctx: Optional[dict] = None
-        self._batch_progress: Optional[QProgressDialog] = None
-        self._batch_loop: Optional[QEventLoop] = None
+        self._single_open_progress: QProgressDialog | None = None
+        self._single_open_ctx: dict | None = None
+        self._batch_progress: QProgressDialog | None = None
+        self._batch_loop: QEventLoop | None = None
         self._batch_failed: list[tuple[str, str]] = []
-        self._batch_save_progress: Optional[QProgressDialog] = None
-        self._save_ctx: Optional[dict] = None
-        self._viewer_build_progress: Optional[QProgressDialog] = None
+        self._batch_save_progress: QProgressDialog | None = None
+        self._save_ctx: dict | None = None
+        self._viewer_build_progress: QProgressDialog | None = None
         # 波形视图"现场"状态（视口/通道顺序/隐藏通道/行高）：
         # viewer 控件是 active-only 的（切走即销毁），但现场按 key
         # 永久保存，再次激活时原样恢复
-        self.viewer_state: Dict[int, dict] = {}
+        self.viewer_state: dict[int, dict] = {}
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(False)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -181,6 +180,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.impedance_output_widget, "阻抗输出")
         self.impedance_preview_widget = ImpedancePreviewWidget(self.impedance_pool, self)
         self.tab_widget.addTab(self.impedance_preview_widget, "阻抗预览")
+        self.impedance_output_widget.preview_requested.connect(self._show_impedance_preview)
 
         self.log_console = LogConsoleWidget(self)
         self.log_console_handler = QtTextEditHandler()
@@ -381,7 +381,7 @@ class MainWindow(QMainWindow):
             self.toggle_log_tb_action.blockSignals(False)
         self._persist_app_state()
 
-    def _ensure_data_viewer(self, key: int) -> Optional[DataViewWidget]:
+    def _ensure_data_viewer(self, key: int) -> DataViewWidget | None:
         viewer = self.data_viewers.get(key)
         if viewer is not None:
             return viewer
@@ -1057,7 +1057,7 @@ class MainWindow(QMainWindow):
     def on_data_changed(self, data_id: int, structural: bool) -> None:
         """就地预处理结果路由。
 
-        structural=False：仅元数据变化 → 刷新树摘要与状态栏。
+        structural=False：通道数值或元数据变化 → 无需完整重建视图。
         structural=True ：npts/dt/通道集变化 → 活跃数据集走
         「快照现场 → 销毁 → 重建」的 active-only 重建路径；
         非活跃数据集丢弃旧现场快照，下次激活时干净重建。
@@ -1074,7 +1074,7 @@ class MainWindow(QMainWindow):
             )
 
         if not structural:
-            self.logger.info("Dataset #%s metadata updated", data_id)
+            self.logger.info("Dataset #%s content or metadata updated", data_id)
             return
 
         viewer = self.data_viewers.get(data_id)
@@ -1116,20 +1116,40 @@ class MainWindow(QMainWindow):
             for viewer in self.data_viewers.values():
                 viewer.close()
             self.data_process_widget.close()
+            self.impedance_output_widget.discard_and_close_all()
             event.accept()
             return
 
-        reply = QMessageBox.question(self, "确认退出", "退出程序吗？",
+        unexported = self.impedance_pool.unexported_count()
+        pending = self.impedance_output_widget.pending_calculation_count()
+        running = self.impedance_output_widget.running_calculation_count()
+        question = "退出程序吗？"
+        warnings = []
+        if unexported:
+            warnings.append(f"阻抗预览中有 {unexported} 个临时结果尚未输出为 EDI、Z 或 CSV")
+        if pending:
+            warnings.append(f"有 {pending} 个计算结果尚未保存到阻抗预览")
+        if running:
+            warnings.append(f"有 {running} 个阻抗计算仍在运行")
+        if warnings:
+            question = "；\n".join(warnings) + "。\n退出后这些内容将丢失，仍要退出吗？"
+        reply = QMessageBox.question(self, "确认退出", question,
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             self.logger.info("Application close requested by user")
             for viewer in self.data_viewers.values():
                 viewer.close()
             self.data_process_widget.close()
+            self.impedance_output_widget.discard_and_close_all()
             event.accept()
         else:
             self.logger.info("Application close cancelled")
             event.ignore()
+
+    def _show_impedance_preview(self, snapshot_id: str = "") -> None:
+        self.tab_widget.setCurrentWidget(self.impedance_preview_widget)
+        if snapshot_id:
+            self.impedance_preview_widget.select_snapshot(snapshot_id)
 
     def _on_tab_changed(self, index: int):
         self._persist_app_state()
@@ -1138,7 +1158,7 @@ class MainWindow(QMainWindow):
         else:
             self.data_tree_viewer.show_station_summary()
 
-    def _resolve_processing_target(self, tool_type: str = "") -> Optional[tuple[int, str]]:
+    def _resolve_processing_target(self, tool_type: str = "") -> tuple[int, str] | None:
         # Station-level tools (robust estimate, remote reference) only need a
         # dataset, not a specific channel.
         is_station = tool_registry.is_station_tool(tool_type)

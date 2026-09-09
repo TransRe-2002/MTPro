@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -118,9 +118,9 @@ def write_asc(
     channels: list[NDArray[np.float64]],
     dt: float,
     *,
-    scales: Optional[Sequence[float]] = None,
-    start_time: Optional[Sequence[int]] = None,
-    zero_time: Optional[Sequence[int]] = None,
+    scales: Sequence[float] | None = None,
+    start_time: Sequence[int] | None = None,
+    zero_time: Sequence[int] | None = None,
 ) -> None:
     """Write EMTF ASCII (``.asc``) file — port of ``TS.writeAscTS``.
 
@@ -205,8 +205,8 @@ def write_sp(
     longitude: float = 0.0,
     elevation: float = 0.0,
     declination: float = 0.0,
-    scales: Optional[Sequence[float]] = None,
-    line_lengths_km: Optional[Sequence[float]] = None,
+    scales: Sequence[float] | None = None,
+    line_lengths_km: Sequence[float] | None = None,
 ) -> None:
     """Write EMTF System Parameter (``.sp``) file — port of ``TS.defaultSP``.
 

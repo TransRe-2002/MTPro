@@ -5,6 +5,8 @@ from plugin_api import ParamSpec, PluginInfo, TransformResult
 
 
 class IIRFilterPlugin:
+    pipeline_preview = True
+
     info = PluginInfo(
         plugin_id="iir_filter",
         display_name="零相位频率滤波",

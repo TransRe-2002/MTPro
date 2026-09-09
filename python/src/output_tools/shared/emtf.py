@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-from typing import Optional
 
 import numpy as np
 from scipy.signal import detrend
@@ -43,14 +42,30 @@ CH_COLOURS: dict[str, tuple[int, int, int]] = {
 }
 
 
+def phase_value_axis_limits(*phase_values: np.ndarray) -> tuple[float, float] | None:
+    """从相位值（不含误差棒）计算带留白且不越过 ±180° 的纵轴范围。"""
+    if not phase_values:
+        return None
+
+    values = np.concatenate([np.asarray(phase).ravel() for phase in phase_values])
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+
+    lower = float(values.min())
+    upper = float(values.max())
+    padding = max((upper - lower) * 0.10, 1.0)
+    return max(lower - padding, -180.0), min(upper + padding, 180.0)
+
+
 # ─── 通道检测 ───────────────────────────────────────────────────
 
-def detect_channels(channel_names: list[str]) -> dict[str, Optional[str]]:
+def detect_channels(channel_names: list[str]) -> dict[str, str | None]:
     """根据通道名称的命名规则自动匹配 Ex/Ey/Hx/Hy/Hz 五道。
 
     优先匹配第一个符合规则且尚未被占用的通道，避免重复映射。
     """
-    mapping: dict[str, Optional[str]] = {
+    mapping: dict[str, str | None] = {
         "Ex": None, "Ey": None, "Hx": None, "Hy": None, "Hz": None,
     }
     for ch in channel_names:
@@ -180,10 +195,10 @@ def build_spectrum_kwargs(
     huber_threshold: float,
     max_iterations: int,
     tolerance: float,
-    hz_arr: Optional[np.ndarray],
+    hz_arr: np.ndarray | None,
     backend: str,
-    fft_window_size: Optional[int] = None,
-    n_bands: Optional[int] = None,
+    fft_window_size: int | None = None,
+    n_bands: int | None = None,
     station_name: str = "STATION",
 ) -> dict:
     """构造传给 emtf_rs.estimate_*_spectrum() 的 kwargs 字典。

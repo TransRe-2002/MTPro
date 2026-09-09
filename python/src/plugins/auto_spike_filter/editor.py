@@ -1,7 +1,6 @@
 """Pipeline-slice preview editor for automatic short-pulse filtering."""
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -32,10 +31,10 @@ class AutoSpikeFilter(QtWidgets.QWidget):
         self.data_id = source if isinstance(source, int) else 0
         self.ch_name = channel_name
         self._series_source = source if isinstance(source, pd.Series) else None
-        self._x_data: Optional[np.ndarray] = None
-        self._source: Optional[np.ndarray] = None
-        self._detection: Optional[AutoSpikeDetection] = None
-        self._preview_params: Optional[dict[str, float | int]] = None
+        self._x_data: np.ndarray | None = None
+        self._source: np.ndarray | None = None
+        self._detection: AutoSpikeDetection | None = None
+        self._preview_params: dict[str, float | int] | None = None
         self._curve = None
         self._candidates = None
         self._protected = None

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from PySide6.QtCore import QByteArray, QMimeData, QPoint, Qt
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from unittest.mock import patch
 
 from base.data_manager import DataManager
@@ -49,6 +49,21 @@ def _app():
     if app is None:
         app = QApplication([])
     return app
+
+
+def test_pipeline_toolbar_omits_preview_summary_button(qtbot):
+    _app()
+    manager = DataManager()
+    data = DemoData("demo", ["Ex1"])
+    data_id = manager.add(data)
+    pipeline = DataProcessPipelineWidget(manager)
+    pipeline.init_data(data, data_id)
+    qtbot.addWidget(pipeline)
+
+    button_texts = {button.text() for button in pipeline.findChildren(QPushButton)}
+    assert "preview" not in button_texts
+    assert "commit" in button_texts
+    pipeline.close()
 
 
 def test_data_process_host_creates_an_all_channel_pipeline_for_active_data():
@@ -332,13 +347,18 @@ def test_pipeline_common_time_window_preview_and_commit(qtbot):
     )
 
     changed = []
+    dataset_changes = []
     pipeline.change_finished_signal.connect(lambda data_id, channel: changed.append((data_id, channel)))
+    manager.data_changed.connect(
+        lambda data_id, structural: dataset_changes.append((data_id, structural))
+    )
     with patch("ui.data_process_pipeline.QMessageBox.information"):
         pipeline._commit_preview()
 
     np.testing.assert_allclose(first.get_channel_series("Ex1").to_numpy(dtype=np.float64), [1.0, 12.0, 13.0, 14.0])
     np.testing.assert_allclose(second.get_channel_series("Hy1").to_numpy(dtype=np.float64), [10.0, 20.0, 30.0])
     assert changed == [(first_key, "Ex1")]
+    assert dataset_changes == [(first_key, False)]
     pipeline.close()
 
 
@@ -491,6 +511,50 @@ def test_pipeline_preview_commit_replays_downstream_edit_on_updated_upstream():
     assert changed == [(1, "Ex1")]
 
     widget.close()
+
+
+def test_pipeline_refresh_reuses_unchanged_preview_and_overview_lod(qtbot):
+    _app()
+    manager = DataManager()
+    data = DemoData("demo", ["Ex1"])
+    data_id = manager.add(data)
+    pipeline_widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(pipeline_widget)
+    pipeline_widget.init_data(data, data_id)
+
+    lane = pipeline_widget._lane_widgets[0]
+    first_preview = lane.samples
+    first_pyramid = lane.overview_widget._pyramid
+
+    pipeline_widget._refresh_all_pipeline_statuses()
+
+    assert lane.samples is first_preview
+    assert lane.overview_widget._pyramid is first_pyramid
+
+    channel_pipeline = pipeline_widget.pipelines[0]
+    base = channel_pipeline.baseline_snapshot
+    block = PipelineBlock(
+        tool_id="remove_spike",
+        start=0,
+        end=base.size,
+        status="ready",
+        input_slice=base.copy(),
+        output_slice=base + 1,
+    )
+    channel_pipeline.layers[0].blocks.append(block)
+    pipeline_widget._refresh_all_pipeline_statuses()
+    changed_preview = lane.samples
+    changed_pyramid = lane.overview_widget._pyramid
+
+    assert changed_preview is not first_preview
+    assert changed_pyramid is not first_pyramid
+    np.testing.assert_allclose(changed_preview, base + 1)
+
+    pipeline_widget._refresh_all_pipeline_statuses()
+
+    assert lane.samples is changed_preview
+    assert lane.overview_widget._pyramid is changed_pyramid
+    pipeline_widget.close()
 
 
 def test_pipeline_commit_clears_blocks_when_clear_option_is_enabled(qtbot):

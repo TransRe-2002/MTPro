@@ -1,7 +1,8 @@
 """JSON-friendly exact edit encoding used by migrated interactive editors."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 import numpy as np
 

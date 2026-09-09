@@ -1,7 +1,7 @@
 """Qt bridge that embeds slice-based editors in the plugin runtime."""
 from __future__ import annotations
 
-from typing import Callable, Mapping
+from collections.abc import Callable, Mapping
 
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 

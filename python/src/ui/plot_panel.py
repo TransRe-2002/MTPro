@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -37,9 +36,9 @@ class PlotPanel(TimeViewportMixin, QWidget):
 
     def __init__(
         self,
-        x_data: Optional[pd.DatetimeIndex] = None,
-        y_data: Optional[pd.Series] = None,
-        label: Optional[str] = None,
+        x_data: pd.DatetimeIndex | None = None,
+        y_data: pd.Series | None = None,
+        label: str | None = None,
         parent=None,
     ):
         """
@@ -61,7 +60,7 @@ class PlotPanel(TimeViewportMixin, QWidget):
         self.label = label
         self.x_data = x_data
         self.y_data = y_data
-        self.duration: Optional[pd.Timedelta] = (
+        self.duration: pd.Timedelta | None = (
             (x_data[-1] - x_data[0])
             if x_data is not None and len(x_data) > 0
             else None
@@ -73,16 +72,16 @@ class PlotPanel(TimeViewportMixin, QWidget):
         self.plot_curve = None        # 当前绘制的 PlotCurveItem
 
         # LOD 金字塔（视口窗口化用）
-        self._x_raw: Optional[np.ndarray] = None    # 原始时间戳数组（秒级浮点）
-        self._y_raw: Optional[np.ndarray] = None    # 原始信号幅值数组
-        self._pyramid: Optional[LODPyramid] = None  # LOD 缩放金字塔（按像素数查询）
+        self._x_raw: np.ndarray | None = None    # 原始时间戳数组（秒级浮点）
+        self._y_raw: np.ndarray | None = None    # 原始信号幅值数组
+        self._pyramid: LODPyramid | None = None  # LOD 缩放金字塔（按像素数查询）
         self._has_plottable_data = False            # 至少存在一个有限幅值
 
         # 视口参数（Mixin 约定属性名为 x_view_start / x_view_size）
-        self.x_view_start: Optional[pd.Timedelta] = None  # 横轴视口起点（相对数据首点偏移）
-        self.x_view_size: Optional[pd.Timedelta] = None   # 横轴视口跨度
-        self.y_viewport_start: Optional[float] = None     # 纵轴视口下界（幅值）
-        self.y_viewport_size: Optional[float] = None      # 纵轴视口跨度（幅值范围）
+        self.x_view_start: pd.Timedelta | None = None  # 横轴视口起点（相对数据首点偏移）
+        self.x_view_size: pd.Timedelta | None = None   # 横轴视口跨度
+        self.y_viewport_start: float | None = None     # 纵轴视口下界（幅值）
+        self.y_viewport_size: float | None = None      # 纵轴视口跨度（幅值范围）
 
         # 信号增益（纵轴缩放倍率）
         self.zoom_ratio = 1.0

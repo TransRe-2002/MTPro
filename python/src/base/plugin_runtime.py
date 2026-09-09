@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, Mapping, Optional
+from typing import Any
+from collections.abc import Callable, Mapping
 
 import pandas as pd
 
@@ -16,8 +17,8 @@ logger = logging.getLogger(__name__)
 class PluginProcessContext:
     def __init__(
         self,
-        progress_callback: Optional[Callable[[float, str], None]] = None,
-        cancelled: Optional[Callable[[], bool]] = None,
+        progress_callback: Callable[[float, str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ):
         self._progress_callback = progress_callback
         self._cancelled = cancelled or (lambda: False)

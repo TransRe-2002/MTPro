@@ -69,7 +69,7 @@ def test_single_tranmt_control_terminates_after_one_run():
     from emtf._config import render_tranmt_control
 
     text = render_tranmt_control([
-        ("TEST", "CF/options_SS.cfg", 1, 1, 4, "TEST.f4", False),
+        ("TEST", "CF/options_SS.cfg", [(["TEST.f4"], 4)], False),
     ])
 
     assert text.splitlines() == [
@@ -78,5 +78,29 @@ def test_single_tranmt_control_terminates_after_one_run():
         "1",
         "1  4",
         "TEST.f4",
+        "n",
+    ]
+
+
+def test_remote_tranmt_control_keeps_both_fc_groups_in_one_run():
+    from emtf._config import render_tranmt_control
+
+    text = render_tranmt_control([
+        (
+            "TEST_RR",
+            "CF/options_RR.cfg",
+            [(["TEST.f4"], 4), (["TEST_RR.f2"], 2)],
+            False,
+        ),
+    ])
+
+    assert text.splitlines() == [
+        "TEST_RR",
+        "CF/options_RR.cfg",
+        "2",
+        "1  4",
+        "TEST.f4",
+        "1  2",
+        "TEST_RR.f2",
         "n",
     ]

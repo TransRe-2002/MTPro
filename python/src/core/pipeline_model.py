@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 
@@ -21,9 +20,23 @@ class PipelineBlock:
     status: str = "empty"
     # block 只缓存自己区间 [start:end] 的输入/输出切片，而不是整条通道，
     # 避免每个 block 都复制一份全量数据（内存随 block 数线性翻倍）。
-    input_slice: Optional[np.ndarray] = field(default=None, repr=False)
-    output_slice: Optional[np.ndarray] = field(default=None, repr=False)
+    input_slice: np.ndarray | None = field(default=None, repr=False)
+    output_slice: np.ndarray | None = field(default=None, repr=False)
     last_summary: str = ""
+    # Non-empty when this block shares its reusable settings with peer blocks
+    # on other Pipeline channels. Execution caches always remain per block.
+    settings_group_id: str = ""
+
+
+@dataclass
+class PipelineSettingsGroup:
+    group_id: str = field(default_factory=uid)
+    display_label: str = ""
+    tool_id: str = ""
+    shared_params: dict = field(default_factory=dict)
+    reference_block_id: str = ""
+    source_sample_interval_seconds: float = 0.0
+    revision: int = 0
 
 
 @dataclass
@@ -45,7 +58,7 @@ class ChannelPipeline:
     channel: str
     expanded: bool = True
     layers: list[PipelineLayer] = field(default_factory=list)
-    baseline_snapshot: Optional[np.ndarray] = field(default=None, repr=False)
+    baseline_snapshot: np.ndarray | None = field(default=None, repr=False)
 
     @property
     def ref(self) -> tuple[int, str]:

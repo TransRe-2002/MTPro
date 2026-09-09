@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -42,7 +41,7 @@ class CompareWidget(TimeViewportMixin, QWidget):
     def __init__(
         self,
         channel_refs: list[tuple[EMData, str]],
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
 
@@ -67,6 +66,7 @@ class CompareWidget(TimeViewportMixin, QWidget):
 
         # 每条曲线的 LOD 金字塔（label → LODPyramid）与异步构建代次守卫
         self._pyramids: dict[str, LODPyramid] = {}
+        self._channel_centers: dict[str, float] = {}
         self._build_gen: int = 0
         self._pending_gen: int = -1
         self._pending_labels: dict[str, str] = {}
@@ -178,7 +178,7 @@ class CompareWidget(TimeViewportMixin, QWidget):
     def _init_widget(self) -> None:
         """初始化 E/B 两行的 BriefPlot。"""
         for row in self.widget_data.index:
-            widget: Optional[BriefPlot] = self.widget_data.loc[row, "widget"]
+            widget: BriefPlot | None = self.widget_data.loc[row, "widget"]
             if widget is None:
                 widget = BriefPlot(label=row)
                 self.widget_data.loc[row, "widget"] = widget
@@ -214,21 +214,29 @@ class CompareWidget(TimeViewportMixin, QWidget):
             label: str = f"{em_data.name} - {key}"
             self._pending_labels[label] = row
             s = em_data.get_channel_series(channel_name)
-            entries.append((label, dti_to_numpy(s.index), s.to_numpy(dtype=np.float64, copy=True)))
+            entries.append((label, dti_to_numpy(s.index), s.to_numpy(dtype=np.float64, copy=False)))
 
         def task():
-            # 去均值以对齐不同通道的基准线，再建金字塔（纯 numpy/Rust，可在池线程执行）
-            pyramids: dict[str, LODPyramid] = {}
+            # 金字塔引用原始值；居中推迟到可见切片，避免为每条对比
+            # 曲线永久保留一份全长 centered 副本。
+            pyramids: dict[str, tuple[LODPyramid, float]] = {}
             for label, x, values in entries:
                 mean = safe_nanmean(values)
-                y = np.asarray(values - (mean if np.isfinite(mean) else 0.0), dtype=np.float64)
-                pyramids[label] = LODPyramid(x, y, max_finest_points=PYRAMID_MAX_FINEST_POINTS)
+                center = float(mean) if np.isfinite(mean) else 0.0
+                pyramids[label] = (
+                    LODPyramid(
+                        x,
+                        values,
+                        max_finest_points=PYRAMID_MAX_FINEST_POINTS,
+                    ),
+                    center,
+                )
             return pyramids
 
         # on_done/on_error 须是 QObject 绑定方法（排队回主线程）；
         # 闭包接收者会退化为 DirectConnection 在池线程碰控件
         run_in_pool(
-            "io", task,
+            "compute", task,
             on_done=self._on_display_build_done,
             on_error=self._on_display_build_failed,
             owner=self,
@@ -237,18 +245,24 @@ class CompareWidget(TimeViewportMixin, QWidget):
     def _on_display_build_done(self, pyramids: dict) -> None:
         if self._build_gen != self._pending_gen:
             return  # 已被更新的 _refresh_plots 取代，丢弃过期结果
-        self._pyramids = pyramids
+        self._pyramids = {label: item[0] for label, item in pyramids.items()}
+        self._channel_centers = {label: item[1] for label, item in pyramids.items()}
         start: pd.Timestamp = self.start + self.x_view_start
         end: pd.Timestamp = start + self.x_view_size
         for label, pyramid in self._pyramids.items():
             row = self._pending_labels.get(label)
             if row is None:
                 continue
-            widget: Optional[BriefPlot] = self.widget_data.loc[row, "widget"]
+            widget: BriefPlot | None = self.widget_data.loc[row, "widget"]
             if widget is None:
                 continue
             xs, ys = pyramid.get(start.timestamp(), end.timestamp(), max(1, widget.width()))
-            widget.add_curve(x_data=xs, y_data=ys, label=label, graph_type="plot")
+            widget.add_curve(
+                x_data=xs,
+                y_data=ys - self._channel_centers.get(label, 0.0),
+                label=label,
+                graph_type="plot",
+            )
         for key, widget in self.widget_data["widget"].items():
             widget.setVisible(len(widget.curves) > 0)
         self._on_viewport_changed()
@@ -275,7 +289,11 @@ class CompareWidget(TimeViewportMixin, QWidget):
                     continue
                 xs, ys = pyramid.get(x_start, x_end, max(1, widget.width()))
                 if len(xs) > 0:
-                    widget.update_curve(label, xs, ys)
+                    widget.update_curve(
+                        label,
+                        xs,
+                        ys - self._channel_centers.get(label, 0.0),
+                    )
             widget.update_plot(start, end)
         self.set_time(pts_to_qdt(start), pts_to_qdt(end))
 
@@ -295,4 +313,3 @@ class CompareWidget(TimeViewportMixin, QWidget):
             tz=self.start.tz,
         )
         self._apply_jump(start_duration, end_duration)  # Mixin
-

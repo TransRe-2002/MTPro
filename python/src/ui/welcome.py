@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QStandardItem, QStandardItemModel
@@ -22,7 +21,7 @@ from PySide6.QtWidgets import (
 class Welcome(QWidget):
     recent_file_requested = Signal(str)
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("MTPro - 欢迎")
         self.setObjectName("WelcomeRoot")
@@ -167,6 +166,6 @@ class Welcome(QWidget):
         if not index.isValid():
             return
         path_index = self.recent_model.index(index.row(), 0)
-        path: Optional[str] = path_index.data(Qt.ItemDataRole.UserRole)
+        path: str | None = path_index.data(Qt.ItemDataRole.UserRole)
         if path:
             self.recent_file_requested.emit(str(path))

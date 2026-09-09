@@ -7,6 +7,7 @@ AttributeError 并导致 Qt abort。测试侧给 ``sizeHint`` 加保护。
 """
 
 import pyqtgraph.graphicsItems.LabelItem as _LabelMod
+import pytest
 from PySide6.QtCore import QSizeF
 
 _orig_size_hint = _LabelMod.LabelItem.sizeHint
@@ -19,3 +20,15 @@ def _safe_size_hint(self, hint, constraint):
 
 
 _LabelMod.LabelItem.sizeHint = _safe_size_hint
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_shared_worker_pools(request):
+    """确保 pytest-forked 子进程退出前不再残留共享工作线程。"""
+    yield
+    if not request.config.getoption("forked", default=False):
+        return
+
+    from utils.concurrency import shutdown
+
+    shutdown(wait=True)

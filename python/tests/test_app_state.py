@@ -62,6 +62,25 @@ def test_remember_recent_file_deduplicates_and_moves_to_front(tmp_path):
     assert state.last_open_dir == str(tmp_path.resolve(strict=False))
 
 
+def test_recent_files_are_not_limited(tmp_path):
+    files = [str(tmp_path / f"{index}.mat") for index in range(12)]
+    state = AppState()
+
+    for filename in files:
+        remember_recent_file(state, filename)
+
+    expected_files = [
+        str((tmp_path / f"{index}.mat").resolve(strict=False))
+        for index in reversed(range(12))
+    ]
+    assert state.recent_files == expected_files
+
+    state_path = tmp_path / "app_state.toml"
+    save_app_state(state, state_path)
+
+    assert load_app_state(state_path).recent_files == expected_files
+
+
 def test_remove_recent_file_drops_missing_path(tmp_path):
     first = str((tmp_path / "first.mat").resolve(strict=False))
     second = str((tmp_path / "second.mat").resolve(strict=False))

@@ -14,7 +14,6 @@ processor.diurnal_sinusoid_subtraction 中。
 """
 
 import os
-from typing import Optional
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
@@ -82,8 +81,8 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         # 日变工具使用 time+linear 双重插值（在 _on_data_loaded 中覆写）
         super().__init__(source, channel_name, parent)
 
-        self.preview_result: Optional[PeriodicSubtractionResult] = None
-        self.datetime_index: Optional[pd.DatetimeIndex] = None
+        self.preview_result: PeriodicSubtractionResult | None = None
+        self.datetime_index: pd.DatetimeIndex | None = None
         self._syncing_x_range = False
 
         self.signal_plot_widget = StepPlotWidget()
@@ -385,8 +384,8 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
 
     def _update_noise_plot(
         self,
-        current_noise: Optional[np.ndarray],
-        preview_noise: Optional[np.ndarray],
+        current_noise: np.ndarray | None,
+        preview_noise: np.ndarray | None,
     ):
         """更新下方"拟合噪声图"中的两条曲线。"""
         if current_noise is None:
@@ -402,7 +401,7 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
     # 业务逻辑
     # ------------------------------------------------------------------
 
-    def _parse_harmonics(self) -> Optional[tuple[int, ...]]:
+    def _parse_harmonics(self) -> tuple[int, ...] | None:
         """从下拉框读出当前选中的谐波组合。"""
         data = self.harmonics_combo.currentData()
         harmonics = tuple(int(part) for part in data) if data is not None else ()
@@ -411,7 +410,7 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
             return None
         return harmonics
 
-    def _read_subtraction_args(self, samples: np.ndarray) -> Optional[dict]:
+    def _read_subtraction_args(self, samples: np.ndarray) -> dict | None:
         """在 UI 线程读取日变相减参数，返回纯数据 dict（不合法返回 None）。"""
         harmonics = self._parse_harmonics()
         if harmonics is None:

@@ -131,6 +131,26 @@ def test_pipeline_track_adds_block_from_shared_processing_tool_drag(qtbot):
     widget.close()
 
 
+def test_pipeline_zoom_one_fits_full_channel_width(qtbot):
+    _app()
+    manager = DataManager()
+    data = _SyncData(["Ex"])
+    data_id = manager.add(data)
+    widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(widget)
+    widget.resize(900, 500)
+    widget.show()
+    widget.init_data(data, data_id)
+
+    widget.zoom_slider.setValue(1)
+    qtbot.wait(20)
+
+    assert widget.scroll.horizontalScrollBar().maximum() == 0
+    lane = widget._lane_widgets[0]
+    assert lane._tracks[0].minimumWidth() <= widget.scroll.viewport().width() - 120
+    widget.close()
+
+
 def test_workspace_level_tool_drop_routes_to_pipeline_track(qtbot, monkeypatch):
     _app()
     manager = DataManager()

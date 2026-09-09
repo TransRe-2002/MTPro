@@ -10,7 +10,6 @@ from __future__ import annotations
 """
 
 import os
-from typing import Optional
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
@@ -53,7 +52,7 @@ class RemoveStepByDiff(BaseProcessorWidget):
     def __init__(self, source, channel_name: str, parent=None):
         super().__init__(source, channel_name, parent)
 
-        self.diff_y_data: Optional[np.ndarray] = None
+        self.diff_y_data: np.ndarray | None = None
         self.selected_diff_indices: list[int] = []
         self._syncing_x_range = False
 

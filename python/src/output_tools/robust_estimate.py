@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import importlib.util
 from pathlib import Path
-from typing import Optional, Dict
 
 import numpy as np
 import pandas as pd
@@ -30,6 +29,7 @@ from base.data_manager import DataManager
 from core.station_metadata import StationMetadata
 from core.em_data import EMData
 from emtf.io.zfile import emtf_phase_deg
+from ui.impedance_plot import draw_impedance_response, draw_tipper_response
 from output_tools.shared.emtf import (
     BACKEND_EMTF_PYWRAP,
     BACKEND_EMTF_RS,
@@ -51,9 +51,41 @@ from output_tools.shared.emtf import (
 from plugins.common.plotting import StepPlotWidget
 from ui.dialogs.figure_export import default_export_name, export_matplotlib_figure_with_dialog
 from utils.decimate import LODPyramid
+from utils.qt_bridge import run as run_in_pool
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 
 logger = logging.getLogger(__name__)
+
+
+def _estimate_single_task(backend: str, arrays: tuple, channel_names: tuple, kwargs: dict, generation: int):
+    try:
+        if backend == BACKEND_EMTF_RS:
+            import emtf_rs as api
+        else:
+            import emtf as api
+        ex, ey, hx, hy, hz = arrays
+        ex = preprocess_channel(ex, channel_names[0])
+        ey = preprocess_channel(ey, channel_names[1])
+        hx = preprocess_channel(hx, channel_names[2])
+        hy = preprocess_channel(hy, channel_names[3])
+        call_kwargs = dict(kwargs)
+        call_kwargs["hz"] = preprocess_channel(hz, str(channel_names[4])) if hz is not None else None
+        result = api.estimate_single_station_spectrum(ex, ey, hx, hy, **call_kwargs)
+        return generation, result, None
+    except BaseException as error:
+        return generation, None, error
+
+
+def _build_lod_task(entries: list[tuple], pixel_width: int, generation: int):
+    built = []
+    for tag, channel_name, electric, timestamps, values in entries:
+        values = np.asarray(values, dtype=np.float64)
+        mean = np.nanmean(values)
+        centered = values - (mean if np.isfinite(mean) else 0.0)
+        pyramid = LODPyramid(timestamps, centered)
+        overview = pyramid.get_full_overview(pixel_width)
+        built.append((tag, channel_name, electric, pyramid, overview))
+    return generation, built
 
 # ─── 供本文件内部代码使用的短别名（保持向后兼容）──────────────────
 _detect_channels = detect_channels
@@ -70,6 +102,8 @@ class RobustEstimateWidget(QWidget):
     右侧上部为时序波形预览，下部为计算结果表格和对比图。
     """
     result_ready = Signal(object)  # 计算完成后触发，携带结果对象
+    snapshot_save_requested = Signal(object)
+    preview_requested = Signal()
 
     # 信号总线
     data_requested = Signal(int, str)
@@ -78,7 +112,7 @@ class RobustEstimateWidget(QWidget):
     def __init__(
         self,
         data_id: int = 0,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self.setObjectName("RobustEstimateWidget")
@@ -93,15 +127,21 @@ class RobustEstimateWidget(QWidget):
         )
         self._data_id = data_id
         self._pkg: dict = {}
-        self._station_metadata: Optional[StationMetadata] = None
+        self._station_metadata: StationMetadata | None = None
         self._result = None  # 最近一次计算结果
         self._spectrum = None  # emtf_rs 原始 SpectrumResult
         self._bands = None     # to_bands 聚合后的 BandedResult
+        self._calculation_context: dict = {}
+        self._saved_current = True
+        self._pending_context: dict = {}
+        self._estimation_future = None
+        self._task_generation = 0
+        self._plot_generation = 0
         self._region = None
         self._curves: dict[str, pg.PlotDataItem] = {}  # 当前显示的波形曲线
         self._lod_pyramids: dict[str, LODPyramid] = {}  # 每通道的 LOD 金字塔
         self._updating_range = False  # 防止信号递归的标志位
-        self._ts_array: Optional[np.ndarray] = None  # 预计算的时间戳缓存，避免每次拖拽区域时重建百万级数组
+        self._ts_array: np.ndarray | None = None  # 预计算的时间戳缓存，避免每次拖拽区域时重建百万级数组
 
         # LOD 视口刷新防抖定时器（60fps）
         self._lod_timer = QTimer(self)
@@ -284,13 +324,29 @@ class RobustEstimateWidget(QWidget):
             self.tol_spin,
         ]
         self._on_backend_changed()
+        for control in (self.window_combo, self.fft_window_combo):
+            control.currentIndexChanged.connect(self._mark_parameters_changed)
+        for control in (self.step_pct_spin, self.huber_spin, self.max_iter_spin, self.tol_spin):
+            control.valueChanged.connect(self._mark_parameters_changed)
 
         # ── 运行按钮 ──
         btn_layout = QHBoxLayout()
         self.run_button = QPushButton("运行 Robust 估计")
         self.run_button.clicked.connect(self._run_estimation)
+        self.save_preview_btn = QPushButton("保存到阻抗预览")
+        self.save_preview_btn.setEnabled(False)
+        self.save_preview_btn.clicked.connect(self._save_to_preview)
+        self.view_preview_btn = QPushButton("查看阻抗预览")
+        self.view_preview_btn.setVisible(False)
+        self.view_preview_btn.clicked.connect(self.preview_requested)
+        self.cancel_button = QPushButton("取消计算")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self._cancel_estimation)
         btn_layout.addStretch()
         btn_layout.addWidget(self.run_button)
+        btn_layout.addWidget(self.cancel_button)
+        btn_layout.addWidget(self.save_preview_btn)
+        btn_layout.addWidget(self.view_preview_btn)
 
         self.status_label = QLabel("")
 
@@ -307,12 +363,6 @@ class RobustEstimateWidget(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_table_context_menu)
         self.table.keyPressEvent = self._table_key_press_event
-
-        self.export_edi_btn = QPushButton("输出阻抗")
-        self.export_edi_btn.clicked.connect(self._export_edi)
-        self.export_figure_btn = QPushButton("输出图像")
-        self.export_figure_btn.clicked.connect(self._export_current_figure)
-        self.export_figure_btn.setVisible(False)
 
         # 视电阻率与相位结果表
         self.resistivity_table = QTableWidget()
@@ -340,21 +390,19 @@ class RobustEstimateWidget(QWidget):
         self.tipper_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tipper_table.customContextMenuRequested.connect(self._on_table_context_menu)
         self.tipper_table.keyPressEvent = self._table_key_press_event
-        self._tipper_tab_index: Optional[int] = None
+        self._tipper_tab_index: int | None = None
 
         self.tipper_fig = Figure(figsize=(6, 4), tight_layout=True)
         self.tipper_canvas = FigureCanvas(self.tipper_fig)
         self.tipper_canvas.setParent(self)
         configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-        self._tipper_plot_tab_index: Optional[int] = None
+        self._tipper_plot_tab_index: int | None = None
 
         # 结果标签页
         self.result_tabs = QTabWidget()
         tab_corner = QWidget()
         tab_corner_layout = QHBoxLayout(tab_corner)
         tab_corner_layout.setContentsMargins(0, 0, 4, 0)
-        tab_corner_layout.addWidget(self.export_figure_btn)
-        tab_corner_layout.addWidget(self.export_edi_btn)
         self.tipper_mode_combo = QComboBox(self)
         self.tipper_mode_combo.addItem("倾子：实部/虚部", "re_im")
         self.tipper_mode_combo.addItem("倾子：幅值/相位", "amp_phase")
@@ -423,7 +471,7 @@ class RobustEstimateWidget(QWidget):
 
         # ── 初始填充 ── 数据到达后由 _on_data_ready 触发
 
-    def _current_data(self) -> Optional[dict]:
+    def _current_data(self) -> dict | None:
         """返回当前数据包，无数据时返回 None。"""
         return self._pkg if self._pkg else None
 
@@ -468,16 +516,17 @@ class RobustEstimateWidget(QWidget):
 
     def _populate_stations(self):
         prev_key = self.station_combo.currentData()
+        target_key = prev_key if prev_key is not None else self._data_id
         self.station_combo.blockSignals(True)
         self.station_combo.clear()
         for s in self._pkg.get('stations', []):
             if s['has_magnetic']:
                 self.station_combo.addItem(f"#{s['id']} {s['name']}", s['id'])
-        self.station_combo.blockSignals(False)
-        if prev_key is not None and self.station_combo.findData(prev_key) >= 0:
-            self.station_combo.setCurrentIndex(self.station_combo.findData(prev_key))
+        if target_key is not None and self.station_combo.findData(target_key) >= 0:
+            self.station_combo.setCurrentIndex(self.station_combo.findData(target_key))
         elif self.station_combo.count() > 0:
-            self._on_station_changed(0)
+            self.station_combo.setCurrentIndex(0)
+        self.station_combo.blockSignals(False)
 
     def _on_station_changed(self, _idx: int):
         """台站切换时请求新数据。"""
@@ -548,6 +597,7 @@ class RobustEstimateWidget(QWidget):
 
     def _on_channel_changed(self):
         """通道映射变更时刷新波形图。"""
+        self._mark_parameters_changed()
         self._sync_tipper_tab_visibility()
         self._refresh_plot()
 
@@ -589,7 +639,7 @@ class RobustEstimateWidget(QWidget):
         return None
 
     def _sync_result_actions(self, _index: int = -1) -> None:
-        self.export_figure_btn.setVisible(self._current_matplotlib_export_target() is not None)
+        pass
 
     def _export_current_figure(self) -> None:
         target = self._current_matplotlib_export_target()
@@ -609,7 +659,7 @@ class RobustEstimateWidget(QWidget):
 
     # ─── 波形绑图 ─────────────────────────────────────────────────────────
 
-    def _selected_channels(self) -> dict[str, Optional[str]]:
+    def _selected_channels(self) -> dict[str, str | None]:
         """获取当前各分量选中的实际通道名。"""
         return {
             "Ex": self.ch_combo_ex.currentData(),
@@ -645,33 +695,49 @@ class RobustEstimateWidget(QWidget):
         self._legend.clear()
 
         # 构建时间戳数组（同时缓存，供拖拽区域时二分查找使用）
-        t = np.array([t.timestamp() for t in pkg['datetime_index']])
+        datetime_index = pd.DatetimeIndex(pkg['datetime_index'])
+        t = datetime_index.asi8.astype(np.float64) / 1_000_000_000.0
         self._ts_array = t
 
         channels = self._selected_channels()
         pw = max(self.plot_widget.width(), 800)
 
+        entries = []
         for tag, ch_name in channels.items():
             if ch_name is None:
                 continue
             y = all_y.get(ch_name)
             if y is None:
                 continue
-            # 去均值以便在同一坐标系下对比波形形态
-            y = y - np.nanmean(y)
+            entries.append((tag, ch_name, _is_e_channel(ch_name), t, y))
 
-            # 构建 LOD 金字塔（Rust build_lod_pyramid_rs 加速）
-            pyramid = LODPyramid(t, y)
+        self._plot_generation += 1
+        run_in_pool(
+            "compute", _build_lod_task, entries, pw, self._plot_generation,
+            on_done=self._on_lod_build_done,
+            on_error=self._on_lod_build_failed,
+            owner=self,
+        )
+
+        # 将选取区域设为全量数据范围
+        if len(t) > 1:
+            self.region_item.blockSignals(True)
+            self.region_item.setRegion((t[0], t[-1]))
+            self.region_item.blockSignals(False)
+
+        self._update_range_info()
+        self._update_warning()
+
+    def _on_lod_build_done(self, completed: tuple) -> None:
+        generation, built = completed
+        if generation != self._plot_generation:
+            return
+        for tag, ch_name, electric, pyramid, (ox, oy) in built:
             self._lod_pyramids[tag] = pyramid
-
-            # 初始数据：取概览级，避免百万点全量塞入 PlotDataItem
-            ox, oy = pyramid.get_full_overview(pw)
-
             colour = CH_COLOURS.get(tag, (100, 100, 100))
             pen = pg.mkPen(color=colour, width=1)
             label = f"{tag} ({ch_name})"
-
-            if _is_e_channel(ch_name):
+            if electric:
                 # 电场 → 左轴（主 ViewBox）
                 curve = pg.PlotDataItem(ox, oy, pen=pen, name=label,
                                         autoDownsample=False, clipToView=False,
@@ -690,14 +756,8 @@ class RobustEstimateWidget(QWidget):
             self._legend.addItem(curve, label)
             self._curves[tag] = curve
 
-        # 将选取区域设为全量数据范围
-        if len(t) > 1:
-            self.region_item.blockSignals(True)
-            self.region_item.setRegion((t[0], t[-1]))
-            self.region_item.blockSignals(False)
-
-        self._update_range_info()
-        self._update_warning()
+    def _on_lod_build_failed(self, error: BaseException) -> None:
+        logger.error("Robust waveform LOD build failed: %r", error, exc_info=error)
 
     # ─── LOD 视口刷新 ──────────────────────────────────────────────
 
@@ -764,6 +824,7 @@ class RobustEstimateWidget(QWidget):
         self._set_dt_from_indices(val, self.end_spin.value())
         self._update_range_info()
         self._update_warning()
+        self._mark_parameters_changed()
 
     def _on_spin_end_changed(self, val: int):
         """结束样点微调框变更 → 同步日期时间和选取区域。"""
@@ -773,6 +834,7 @@ class RobustEstimateWidget(QWidget):
         self._set_dt_from_indices(self.start_spin.value(), val)
         self._update_range_info()
         self._update_warning()
+        self._mark_parameters_changed()
 
     def _on_dt_start_changed(self, qdt: QDateTime):
         """起始日期时间变更 → 同步样点索引和选取区域。"""
@@ -937,6 +999,15 @@ class RobustEstimateWidget(QWidget):
         注意：这里只做去趋势（detrend），不做插值。emtf_rs 内部有自己的插值逻辑，
         此处重复插值反而会掩盖数据质量问题。
         """
+        if self._estimation_future is not None:
+            return
+        if self._bands is not None and not self._saved_current:
+            reply = QMessageBox.question(
+                self, "替换未保存结果", "当前结果尚未保存到阻抗预览，重新计算会替换它。继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         pkg = self._pkg
         if not pkg:
             QMessageBox.warning(self, "错误", "请先选择一个台站。")
@@ -956,11 +1027,6 @@ class RobustEstimateWidget(QWidget):
                 return
 
         try:
-            if backend == BACKEND_EMTF_RS:
-                import emtf_rs
-            else:
-                import emtf as emtf_rs
-
             start = self.start_spin.value()
             end = self.end_spin.value()
             if end <= start:
@@ -975,13 +1041,6 @@ class RobustEstimateWidget(QWidget):
             if ch_hz is not None:
                 hz_arr = all_y.get(ch_hz, np.array([]))[start:end]
 
-            ex_arr = preprocess_channel(ex_arr, ch_ex)
-            ey_arr = preprocess_channel(ey_arr, ch_ey)
-            hx_arr = preprocess_channel(hx_arr, ch_hx)
-            hy_arr = preprocess_channel(hy_arr, ch_hy)
-            if hz_arr is not None:
-                hz_arr = preprocess_channel(hz_arr, str(ch_hz))
-
             sample_rate = 1.0 / pkg['dt']
             window_size = self.window_combo.currentData()
             n_samples = end - start
@@ -995,7 +1054,7 @@ class RobustEstimateWidget(QWidget):
 
             self.status_label.setText("正在计算...")
             self.run_button.setEnabled(False)
-            QApplication.processEvents()  # 强制刷新 UI，显示"正在计算"
+            self.cancel_button.setEnabled(True)
 
             station_name = self._station_metadata.name if self._station_metadata else "STATION"
             kwargs = build_spectrum_kwargs(
@@ -1011,32 +1070,97 @@ class RobustEstimateWidget(QWidget):
                 n_bands=self.bands_spin.value(),
                 station_name=station_name,
             )
-            result = emtf_rs.estimate_single_station_spectrum(
-                ex_arr, ey_arr, hx_arr, hy_arr, **kwargs
-            )
-
-            self._spectrum = result
-            self._result = result
-            self._build_bands()
-            self._display_result(result)
-            self.result_ready.emit(result)
-            self.status_label.setText(
-                f"完成 — {len(result.frequencies_hz)} 个频率, {result.segment_count} 个时间窗"
+            idx = pkg.get("datetime_index")
+            start_time = idx[start] if idx is not None and start < len(idx) else ""
+            end_time = idx[end - 1] if idx is not None and end > 0 and end <= len(idx) else ""
+            context = {
+                "method": "robust estimate",
+                "station_name": station_name,
+                "latitude": getattr(self._station_metadata, "latitude", 0.0) or 0.0,
+                "longitude": getattr(self._station_metadata, "longitude", 0.0) or 0.0,
+                "elevation": getattr(self._station_metadata, "elevation", 0.0) or 0.0,
+                "range_start": start_time,
+                "range_end": end_time,
+                "channels": {"Ex": ch_ex, "Ey": ch_ey, "Hx": ch_hx, "Hy": ch_hy, "Hz": ch_hz},
+                "parameters": {
+                    "start": start, "end": end, "backend": backend, "window_size": window_size,
+                    "fft_window_size": self.fft_window_combo.currentData(),
+                    "step_pct": self.step_pct_spin.value(), "bands": self.bands_spin.value(),
+                    "huber_threshold": self.huber_spin.value(),
+                    "max_iterations": self.max_iter_spin.value(), "tolerance": self.tol_spin.value(),
+                },
+            }
+            self._pending_context = context
+            self._task_generation += 1
+            generation = self._task_generation
+            self._estimation_future = run_in_pool(
+                "compute", _estimate_single_task, backend,
+                (ex_arr, ey_arr, hx_arr, hy_arr, hz_arr),
+                (ch_ex, ch_ey, ch_hx, ch_hy, ch_hz), kwargs, generation,
+                on_done=self._on_estimation_done,
+                on_error=self._on_estimation_error,
+                owner=self,
             )
 
         except Exception as e:
             logger.exception("Robust estimation failed")
             QMessageBox.critical(self, "估计失败", str(e))
             self.status_label.setText("失败")
-        finally:
             self.run_button.setEnabled(True)
+            self.cancel_button.setEnabled(False)
 
-    def _build_bands(self):
+    def _on_estimation_done(self, completed: tuple) -> None:
+        generation, result, error = completed
+        if generation != self._task_generation:
+            return
+        if error is not None:
+            self._on_estimation_error(error)
+            return
+        self._estimation_future = None
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self._spectrum = result
+        self._result = result
+        self._calculation_context = self._pending_context
+        self._build_bands(
+            backend=self._calculation_context["parameters"]["backend"],
+            window_size=self._calculation_context["parameters"]["window_size"],
+            n_bands=self._calculation_context["parameters"]["bands"],
+        )
+        self._display_result(result)
+        self._saved_current = False
+        self.save_preview_btn.setEnabled(self._bands is not None)
+        self.save_preview_btn.setText("保存到阻抗预览")
+        self.view_preview_btn.setVisible(False)
+        self.status_label.setText(f"完成 — {len(result.frequencies_hz)} 个频率, {result.segment_count} 个时间窗")
+
+    def _on_estimation_error(self, error: BaseException) -> None:
+        if self._estimation_future is None:
+            return
+        self._estimation_future = None
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        logger.exception("Robust estimation failed", exc_info=error)
+        QMessageBox.critical(self, "估计失败", str(error))
+        self.status_label.setText("失败")
+
+    def _cancel_estimation(self) -> None:
+        if self._estimation_future is None:
+            return
+        self._task_generation += 1
+        self._estimation_future.cancel()
+        self._estimation_future = None
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self.status_label.setText("已取消；后台原生调用若已开始会在完成后丢弃结果")
+
+    def _build_bands(self, backend=None, window_size=None, n_bands=None):
         """从 spectrum 构建 BandedResult，period 范围 2*dt ~ w*dt 对数均分。"""
         if self._spectrum is None:
             self._bands = None
             return
-        if self._current_backend() == BACKEND_EMTF_PYWRAP:
+        backend = backend or self._current_backend()
+        if backend == BACKEND_EMTF_PYWRAP:
             from emtf.io import from_result
 
             self._bands = from_result(self._spectrum, station_name=self._spectrum.station_name, mode="ss")
@@ -1046,8 +1170,8 @@ class RobustEstimateWidget(QWidget):
             self._bands = None
             return
         dt = self._pkg['dt']
-        w = self.window_combo.currentData()
-        n_bands = self.bands_spin.value()
+        w = window_size or self.window_combo.currentData()
+        n_bands = n_bands or self.bands_spin.value()
         periods = np.logspace(np.log10(2 * dt), np.log10(w * dt), n_bands)
         band_configs = build_band_configs(periods)
         self._bands = self._spectrum.to_bands(band_configs)
@@ -1059,9 +1183,35 @@ class RobustEstimateWidget(QWidget):
         """频带数量变更时重建 bands 并刷新对比图。"""
         if self._spectrum is None:
             return
-        self._build_bands()
-        self._display_tipper_result()
-        self._draw_comparison_plot()
+        self._mark_parameters_changed()
+
+    def _mark_parameters_changed(self, *_args) -> None:
+        if not self._calculation_context or self._spectrum is None:
+            return
+        if self._current_calculation_signature() != self._saved_calculation_signature():
+            self.save_preview_btn.setEnabled(False)
+            self.status_label.setText("参数或通道已更改，请重新运行后再保存")
+
+    def _current_calculation_signature(self) -> tuple:
+        return (
+            self.start_spin.value(), self.end_spin.value(), self._current_backend(),
+            self.window_combo.currentData(), self.fft_window_combo.currentData(),
+            self.step_pct_spin.value(), self.huber_spin.value(), self.max_iter_spin.value(),
+            self.tol_spin.value(), self.bands_spin.value(), self.ch_combo_ex.currentData(),
+            self.ch_combo_ey.currentData(), self.ch_combo_hx.currentData(),
+            self.ch_combo_hy.currentData(), self.ch_combo_hz.currentData(),
+        )
+
+    def _saved_calculation_signature(self) -> tuple:
+        params = self._calculation_context.get("parameters", {})
+        channels = self._calculation_context.get("channels", {})
+        return (
+            params.get("start"), params.get("end"), params.get("backend"),
+            params.get("window_size"), params.get("fft_window_size"), params.get("step_pct"),
+            params.get("huber_threshold"), params.get("max_iterations"), params.get("tolerance"),
+            params.get("bands"), channels.get("Ex"), channels.get("Ey"), channels.get("Hx"),
+            channels.get("Hy"), channels.get("Hz"),
+        )
 
     def _display_tipper_result(self):
         """Fill the tipper table from the banded result used by EDI/Z-file export."""
@@ -1103,85 +1253,9 @@ class RobustEstimateWidget(QWidget):
         self._draw_tipper_plot()
 
     def _draw_tipper_plot(self):
-        """Draw Tzx/Tzy real and imaginary components with error bars."""
-        result = self._bands
-        if result is None or not self._hz_channel_selected():
-            self.tipper_fig.clear()
-            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-            self.tipper_canvas.draw()
-            return
-
-        tzx = getattr(result, "tzx", None)
-        tzy = getattr(result, "tzy", None)
-        tzx_se = getattr(result, "tzx_se", None)
-        tzy_se = getattr(result, "tzy_se", None)
-        if tzx is None or tzy is None or tzx_se is None or tzy_se is None:
-            self.tipper_fig.clear()
-            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-            self.tipper_canvas.draw()
-            return
-
-        p = np.asarray(result.periods, dtype=float)
-        tzx = np.asarray(tzx, dtype=np.complex128)
-        tzy = np.asarray(tzy, dtype=np.complex128)
-        tzx_se = np.asarray(tzx_se, dtype=float)
-        tzy_se = np.asarray(tzy_se, dtype=float)
-        n = min(len(p), len(tzx), len(tzy), len(tzx_se), len(tzy_se))
-        finite = (
-            np.isfinite(p[:n]) & (p[:n] > 0)
-            & np.isfinite(tzx[:n].real) & np.isfinite(tzx[:n].imag)
-            & np.isfinite(tzy[:n].real) & np.isfinite(tzy[:n].imag)
-        )
-        if not finite.any():
-            self.tipper_fig.clear()
-            configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-            self.tipper_canvas.draw()
-            return
-
-        p = p[:n][finite]
-        tzx = tzx[:n][finite]
-        tzy = tzy[:n][finite]
-        tzx_se = tzx_se[:n][finite]
-        tzy_se = tzy_se[:n][finite]
-
-        self.tipper_fig.clear()
-        ax1, ax2 = self.tipper_fig.subplots(2, 1)
-        amp_phase = getattr(self, "tipper_mode_combo", None)
-        amp_phase = amp_phase is not None and amp_phase.currentData() == "amp_phase"
-        if amp_phase:
-            ax1.errorbar(p, np.abs(tzx), yerr=tzx_se, fmt='o', color='purple',
-                         capsize=3, markersize=5, label='|Tzx|')
-            ax1.errorbar(p, np.abs(tzy), yerr=tzy_se, fmt='s', color='green',
-                         capsize=3, markersize=5, label='|Tzy|')
-        else:
-            ax1.errorbar(p, tzx.real, yerr=tzx_se, fmt='o', color='purple',
-                         capsize=3, markersize=5, label='Re(Tzx)')
-            ax1.errorbar(p, tzy.real, yerr=tzy_se, fmt='s', color='green',
-                         capsize=3, markersize=5, label='Re(Tzy)')
-        ax1.set_xscale('log')
-        ax1.set_ylabel('Amplitude' if amp_phase else 'Real')
-        ax1.set_title('倾子响应幅值' if amp_phase else '倾子响应实部')
-        ax1.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
-        ax1.grid(True, alpha=0.3)
-
-        if amp_phase:
-            ax2.errorbar(p, emtf_phase_deg(tzx), yerr=np.degrees(tzx_se / np.maximum(np.abs(tzx), 1e-20)), fmt='o', color='purple',
-                         capsize=3, markersize=5, label='arg(Tzx)')
-            ax2.errorbar(p, emtf_phase_deg(tzy), yerr=np.degrees(tzy_se / np.maximum(np.abs(tzy), 1e-20)), fmt='s', color='green',
-                         capsize=3, markersize=5, label='arg(Tzy)')
-        else:
-            ax2.errorbar(p, tzx.imag, yerr=tzx_se, fmt='o', color='purple',
-                         capsize=3, markersize=5, label='Im(Tzx)')
-            ax2.errorbar(p, tzy.imag, yerr=tzy_se, fmt='s', color='green',
-                         capsize=3, markersize=5, label='Im(Tzy)')
-        ax2.set_xscale('log')
-        ax2.set_xlabel('Period (s)')
-        ax2.set_ylabel('Phase (°)' if amp_phase else 'Imaginary')
-        ax2.set_title('倾子响应相位' if amp_phase else '倾子响应虚部')
-        ax2.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
-        ax2.grid(True, alpha=0.3)
-        configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
-        self.tipper_canvas.draw()
+        result = self._bands if self._hz_channel_selected() else None
+        mode = self.tipper_mode_combo.currentData() if hasattr(self, "tipper_mode_combo") else "re_im"
+        draw_tipper_response(self.tipper_fig, self.tipper_canvas, result, str(mode), self)
 
     def _display_result(self, result):
         """将 SpectrumResult 填充到表格中，并用 to_bands 后的 BandedResult 画图。"""
@@ -1233,68 +1307,7 @@ class RobustEstimateWidget(QWidget):
         self._draw_comparison_plot()
 
     def _draw_comparison_plot(self):
-        """用 matplotlib 绘制视电阻率和相位的误差棒对比图。"""
-        if self._bands is None:
-            self.mpl_fig.clear()
-            configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
-            self.mpl_canvas.draw()
-            return
-
-        result = self._bands
-
-        p = np.array(result.periods)
-        finite = np.isfinite(p) & (p > 0)
-        if not finite.any():
-            self.mpl_fig.clear()
-            configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
-            self.mpl_canvas.draw()
-            return
-
-        p = p[finite]
-        rho_xy = np.array(result.rho_xy)[finite]
-        rho_xy_se = np.array(result.rho_xy_se)[finite]
-        phi_xy = emtf_phase_deg(np.asarray(result.zxy))[finite]
-        phi_xy_se = np.array(result.phi_xy_se)[finite]
-        rho_yx = np.array(result.rho_yx)[finite]
-        rho_yx_se = np.array(result.rho_yx_se)[finite]
-        phi_yx = emtf_phase_deg(np.asarray(result.zyx))[finite]
-        phi_yx_se = np.array(result.phi_yx_se)[finite]
-
-        self.mpl_fig.clear()
-        ax1, ax2 = self.mpl_fig.subplots(2, 1)
-
-        ax1.errorbar(p, rho_xy, yerr=rho_xy_se,
-                     fmt='o', color='red', capsize=3, markersize=5,
-                     label='ρxy (Ω·m)')
-        ax1.errorbar(p, rho_yx, yerr=rho_yx_se,
-                     fmt='s', color='blue', capsize=3, markersize=5,
-                     label='ρyx (Ω·m)')
-        ax1.set_yscale('log')
-        ax1.set_xscale('log')
-        ax1.set_ylabel('Apparent Resistivity (Ω·m)')
-        ax1.set_xlabel('Period (s)')
-        ax1.set_title('视电阻率')
-        ax1.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
-        ax1.grid(True, alpha=0.3)
-
-        ax2.errorbar(p, phi_xy, yerr=phi_xy_se,
-                     fmt='o', color='red', capsize=3, markersize=5,
-                     label='φxy (°)')
-        ax2.errorbar(p, phi_yx, yerr=phi_yx_se,
-                     fmt='s', color='blue', capsize=3, markersize=5,
-                     label='φyx (°)')
-        ax2.set_xscale('log')
-        ax2.set_xlabel('Period (s)')
-        ax2.set_ylabel('Phase (°)')
-        ax2.set_title('相位')
-        # 与 EMTF MATLAB 的 set_lims/pltrhom 对齐：相位绘图区固定为
-        # [-180, 180]。phi_se 仍保留原始标准误，不在数据层截断。
-        ax2.set_ylim(-180.0, 180.0)
-        ax2.legend(loc='best', fontsize=7, framealpha=0.4, edgecolor='none')
-        ax2.grid(True, alpha=0.3)
-
-        configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
-        self.mpl_canvas.draw()
+        draw_impedance_response(self.mpl_fig, self.mpl_canvas, self._bands, self)
 
     def result(self):
         """返回最近一次计算结果。"""
@@ -1310,18 +1323,53 @@ class RobustEstimateWidget(QWidget):
             QTableWidget.keyPressEvent(self.table, event)
 
     def _on_table_context_menu(self, pos):
-        """右键菜单：复制 / 输出阻抗。"""
+        """右键菜单：复制。"""
         table = self.sender()
         if not isinstance(table, QTableWidget):
             table = self.table
         menu = QMenu()
         copy_action = menu.addAction("复制")
-        edi_action = menu.addAction("输出阻抗...")
         action = menu.exec(table.viewport().mapToGlobal(pos))
         if action is copy_action:
             self._copy_selection()
-        elif action is edi_action:
-            self._export_edi()
+
+    def _save_to_preview(self) -> None:
+        if self._bands is None or not self._calculation_context:
+            QMessageBox.warning(self, "无结果", "请先运行估计。")
+            return
+        if self._saved_current:
+            return
+        if self._current_calculation_signature() != self._saved_calculation_signature():
+            QMessageBox.warning(self, "参数已更改", "参数或通道已更改，请重新运行后再保存。")
+            return
+        payload = dict(self._calculation_context)
+        payload["bands"] = self._bands
+        self.snapshot_save_requested.emit(payload)
+        self._saved_current = True
+        self.save_preview_btn.setEnabled(False)
+        self.save_preview_btn.setText("已保存到阻抗预览")
+        self.view_preview_btn.setVisible(True)
+        self.status_label.setText(self.status_label.text() + "；已暂存")
+
+    def closeEvent(self, event) -> None:
+        if self._estimation_future is not None:
+            reply = QMessageBox.question(
+                self, "计算正在运行", "阻抗计算仍在后台运行，关闭后将丢弃计算结果。仍要关闭吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._cancel_estimation()
+        if self._bands is not None and not self._saved_current:
+            reply = QMessageBox.question(
+                self, "结果尚未保存", "当前计算结果尚未保存到阻抗预览，仍要关闭吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        super().closeEvent(event)
 
     def _copy_selection(self):
         """将当前标签页的选中内容以 TSV 格式复制到剪贴板。"""

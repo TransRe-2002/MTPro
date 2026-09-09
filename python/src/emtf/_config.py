@@ -6,7 +6,8 @@ into a :class:`Workspace` before invoking the binary.
 """
 
 from textwrap import dedent
-from typing import Sequence
+from pathlib import Path
+from collections.abc import Sequence
 
 from emtf.types import DecimationLevel, FrequencyBand, ProcessingOptions
 
@@ -81,20 +82,36 @@ def render_options(opts: ProcessingOptions) -> str:
 
 
 def render_tranmt_control(
-    runs: Sequence[tuple[str, str, int, int, str, bool]],
+    runs: Sequence[
+        tuple[
+            str,
+            str,
+            Sequence[tuple[Sequence[str | Path], int]],
+            bool,
+        ]
+    ],
 ) -> str:
     """Render a ``tranmt.cfg`` — control file listing processing runs.
 
-    Each element: ``(station_name, options_cfg, num_stations, num_fc_files,
-    num_channels, fc_file, continue_flag)``.
+    Each element is ``(station_name, options_cfg, groups, continue_flag)``.
+    ``groups`` contains one ``(fc_files, num_channels)`` item for each
+    channel group.  A remote-reference run has two groups: the local station
+    followed by the remote magnetic-reference station.
     """
     out = []
-    for i, (name, opt_cfg, n_sta, n_fc, n_ch, fc_file, cont) in enumerate(runs):
+    for name, opt_cfg, groups, cont in runs:
+        if not groups:
+            raise ValueError("tranmt control requires at least one FC group")
         out.append(name)
         out.append(opt_cfg)
-        out.append(str(n_sta))
-        out.append(f"{n_fc}  {n_ch}")
-        out.append(fc_file)
+        out.append(str(len(groups)))
+        for fc_files, n_ch in groups:
+            if not fc_files:
+                raise ValueError("each tranmt FC group requires at least one file")
+            if n_ch < 1:
+                raise ValueError("tranmt channel counts must be positive")
+            out.append(f"{len(fc_files)}  {n_ch}")
+            out.extend(Path(fc_file).name for fc_file in fc_files)
         out.append("y" if cont else "n")
     return "\n".join(out) + "\n"
 

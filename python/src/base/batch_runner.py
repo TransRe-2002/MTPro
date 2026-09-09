@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from concurrent.futures import Future
-from typing import Any, Iterable, Mapping
+from typing import Any
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -50,7 +51,9 @@ class BatchRunner:
         }
 
     def run_target(self, recipe: Recipe, target: BatchTarget) -> BatchTargetResult:
-        current = target.series.copy()
+        index = target.series.index
+        name = target.series.name
+        current_values = target.series.to_numpy(dtype=np.float64, copy=True)
         diagnostics: list[Mapping[str, Any]] = []
         skipped: list[str] = []
         try:
@@ -58,25 +61,34 @@ class BatchRunner:
                 plugin = self.plugins.get(step.plugin)
                 if plugin is None:
                     raise KeyError(f"plugin is not loaded: {step.plugin}")
-                if self._point_indices_misaligned(step, current.index):
+                if self._point_indices_misaligned(step, index):
                     skipped.append(f"step {position} ({step.plugin}): sample interval mismatch")
                     continue
-                selection = self._selection(current.index, step.time_range)
-                if selection.size == 0:
+                selection = self._selection(index, step.time_range)
+                selection_index = index[selection]
+                if len(selection_index) == 0:
                     skipped.append(f"step {position} ({step.plugin}): empty time range")
                     continue
-                sliced = current.iloc[selection]
+                # Plugins receive an isolated region copy so an implementation
+                # cannot mutate the batch working buffer through pandas.  The
+                # full channel itself is allocated only once per target.
+                sliced = pd.Series(
+                    np.array(current_values[selection], copy=True),
+                    index=selection_index,
+                    name=name,
+                )
                 block = ChannelBlock(target.channel, sliced, target.meta)
                 result, _params = run_plugin_process(plugin, block, step.params)
-                output = current.to_numpy(dtype=np.float64, copy=True)
-                output[selection] = result.series.to_numpy(dtype=np.float64)
-                current = pd.Series(output, index=current.index, name=current.name)
+                current_values[selection] = result.series.to_numpy(
+                    dtype=np.float64,
+                    copy=False,
+                )
                 diagnostics.append(dict(result.diagnostics))
         except Exception as exc:
             return BatchTargetResult(
                 target=target,
                 status="error",
-                series=current,
+                series=pd.Series(current_values, index=index, name=name, copy=False),
                 diagnostics=tuple(diagnostics),
                 skipped_steps=tuple(skipped),
                 error=repr(exc),
@@ -84,21 +96,30 @@ class BatchRunner:
         return BatchTargetResult(
             target=target,
             status="ok",
-            series=current,
+            series=pd.Series(current_values, index=index, name=name, copy=False),
             diagnostics=tuple(diagnostics),
             skipped_steps=tuple(skipped),
         )
 
     @staticmethod
-    def _selection(index: pd.DatetimeIndex, time_range: tuple[str, str] | None) -> np.ndarray:
+    def _selection(
+        index: pd.DatetimeIndex,
+        time_range: tuple[str, str] | None,
+    ) -> slice | np.ndarray:
         if time_range is None:
-            return np.arange(len(index), dtype=np.intp)
+            return slice(0, len(index))
         start = pd.Timestamp(time_range[0])
         end = pd.Timestamp(time_range[1])
         if index.tz is not None:
             start = start.tz_localize(index.tz) if start.tzinfo is None else start.tz_convert(index.tz)
             end = end.tz_localize(index.tz) if end.tzinfo is None else end.tz_convert(index.tz)
-        return np.flatnonzero((index >= min(start, end)) & (index <= max(start, end)))
+        lower, upper = min(start, end), max(start, end)
+        if index.is_monotonic_increasing:
+            return slice(
+                int(index.searchsorted(lower, side="left")),
+                int(index.searchsorted(upper, side="right")),
+            )
+        return np.flatnonzero((index >= lower) & (index <= upper))
 
     @staticmethod
     def _point_indices_misaligned(step: RecipeStep, index: pd.DatetimeIndex) -> bool:

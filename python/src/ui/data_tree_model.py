@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set
 
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt
 
@@ -17,14 +16,14 @@ class DataTreeModel(QAbstractItemModel):
     def __init__(self, data_manager: DataManager, parent=None):
         super().__init__(parent)
         self.data_manager = data_manager
-        self._keys: List[int] = [key for key, _ in self.data_manager.items()]
-        self._row_by_key: Dict[int, int] = {
+        self._keys: list[int] = [key for key, _ in self.data_manager.items()]
+        self._row_by_key: dict[int, int] = {
             key: row for row, key in enumerate(self._keys)
         }
-        self._checked_channels: Dict[int, Set[str]] = {}
+        self._checked_channels: dict[int, set[str]] = {}
         # 通道行实时派生自 em_data.chid（无缓存），但行增删通知需要
         # 变更前的行数——这里记录每个数据集的通道数快照
-        self._channel_counts: Dict[int, int] = {
+        self._channel_counts: dict[int, int] = {
             key: self._dataset_channel_count(key) for key in self._keys
         }
 
@@ -185,8 +184,8 @@ class DataTreeModel(QAbstractItemModel):
             return "数据名称"
         return None
 
-    def checked_channel_refs(self) -> List[tuple[int, str]]:
-        result: List[tuple[int, str]] = []
+    def checked_channel_refs(self) -> list[tuple[int, str]]:
+        result: list[tuple[int, str]] = []
         for key in self._keys:
             em_data = self.data_manager.get(key)
             if em_data is None:
@@ -214,7 +213,7 @@ class DataTreeModel(QAbstractItemModel):
     def is_channel_index(self, index: QModelIndex) -> bool:
         return index.isValid() and index.internalId() != self._ROOT_ID
 
-    def dataset_key(self, index: QModelIndex) -> Optional[int]:
+    def dataset_key(self, index: QModelIndex) -> int | None:
         if not index.isValid():
             return None
 
@@ -232,7 +231,7 @@ class DataTreeModel(QAbstractItemModel):
             return QModelIndex()
         return self.index(row, 0)
 
-    def channel_name(self, index: QModelIndex) -> Optional[str]:
+    def channel_name(self, index: QModelIndex) -> str | None:
         if not self.is_channel_index(index):
             return None
 
@@ -327,13 +326,13 @@ class DataTreeModel(QAbstractItemModel):
         for row in range(start, len(self._keys)):
             self._row_by_key[self._keys[row]] = row
 
-    def _key_at_row(self, row: int) -> Optional[int]:
+    def _key_at_row(self, row: int) -> int | None:
         if 0 <= row < len(self._keys):
             return self._keys[row]
         return None
 
     @staticmethod
-    def _channel_names(em_data: EMData) -> List[str]:
+    def _channel_names(em_data: EMData) -> list[str]:
         if getattr(em_data, "chid", None):
             return list(em_data.chid)
         return em_data.channel_names()

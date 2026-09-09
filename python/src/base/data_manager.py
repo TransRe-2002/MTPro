@@ -1,4 +1,4 @@
-from typing import Dict, Iterator, Optional, Tuple
+from collections.abc import Iterator
 
 from PySide6.QtCore import Signal, QObject
 
@@ -8,14 +8,14 @@ class DataManager(QObject):
     data_added = Signal(int)
     data_removed = Signal(int)
     active_changed = Signal(int)
-    # 数据集内容被就地修改（预处理）。第二个参数为 structural：
+    # 数据集内容被就地修改。第二个参数为 structural：
     #   True  — npts/dt/通道集变化，波形视图需完整重建
-    #   False — 仅元数据变化，刷新树与摘要即可
+    #   False — 通道数值或元数据变化，无需完整重建波形视图
     data_changed = Signal(int, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._em_datas: Dict[int, EMData] = {}
+        self._em_datas: dict[int, EMData] = {}
         self._next_key = 1
         self._active_id = 0
 
@@ -37,12 +37,12 @@ class DataManager(QObject):
         self.data_removed.emit(key)
         return True
 
-    def get(self, key: int) -> Optional[EMData]:
+    def get(self, key: int) -> EMData | None:
         if key == 0:
             return None
         return self._em_datas.get(key)
 
-    def items(self) -> Iterator[Tuple[int, EMData]]:
+    def items(self) -> Iterator[tuple[int, EMData]]:
         return iter(self._em_datas.items())
 
     def set_active(self, key: int) -> bool:
@@ -58,7 +58,7 @@ class DataManager(QObject):
     def active_id(self) -> int:
         return self._active_id
 
-    def active_data(self) -> Optional[EMData]:
+    def active_data(self) -> EMData | None:
         return self.get(self._active_id)
 
     def notify_changed(self, key: int, structural: bool = False) -> None:

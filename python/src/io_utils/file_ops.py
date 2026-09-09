@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 from core.em_data import EMData
 from io_utils.mat_io import MatLoader, MatSaver
@@ -40,7 +39,7 @@ def batch_save_mat(
     items: list[tuple[int, EMData]],
     folder: str,
     suffix: str,
-    progress_callback: Optional[callable] = None,
+    progress_callback: callable | None = None,
 ) -> tuple[int, int]:
     """Save every dataset in *items* into *folder* as ``{name}{suffix}.mat``.
 

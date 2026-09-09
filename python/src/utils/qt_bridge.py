@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import CancelledError, Future
-from typing import Any, Callable, Optional
+from typing import Any
+from collections.abc import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 
 from utils.concurrency import submit as _pool_submit
 
@@ -59,9 +60,9 @@ def run(
     kind: str,
     fn: Callable[..., Any],
     *args: Any,
-    on_done: Optional[Callable[[Any], None]] = None,
-    on_error: Optional[Callable[[BaseException], None]] = None,
-    owner: Optional[QObject] = None,
+    on_done: Callable[[Any], None] | None = None,
+    on_error: Callable[[BaseException], None] | None = None,
+    owner: QObject | None = None,
     **kwargs: Any,
 ) -> Future:
     """提交任务并自动把结果桥接回主线程。
@@ -77,12 +78,14 @@ def run(
         任务的 Future（可用于取消等控制）。
     """
     bridge = FutureBridge(owner)
+    queued = Qt.ConnectionType.QueuedConnection
     if on_done is not None:
-        bridge.done.connect(on_done)
+        bridge.done.connect(on_done, type=queued)
     if on_error is not None:
-        bridge.failed.connect(on_error)
+        bridge.failed.connect(on_error, type=queued)
     else:
         bridge.failed.connect(
-            lambda exc: logger.error("后台任务失败: %r", exc)
+            lambda exc: logger.error("后台任务失败: %r", exc),
+            type=queued,
         )
     return bridge.attach(_pool_submit(kind, fn, *args, **kwargs))

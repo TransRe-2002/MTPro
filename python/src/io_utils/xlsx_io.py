@@ -10,7 +10,7 @@ from concurrent.futures import as_completed
 from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 from xml.etree.ElementTree import fromstring, iterparse
 from zipfile import ZipFile
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -22,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 
-PIXEL_PRESETS: list[tuple[str, Optional[tuple[int, int]]]] = [
+PIXEL_PRESETS: list[tuple[str, tuple[int, int] | None]] = [
     ("640 x 480", (640, 480)),
     ("800 x 600", (800, 600)),
     ("1024 x 768", (1024, 768)),
@@ -49,7 +48,7 @@ def sanitize_filename(value: str) -> str:
 class MatplotlibExportDialog(QDialog):
     def __init__(
         self,
-        parent: Optional[QWidget],
+        parent: QWidget | None,
         default_directory: str | Path,
         default_name: str,
     ) -> None:
@@ -216,7 +215,7 @@ def export_matplotlib_figure_with_dialog(
     *,
     default_directory: str | Path,
     default_name: str,
-) -> Optional[Path]:
+) -> Path | None:
     dialog = MatplotlibExportDialog(parent, default_directory, default_name)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None

@@ -5,6 +5,8 @@ from plugin_api import ParamSpec, PluginInfo, TransformResult
 
 
 class MorphologicalFilterPlugin:
+    pipeline_preview = True
+
     info = PluginInfo(
         plugin_id="morphological_filter",
         display_name="形态滤波",

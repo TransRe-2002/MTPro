@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from typing import List, Optional, Union
 import pytz
 from scipy.io import loadmat, savemat
 from scipy.io.matlab import MatlabObject, MatlabOpaque
@@ -180,7 +179,7 @@ def _make_timestamp_(start: pd.Timestamp, dt_sec: float, npts: int) -> np.ndarra
     return arr.reshape(1, -1)   # 存为 1×npts 行向量，与 MATLAB 一致
 
 
-def _make_cell_row_(str_list: List[str]) -> np.ndarray:
+def _make_cell_row_(str_list: list[str]) -> np.ndarray:
     """
     字符串列表 → MATLAB 1×N cell 行向量。
     shape 必须是 (1, N)，否则 MATLAB 变量编辑器会报索引错误。

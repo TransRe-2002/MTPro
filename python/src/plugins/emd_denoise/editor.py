@@ -1,7 +1,7 @@
 """Parameter editor for EMD selected-IMF reconstruction."""
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 from PySide6 import QtWidgets
 

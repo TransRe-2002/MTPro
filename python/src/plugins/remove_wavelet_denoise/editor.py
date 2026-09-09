@@ -15,7 +15,6 @@ import argparse
 import os
 import sys
 import tomllib
-from typing import Optional
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
@@ -132,7 +131,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
     def __init__(self, source, channel_name: str, parent=None):
         super().__init__(source, channel_name, parent)
 
-        self.last_result: Optional[WaveletDenoiseResult] = None
+        self.last_result: WaveletDenoiseResult | None = None
         self.selected_indices: list[int] = []
         self.gain_spins: list[QDoubleSpinBox] = []
         self.log_messages: list[str] = []
@@ -142,7 +141,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.signal_plot_item = self.signal_plot_widget.getPlotItem()
         self.detail_plot_widget = pg.PlotWidget()
         self.detail_plot_item = self.detail_plot_widget.getPlotItem()
-        self.region_item: Optional[pg.LinearRegionItem] = None
+        self.region_item: pg.LinearRegionItem | None = None
         self.plot_splitter = None
 
         self.param_frame = None
@@ -779,7 +778,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
             return
         self._log(f"已导入小波去噪预设: {filename}")
 
-    def _processing_region(self) -> Optional[tuple[int, int]]:
+    def _processing_region(self) -> tuple[int, int] | None:
         if self.scope_combo.currentText() == "全通道":
             return 0, self.y_data.size - 1
         if not self.selected_indices:
@@ -954,7 +953,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.local_right_line.show()
         self._update_detail_energy_plot(self.last_result)
 
-    def _update_detail_energy_plot(self, result: Optional[WaveletDenoiseResult]) -> None:
+    def _update_detail_energy_plot(self, result: WaveletDenoiseResult | None) -> None:
         if result is None or result.detail_energy_before.size == 0:
             self.energy_before_bars.setOpts(x=np.array([1.0]), height=np.array([0.0]), width=0.36)
             self.energy_after_bars.setOpts(x=np.array([1.4]), height=np.array([0.0]), width=0.36)
@@ -987,7 +986,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
     # 区域选择（读）和业务逻辑
     # ------------------------------------------------------------------
 
-    def _read_region(self) -> Optional[tuple[int, int]]:
+    def _read_region(self) -> tuple[int, int] | None:
         return self._processing_region()
 
     def _clear_selection(self):
@@ -996,7 +995,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
     def _current_detail_gains(self) -> list[float]:
         return [float(spin.value()) for spin in self.gain_spins]
 
-    def _read_denoise_args(self) -> Optional[dict]:
+    def _read_denoise_args(self) -> dict | None:
         """在 UI 线程读取去噪所需的全部参数（含切片数据），返回纯数据 dict。
 
         返回 ``None`` 表示参数/区域不合法。返回的 dict 只含 numpy/标量，

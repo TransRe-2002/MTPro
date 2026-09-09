@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 
 class Workspace:
@@ -59,8 +59,8 @@ class Workspace:
 
 def run(
     binary: Path,
-    stdin: Optional[str] = None,
-    workspace: Optional[Workspace] = None,
+    stdin: str | None = None,
+    workspace: Workspace | None = None,
     timeout: int = 300,
     args: Sequence[str] = (),
 ) -> subprocess.CompletedProcess:

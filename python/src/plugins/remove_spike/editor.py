@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Set
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -44,27 +44,27 @@ class SpikePlotWidget(pg.PlotWidget):
         super().__init__(*args, **kwargs, axisItems={'bottom': pg.DateAxisItem()})
 
         # 数据存储
-        self.x_data: Optional[np.ndarray] = None
-        self.y_data: Optional[np.ndarray] = None
-        self.origin_y_data: Optional[np.ndarray] = None
-        self._display_x: Optional[np.ndarray] = None
-        self._display_y: Optional[np.ndarray] = None
+        self.x_data: np.ndarray | None = None
+        self.y_data: np.ndarray | None = None
+        self.origin_y_data: np.ndarray | None = None
+        self._display_x: np.ndarray | None = None
+        self._display_y: np.ndarray | None = None
         self.undo_stack: list[np.ndarray] = []  # 每次删除的索引数组
 
         # 离散选点
-        self.selected_points: Set[int] = set()
+        self.selected_points: set[int] = set()
 
         # 状态
         self.selection_mode: str = 'zoom'  # 'zoom' | 'select'
         self.is_selecting: bool = False
-        self.start_point: Optional[QtCore.QPointF] = None
-        self.end_point: Optional[QtCore.QPointF] = None
+        self.start_point: QtCore.QPointF | None = None
+        self.end_point: QtCore.QPointF | None = None
 
         # 图形项
-        self.selection_rect_item: Optional[QtWidgets.QGraphicsRectItem] = None
-        self._highlight_scatter: Optional[pg.ScatterPlotItem] = None
+        self.selection_rect_item: QtWidgets.QGraphicsRectItem | None = None
+        self._highlight_scatter: pg.ScatterPlotItem | None = None
         self._highlight_size: int = 5
-        self._plot_curve: Optional[pg.PlotCurveItem] = None
+        self._plot_curve: pg.PlotCurveItem | None = None
         self._rect_color: QtGui.QColor = QtGui.QColor(30, 144, 255, 180)
 
         self._setup_view()
@@ -426,12 +426,12 @@ class RemoveSpike(QtWidgets.QWidget):
         self.ch_name = channel_name
 
         # 待 _on_data_ready 填充
-        self.x_data: Optional[np.ndarray] = None
-        self.y_data: Optional[np.ndarray] = None
+        self.x_data: np.ndarray | None = None
+        self.y_data: np.ndarray | None = None
         self.all_channels: list[str] = []
         self.origin_all_channels: dict[str, np.ndarray] = {}
 
-        self.plot_widget: Optional[SpikePlotWidget] = None
+        self.plot_widget: SpikePlotWidget | None = None
         self.plot_item = None
 
         self.status_label = QtWidgets.QLabel("当前选中: 0 个数据点")

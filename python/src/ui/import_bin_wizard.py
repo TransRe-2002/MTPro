@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import  Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -112,7 +111,7 @@ CHANNEL_PRESETS: dict[str, dict] = {
 
 
 class ImportBinWizard(QWizard):
-    def __init__(self, data_manager: Optional[DataManager] = None, parent=None) -> None:
+    def __init__(self, data_manager: DataManager | None = None, parent=None) -> None:
         super().__init__(parent)
         self._data_manager = data_manager
         self._imported_key: int | None = None

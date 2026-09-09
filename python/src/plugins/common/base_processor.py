@@ -6,7 +6,6 @@ from __future__ import annotations
 工具不持有数据管理器引用；Pipeline 编辑器通过切片注入数据。
 """
 
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -14,6 +13,42 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import QProgressDialog, QSizePolicy, QWidget
 
 from utils.series import dti_to_numpy
+
+
+UNDO_HISTORY_MAX_BYTES = 128 * 1024 * 1024
+UNDO_HISTORY_MAX_STEPS = 20
+
+
+class _HistoryBuffer(list[np.ndarray]):
+    """List-compatible undo history with bounded retained array memory."""
+
+    def __init__(
+        self,
+        max_bytes: int = UNDO_HISTORY_MAX_BYTES,
+        max_steps: int = UNDO_HISTORY_MAX_STEPS,
+    ) -> None:
+        super().__init__()
+        self.max_bytes = max(1, int(max_bytes))
+        self.max_steps = max(1, int(max_steps))
+        self.total_bytes = 0
+
+    def append(self, snapshot: np.ndarray) -> None:
+        super().append(snapshot)
+        self.total_bytes += int(snapshot.nbytes)
+        while len(self) > 1 and (
+            len(self) > self.max_steps or self.total_bytes > self.max_bytes
+        ):
+            removed = super().pop(0)
+            self.total_bytes -= int(removed.nbytes)
+
+    def pop(self, index: int = -1) -> np.ndarray:
+        snapshot = super().pop(index)
+        self.total_bytes -= int(snapshot.nbytes)
+        return snapshot
+
+    def clear(self) -> None:
+        super().clear()
+        self.total_bytes = 0
 
 
 def build_pkg_from_series(channel_name: str, series: pd.Series) -> dict:
@@ -63,7 +98,7 @@ class BaseProcessorWidget(QWidget):
         self,
         source,
         channel_name: str,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ):
         """``source`` 可以是：
 
@@ -81,11 +116,11 @@ class BaseProcessorWidget(QWidget):
         self.ch_name = channel_name
 
         # 数据字段 — 由 _on_data_ready 填充
-        self.x_data: Optional[np.ndarray] = None
-        self.y_data: Optional[np.ndarray] = None
-        self.origin_y_data: Optional[np.ndarray] = None
-        self.nan_index: list[int] = []
-        self.history: list[np.ndarray] = []
+        self.x_data: np.ndarray | None = None
+        self.y_data: np.ndarray | None = None
+        self.origin_y_data: np.ndarray | None = None
+        self._nan_mask = np.empty(0, dtype=bool)
+        self.history: _HistoryBuffer = _HistoryBuffer()
         self._pkg: dict = {}
 
     # ─── 外部接线（data_process 调）─────────────────────
@@ -96,7 +131,7 @@ class BaseProcessorWidget(QWidget):
 
     # ─── 同步切片加载（pipeline 编辑器 / 测试入口）──────
 
-    def _resolve_series(self) -> Optional[pd.Series]:
+    def _resolve_series(self) -> pd.Series | None:
         source = self._source
         if isinstance(source, pd.Series):
             return source
@@ -133,10 +168,11 @@ class BaseProcessorWidget(QWidget):
         self._pkg = pkg
         self.x_data = pkg['x']
         raw_y = pkg['y']
-        self.nan_index = np.flatnonzero(pd.isna(raw_y)).tolist()
+        self._nan_mask = np.asarray(pd.isna(raw_y), dtype=bool)
         interpolated = pd.Series(raw_y).interpolate(method="linear")
         self.y_data = interpolated.to_numpy(dtype=np.float64)
         self.origin_y_data = self.y_data.copy()
+        self.history.clear()
 
         self._on_data_loaded()
 
@@ -185,9 +221,12 @@ class BaseProcessorWidget(QWidget):
 
     def _restore_nan(self, result: np.ndarray) -> np.ndarray:
         result = result.copy()
-        for idx in self.nan_index:
-            if 0 <= idx < len(result):
-                result[idx] = np.nan
+        if self._nan_mask.size == result.size:
+            result[self._nan_mask] = np.nan
+        elif self._nan_mask.size:
+            size = min(self._nan_mask.size, result.size)
+            indices = np.flatnonzero(self._nan_mask[:size])
+            result[indices] = np.nan
         return result
 
     def _confirm_and_close(self) -> None:

@@ -1,7 +1,7 @@
 """Parameter editor for VMD selected-mode reconstruction."""
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 from PySide6 import QtWidgets
 

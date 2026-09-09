@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import os
 import h5py
-from typing import Optional
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -37,7 +36,7 @@ def align_to_3hour_boundary(timestamp: pd.Timestamp, direction: str = 'floor') -
     return timestamp.replace(hour=aligned_hour, minute=0, second=0, microsecond=0)
 
 
-def fetch_kp(start: pd.Timestamp, end: pd.Timestamp, hdf5_path: str = 'kp.h5') -> Optional[pd.DataFrame]:
+def fetch_kp(start: pd.Timestamp, end: pd.Timestamp, hdf5_path: str = 'kp.h5') -> pd.DataFrame | None:
     """
     获取Kp指数数据，返回含 ['Kp_datetime', 'Kp'] 两列的DataFrame。
     优先从本地h5读取，缺失部分从网络补充并写回h5；网络不可用时缺失点填NaN。
@@ -149,7 +148,7 @@ def _to_output_df(df: pd.DataFrame) -> pd.DataFrame:
     return out[['Kp_datetime', 'Kp']]
 
 
-def _fetch_kp_from_network(fetch_start: pd.Timestamp, fetch_end: pd.Timestamp) -> Optional[pd.DataFrame]:
+def _fetch_kp_from_network(fetch_start: pd.Timestamp, fetch_end: pd.Timestamp) -> pd.DataFrame | None:
     """从GFZ网络获取Kp数据，返回以Kp_datetime为index的DataFrame，失败返回None"""
     try:
         params = urllib_parse.urlencode({
@@ -218,7 +217,7 @@ def _save_kp_internal(df: pd.DataFrame, hdf5_path: str):
         logger.warning("保存数据时出错: %s", e)
 
 
-def _load_kp_internal(hdf5_path: str) -> Optional[pd.DataFrame]:
+def _load_kp_internal(hdf5_path: str) -> pd.DataFrame | None:
     """从h5读取数据（h5py直读，无pytables依赖），返回以Kp_datetime为index的DataFrame"""
     if not os.path.exists(hdf5_path):
         logger.info("文件 %s 不存在", hdf5_path)

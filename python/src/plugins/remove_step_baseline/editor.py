@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Optional
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
@@ -50,7 +49,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
     def __init__(self, source, channel_name: str, parent=None):
         super().__init__(source, channel_name, parent)
 
-        self.last_result: Optional[RobustBaselineStepResult] = None
+        self.last_result: RobustBaselineStepResult | None = None
         self.selected_indices: list[int] = []
         self.log_messages: list[str] = []
 
@@ -59,7 +58,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         self.signal_plot_item = self.signal_plot_widget.getPlotItem()
         self.correction_plot_widget = StepPlotWidget()
         self.correction_plot_item = self.correction_plot_widget.getPlotItem()
-        self.region_item: Optional[pg.LinearRegionItem] = None
+        self.region_item: pg.LinearRegionItem | None = None
         self.plot_splitter = None
 
         self.param_frame = None
@@ -273,7 +272,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
     # 区域选择（读）和业务逻辑
     # ------------------------------------------------------------------
 
-    def _read_region(self) -> Optional[tuple[int, int]]:
+    def _read_region(self) -> tuple[int, int] | None:
         if not self.selected_indices:
             self._log("请先在上方主图中添加并调整连续阶跃区域")
             return None
@@ -282,7 +281,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
     def _clear_selection(self):
         self._remove_region()
 
-    def _read_fit_args(self) -> Optional[dict]:
+    def _read_fit_args(self) -> dict | None:
         """在 UI 线程读取拟合参数（含切片数据），返回纯数据 dict。"""
         region = self._read_region()
         if region is None:

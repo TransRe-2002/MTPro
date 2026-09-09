@@ -5,6 +5,8 @@ from plugin_api import ParamSpec, PluginInfo, TransformResult
 
 
 class DetrendPlugin:
+    pipeline_preview = True
+
     info = PluginInfo(
         plugin_id="detrend",
         display_name="去趋势",

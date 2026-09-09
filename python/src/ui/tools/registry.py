@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from PySide6.QtWidgets import QWidget
 
@@ -18,8 +18,8 @@ class ToolSpec:
     fields: tuple[tuple[str, str, type, object], ...] = ()
     has_channel_sync: bool = False
     has_region_sync: bool = False
-    output_factory: Optional[Callable[..., QWidget]] = None
-    pipeline_editor_factory: Optional[Callable[..., QWidget]] = None
+    output_factory: Callable[..., QWidget] | None = None
+    pipeline_editor_factory: Callable[..., QWidget] | None = None
 
 
 _REGISTRY: dict[str, ToolSpec] = {}
@@ -43,7 +43,10 @@ def toolspec_from_plugin(loaded_plugin) -> ToolSpec:
     from ui.plugin_adapter import create_pipeline_plugin_editor
 
     info = loaded_plugin.info
-    has_editor = callable(getattr(loaded_plugin.plugin, "create_editor", None))
+    has_editor = (
+        callable(getattr(loaded_plugin.plugin, "create_editor", None))
+        or bool(getattr(loaded_plugin.plugin, "pipeline_preview", False))
+    )
     fields = tuple(
         (param.name, param.label, param.type, param.default)
         for param in info.params_schema
@@ -75,7 +78,7 @@ def get_plugin(key: str):
     return _PLUGINS.get(spec.tool_id)
 
 
-def get(key: str) -> Optional[ToolSpec]:
+def get(key: str) -> ToolSpec | None:
     return _REGISTRY.get(key)
 
 
@@ -107,7 +110,7 @@ def is_station_tool(key: str) -> bool:
 def create_output_widget(
     key: str,
     data_id: int,
-) -> Optional[QWidget]:
+) -> QWidget | None:
     """Create a station-level output tool without a processing data path."""
     spec = _REGISTRY.get(key)
     if spec is None or spec.requires_channel or spec.output_factory is None:
@@ -119,8 +122,8 @@ def create_pipeline_editor(
     key: str,
     preview_channel,
     parent,
-    params: Optional[dict] = None,
-) -> Optional[QWidget]:
+    params: dict | None = None,
+) -> QWidget | None:
     """为 pipeline block 创建交互式编辑器，并同步注入 block 切片数据。
 
     ``preview_channel`` 是 ``PreviewChannelSlice(name, cts)``，其中 ``cts`` 是

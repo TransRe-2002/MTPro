@@ -10,7 +10,6 @@ import tomllib
 
 APP_NAME = "MTPro"
 APP_VERSION = "0.1.0"
-MAX_RECENT_FILES = 8
 
 
 @dataclass
@@ -69,7 +68,7 @@ def _normalize_recent_files(values: list[str]) -> list[str]:
             continue
         normalized.append(path)
         seen.add(path)
-    return normalized[:MAX_RECENT_FILES]
+    return normalized
 
 
 def _normalize_int_list(values: list[object]) -> list[int]:
@@ -186,11 +185,10 @@ def save_app_state(state: AppState, path: Path | None = None) -> Path:
 def remember_recent_file(
     state: AppState,
     filename: str,
-    max_items: int = MAX_RECENT_FILES,
 ) -> AppState:
     normalized = _normalize_path(filename)
     recent_files = [normalized] + [path for path in state.recent_files if _normalize_path(path) != normalized]
-    state.recent_files = _normalize_recent_files(recent_files)[:max(1, int(max_items))]
+    state.recent_files = _normalize_recent_files(recent_files)
     state.last_open_dir = str(Path(normalized).parent)
     return state
 

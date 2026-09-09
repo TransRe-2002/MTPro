@@ -112,3 +112,38 @@ def test_batch_submit_runs_multiple_targets():
 
     assert {result.target.key for result in results} == {(1, "Ex"), (2, "Hy")}
     assert all(np.isnan(result.series.iloc[0]) for result in results)
+
+
+def test_batch_runner_uses_a_contiguous_slice_for_sorted_time_ranges():
+    runner = BatchRunner(_plugin_map())
+    target = BatchTarget(1, "Ex", _series([1.0, 2.0, 3.0, 4.0]))
+    selection = runner._selection(
+        target.series.index,
+        (
+            target.series.index[1].isoformat(),
+            target.series.index[2].isoformat(),
+        ),
+    )
+    recipe = Recipe(
+        "remove one point in range",
+        (
+            RecipeStep(
+                "remove_spike",
+                {"indices": [0]},
+                (
+                    target.series.index[1].isoformat(),
+                    target.series.index[2].isoformat(),
+                ),
+            ),
+        ),
+    )
+
+    result = runner.run_target(recipe, target)
+
+    assert selection == slice(1, 3)
+    np.testing.assert_allclose(
+        result.series,
+        [1.0, np.nan, 3.0, 4.0],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(target.series, [1.0, 2.0, 3.0, 4.0])

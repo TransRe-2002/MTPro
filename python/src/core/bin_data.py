@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -24,10 +23,10 @@ class BinEMData(EMData):
         timezone: str,
         dt: pd.Timedelta,
         path: str,
-        lat: Optional[float]  = None,
-        lon: Optional[float] = None,
-        elev: Optional[float] = None,
-        name: Optional[str] = None,
+        lat: float | None  = None,
+        lon: float | None = None,
+        elev: float | None = None,
+        name: str | None = None,
     ):
         super().__init__(path)
         self.timezone = timezone

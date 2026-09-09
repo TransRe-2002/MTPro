@@ -30,7 +30,7 @@ Missing project Python:
   $PythonExe
 
 Create the Windows venv first, then install dependencies, for example:
-  py -3.13 -m venv python\.venv
+  py -3.14 -m venv python\.venv
   .\python\.venv\Scripts\python.exe -m pip install -r python\requirements.txt
   .\python\.venv\Scripts\python.exe -m pip install -r python\requirements-build.txt
 "@

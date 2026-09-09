@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from emtf.io.zfile import ZFileData
 
@@ -41,3 +42,19 @@ def test_zfile_impedance_properties_use_emtf_matlab_phase_convention():
     assert np.allclose(zdata.Zyx, [1.0 + 1.0j])
     assert np.allclose(zdata.phase_xy_deg(), [45.0])
     assert np.allclose(zdata.phase_yx_deg(), [45.0])
+
+
+def test_zfile_reader_reports_invalid_channel_counts_without_numpy_dimension_error(tmp_path):
+    z_path = tmp_path / "invalid.zrr"
+    z_path.write_text(
+        "header 1\n"
+        "header 2\n"
+        "Robust Remote Reference\n"
+        "station : TEST\n"
+        "coordinate 0 0 declination 0\n"
+        "number of channels 0 number of frequencies 1\n"
+        "orientations and tilts of each channel\n"
+    )
+
+    with pytest.raises(ValueError, match="expected at least four channels, got 0"):
+        ZFileData.read(z_path)

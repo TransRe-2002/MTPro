@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QByteArray, QMimeData, Qt, QModelIndex, Signal
 from PySide6.QtGui import QDrag, QFont
-from typing import Callable, Dict, Optional, Tuple
+from collections.abc import Callable
 
 from core.em_data import EMData
 from ui.data_process_shared import (
@@ -92,8 +92,8 @@ class DataTreeViewer(QWidget):
         self.tool_tree = None
         self.tool_model = None
         self.data_manager = data_manager
-        self._plot_panels: Dict[tuple[int, str], PlotPanel] = {}
-        self._spectrum_panels: Dict[tuple[int, str], EnergySpectrumWidget] = {}
+        self._plot_panels: dict[tuple[int, str], PlotPanel] = {}
+        self._spectrum_panels: dict[tuple[int, str], EnergySpectrumWidget] = {}
 
         self.activate_id = 0
         self.init_ui()
@@ -222,7 +222,7 @@ class DataTreeViewer(QWidget):
             if index.isValid() and self.tree_view.currentIndex() != index:
                 self.tree_view.setCurrentIndex(index)
 
-    def current_dataset_key(self) -> Optional[int]:
+    def current_dataset_key(self) -> int | None:
         if self.tree_view is None or self.model is None:
             return None
         current = self.tree_view.currentIndex()
@@ -230,7 +230,7 @@ class DataTreeViewer(QWidget):
             return None
         return self.model.dataset_key(current)
 
-    def current_dataset(self) -> Optional[EMData]:
+    def current_dataset(self) -> EMData | None:
         key = self.current_dataset_key()
         if key is None:
             return None
@@ -247,7 +247,7 @@ class DataTreeViewer(QWidget):
         for data_id, channel_name in refs:
             self.model.set_channel_checked(data_id, channel_name, False)
 
-    def current_channel_ref(self) -> Optional[tuple[int, str]]:
+    def current_channel_ref(self) -> tuple[int, str] | None:
         if self.tree_view is None or self.model is None:
             return None
 
@@ -261,7 +261,7 @@ class DataTreeViewer(QWidget):
             return None
         return key, channel_name
 
-    def current_drag_payload(self) -> Optional[dict]:
+    def current_drag_payload(self) -> dict | None:
         if self.tree_view is None or self.model is None:
             return None
 
@@ -403,10 +403,10 @@ class DataTreeViewer(QWidget):
 
     # ── 右键菜单 ────────────────────────────────────────────────
 
-    def _build_dataset_context_menu(self) -> Tuple[QMenu, Dict[object, Callable[[int], None]]]:
+    def _build_dataset_context_menu(self) -> tuple[QMenu, dict[object, Callable[[int], None]]]:
         """构建数据集级右键菜单，返回 (菜单, action→处理器) 映射。"""
         menu = QMenu(self)
-        actions: Dict[object, Callable[[int], None]] = {}
+        actions: dict[object, Callable[[int], None]] = {}
 
         for label, handler in (
             ("保存", self._action_save_dataset),
@@ -427,10 +427,10 @@ class DataTreeViewer(QWidget):
 
         return menu, actions
 
-    def _build_channel_context_menu(self) -> Tuple[QMenu, Dict[object, Callable[[int, str], None]]]:
+    def _build_channel_context_menu(self) -> tuple[QMenu, dict[object, Callable[[int, str], None]]]:
         """构建通道级右键菜单，返回 (菜单, action→处理器) 映射。"""
         menu = QMenu(self)
-        actions: Dict[object, Callable[[int, str], None]] = {}
+        actions: dict[object, Callable[[int, str], None]] = {}
 
         for label, handler in (
             ("显示曲线", self._open_channel_plot),

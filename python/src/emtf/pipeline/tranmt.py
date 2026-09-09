@@ -6,7 +6,7 @@ estimate magnetotelluric impedance tensors from Fourier coefficient
 """
 
 from pathlib import Path
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from emtf._binaries import resolve_binary
 from emtf._config import (
@@ -24,11 +24,12 @@ def tranmt(
     bands: Sequence[FrequencyBand],
     *,
     station_name: str = "station",
-    options: Optional[ProcessingOptions] = None,
+    options: ProcessingOptions | None = None,
     num_channels: int = 5,
-    remote_fc_files: Optional[Sequence[str | Path]] = None,
+    remote_fc_files: Sequence[str | Path] | None = None,
+    remote_num_channels: int | None = None,
     fc_dir: str = "FC",
-    workspace: Optional[Workspace] = None,
+    workspace: Workspace | None = None,
     cleanup: bool = True,
 ) -> Workspace:
     """Run ``tranmt`` to estimate transfer functions from FC files.
@@ -51,6 +52,10 @@ def tranmt(
     remote_fc_files:
         If given, enables remote-reference mode.  These FC files serve
         as the remote station.
+    remote_num_channels:
+        Number of channels in each remote FC file.  Defaults to
+        ``num_channels``.  The high-level remote-reference estimator writes
+        a two-channel remote Hx/Hy FC file, so it passes ``2`` here.
     fc_dir:
         Workspace-relative directory where FC files are copied.
     workspace:
@@ -64,8 +69,30 @@ def tranmt(
     typically in ``<workspace>/MT/``.
     """
     opts = options or ProcessingOptions()
-    is_rr = remote_fc_files is not None and len(remote_fc_files) > 0
-    is_ss = not is_rr
+    local_files = [Path(src) for src in fc_files]
+    remote_files = [Path(src) for src in remote_fc_files or []]
+    is_rr = bool(remote_files)
+    remote_channel_count = num_channels if remote_num_channels is None else remote_num_channels
+
+    if not local_files:
+        raise ValueError("tranmt requires at least one local FC file")
+    if opts.remote_reference and not is_rr:
+        raise ValueError("remote_reference=True requires at least one remote FC file")
+    if num_channels < 1:
+        raise ValueError("num_channels must be positive")
+    if is_rr and remote_channel_count < 1:
+        raise ValueError("remote_num_channels must be positive")
+
+    all_files = [*local_files, *remote_files]
+    missing_files = [str(src) for src in all_files if not src.is_file()]
+    if missing_files:
+        raise FileNotFoundError(f"FC input file(s) not found: {', '.join(missing_files)}")
+    duplicate_names = sorted({src.name for src in all_files if sum(f.name == src.name for f in all_files) > 1})
+    if duplicate_names:
+        raise ValueError(
+            "local and remote FC files must have distinct basenames: "
+            + ", ".join(duplicate_names)
+        )
 
     if is_rr:
         opts.remote_reference = True
@@ -92,27 +119,17 @@ def tranmt(
 
     # -- copy FC files ----------------------------------------------------
     (ws.path / fc_dir).mkdir(parents=True, exist_ok=True)
-    for src in fc_files:
-        src = Path(src)
+    for src in all_files:
         dest = ws.path / fc_dir / src.name
         if src.resolve() != dest.resolve():
             ws.write_binary(f"{fc_dir}/{src.name}", src)
 
-    n_fc = len(fc_files)
-    runs = [
-        (station_name, f"CF/{options_name}", 1, n_fc, num_channels,
-         Path(fc_files[0]).name, False)
-    ]
+    groups: list[tuple[Sequence[Path], int]] = [(local_files, num_channels)]
     if is_rr:
-        rr_files = list(remote_fc_files)  # type: ignore[arg-type]
-        n_rr = len(rr_files)
-        runs.append(
-            (f"{station_name}_RR", f"CF/{options_name}", 2, n_rr, num_channels,
-             Path(rr_files[0]).name, False)
-        )
-    # For multi-file FC input, we list all files for the local station
-    # in the tranmt.cfg.  This is a simplification — real surveys often
-    # concatenate multiple FC files.  See EMTF CF/README for details.
+        groups.append((remote_files, remote_channel_count))
+    runs = [
+        (station_name, f"CF/{options_name}", groups, False)
+    ]
 
     ws.write("tranmt.cfg", render_tranmt_control(runs))
     ws.write("MT/.gitkeep", "")

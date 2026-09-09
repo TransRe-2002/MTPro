@@ -294,6 +294,10 @@ def test_remove_step_window_user_max_steps_limit_is_applied(qtbot):
     widget.avg_window_edit.setText("2")
     widget.max_steps_edit.setText("1")
     widget._de_step_by_threshold()
+    qtbot.waitUntil(
+        lambda: "最多台阶=1" in widget.plain_text.toPlainText(),
+        timeout=10000,
+    )
 
     assert len(applied_steps) == 1
     np.testing.assert_allclose(widget.y_data, expected, atol=1e-8)

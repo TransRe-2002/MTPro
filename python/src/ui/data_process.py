@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import (
@@ -40,15 +40,15 @@ def _mdi_target_size(
 class WorkspaceMdiArea(QMdiArea):
     change_finished_signal = Signal(int, str)
 
-    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
+    def __init__(self, data_manager: DataManager | None = None, parent=None):
         super().__init__(parent)
         self.data_manager = data_manager
         self.data_id = 0
-        self.em_data: Optional[EMData] = None
-        self._context_resolver: Optional[Callable[[], Optional[tuple[int, str]]]] = None
-        self._selection_payload_resolver: Optional[Callable[[], Optional[dict]]] = None
-        self._clear_checked_channels: Optional[Callable[[list[tuple[int, str]]], None]] = None
-        self._last_pipeline_window: Optional[DataProcessPipelineWidget] = None
+        self.em_data: EMData | None = None
+        self._context_resolver: Callable[[], tuple[int, str] | None] | None = None
+        self._selection_payload_resolver: Callable[[], dict | None] | None = None
+        self._clear_checked_channels: Callable[[list[tuple[int, str]]], None] | None = None
+        self._last_pipeline_window: DataProcessPipelineWidget | None = None
         self.setAcceptDrops(True)
 
     def init_data(self, data, data_id: int = 0):
@@ -57,39 +57,39 @@ class WorkspaceMdiArea(QMdiArea):
 
     def set_context_resolver(
         self,
-        resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
+        resolver: Callable[[], tuple[int, str] | None] | None,
     ) -> None:
         self._context_resolver = resolver
 
     def set_selection_payload_resolver(
         self,
-        resolver: Optional[Callable[[], Optional[dict]]],
+        resolver: Callable[[], dict | None] | None,
     ) -> None:
         self._selection_payload_resolver = resolver
 
     def set_clear_checked_channels(
         self,
-        clearer: Optional[Callable[[list[tuple[int, str]]], None]],
+        clearer: Callable[[list[tuple[int, str]]], None] | None,
     ) -> None:
         self._clear_checked_channels = clearer
 
-    def active_pipeline_window(self) -> Optional[DataProcessPipelineWidget]:
+    def active_pipeline_window(self) -> DataProcessPipelineWidget | None:
         active = self.activeSubWindow()
         if active is None:
             return None
         widget = active.widget()
         return widget if isinstance(widget, DataProcessPipelineWidget) else None
 
-    def last_pipeline_window(self) -> Optional[DataProcessPipelineWidget]:
+    def last_pipeline_window(self) -> DataProcessPipelineWidget | None:
         return self._last_pipeline_window
 
-    def pipeline_subwindow(self, pipeline_widget: DataProcessPipelineWidget) -> Optional[QMdiSubWindow]:
+    def pipeline_subwindow(self, pipeline_widget: DataProcessPipelineWidget) -> QMdiSubWindow | None:
         for sub_window in self.subWindowList():
             if sub_window.widget() is pipeline_widget:
                 return sub_window
         return None
 
-    def activate_pipeline_window(self, pipeline_widget: Optional[DataProcessPipelineWidget]) -> bool:
+    def activate_pipeline_window(self, pipeline_widget: DataProcessPipelineWidget | None) -> bool:
         if pipeline_widget is None:
             return False
         sub_window = self.pipeline_subwindow(pipeline_widget)
@@ -103,7 +103,7 @@ class WorkspaceMdiArea(QMdiArea):
     def _apply_subwindow_size(
         self,
         sub_window: QMdiSubWindow,
-        position: Optional[QPoint] = None,
+        position: QPoint | None = None,
     ) -> None:
         target_width, target_height = _mdi_target_size(self, 1100, 720)
         if position is not None:
@@ -111,7 +111,7 @@ class WorkspaceMdiArea(QMdiArea):
         else:
             sub_window.resize(target_width, target_height)
 
-    def _present_subwindow(self, sub_window: Optional[QMdiSubWindow]) -> None:
+    def _present_subwindow(self, sub_window: QMdiSubWindow | None) -> None:
         if sub_window is None:
             return
         sub_window.show()
@@ -217,7 +217,7 @@ class WorkspaceMdiArea(QMdiArea):
         else:
             event.ignore()
 
-    def _subwindow_at(self, pos: QPoint) -> Optional[QMdiSubWindow]:
+    def _subwindow_at(self, pos: QPoint) -> QMdiSubWindow | None:
         widget = self.childAt(pos)
         while widget is not None and not isinstance(widget, QMdiSubWindow):
             widget = widget.parentWidget()
@@ -250,8 +250,8 @@ class WorkspaceMdiArea(QMdiArea):
     def create_pipeline_window(
         self,
         channel_refs: list[tuple[int, str]],
-        position: Optional[QPoint] = None,
-    ) -> Optional[DataProcessPipelineWidget]:
+        position: QPoint | None = None,
+    ) -> DataProcessPipelineWidget | None:
         pipeline_widget = DataProcessPipelineWidget(self.data_manager, self)
         pipeline_widget.data_id = self.data_id
         pipeline_widget.em_data = self.em_data
@@ -284,7 +284,7 @@ class WorkspaceMdiArea(QMdiArea):
             QMessageBox.information(self, "部分通道未加入", "\n\n".join(parts))
         return pipeline_widget
 
-    def ensure_pipeline_window(self) -> Optional[DataProcessPipelineWidget]:
+    def ensure_pipeline_window(self) -> DataProcessPipelineWidget | None:
         if self.em_data is None or self.data_id == 0:
             return None
 
@@ -336,14 +336,14 @@ class WorkspaceMdiArea(QMdiArea):
 class DataProcessWidget(QWidget):
     change_finished_signal = Signal(int, str)
 
-    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
+    def __init__(self, data_manager: DataManager | None = None, parent=None):
         super().__init__(parent)
         self.data_manager = data_manager
         self.data_id = 0
-        self.em_data: Optional[EMData] = None
-        self._context_resolver: Optional[Callable[[], Optional[tuple[int, str]]]] = None
-        self._selection_payload_resolver: Optional[Callable[[], Optional[dict]]] = None
-        self._clear_checked_channels: Optional[Callable[[list[tuple[int, str]]], None]] = None
+        self.em_data: EMData | None = None
+        self._context_resolver: Callable[[], tuple[int, str] | None] | None = None
+        self._selection_payload_resolver: Callable[[], dict | None] | None = None
+        self._clear_checked_channels: Callable[[list[tuple[int, str]]], None] | None = None
         self.batch_button = QToolButton(self)
         self.batch_button.setText("批处理…")
         self.batch_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -377,7 +377,7 @@ class DataProcessWidget(QWidget):
         dialog.result_applied.connect(self.change_finished_signal)
         dialog.exec()
 
-    def _create_pipeline_window(self) -> Optional[DataProcessPipelineWidget]:
+    def _create_pipeline_window(self) -> DataProcessPipelineWidget | None:
         if self.em_data is None or self.data_id == 0:
             return None
         channel_refs = [(self.data_id, channel_name) for channel_name in self.em_data.channel_names()]
@@ -388,7 +388,7 @@ class DataProcessWidget(QWidget):
         data_id: int,
         channel_name: str,
         tool_type: str,
-    ) -> Optional[DataProcessPipelineWidget]:
+    ) -> DataProcessPipelineWidget | None:
         data = self.data_manager.get(data_id) if self.data_manager is not None else None
         if data is None:
             return None
@@ -414,7 +414,7 @@ class DataProcessWidget(QWidget):
         self.workspace.activate_pipeline_window(pipeline_widget)
         return pipeline_widget
 
-    def current_workspace(self) -> Optional[WorkspaceMdiArea]:
+    def current_workspace(self) -> WorkspaceMdiArea | None:
         return self.workspace
 
     def init_data(self, data, data_id: int = 0):
@@ -425,21 +425,21 @@ class DataProcessWidget(QWidget):
 
     def set_context_resolver(
         self,
-        resolver: Optional[Callable[[], Optional[tuple[int, str]]]],
+        resolver: Callable[[], tuple[int, str] | None] | None,
     ) -> None:
         self._context_resolver = resolver
         self.workspace.set_context_resolver(resolver)
 
     def set_selection_payload_resolver(
         self,
-        resolver: Optional[Callable[[], Optional[dict]]],
+        resolver: Callable[[], dict | None] | None,
     ) -> None:
         self._selection_payload_resolver = resolver
         self.workspace.set_selection_payload_resolver(resolver)
 
     def set_clear_checked_channels(
         self,
-        clearer: Optional[Callable[[list[tuple[int, str]]], None]],
+        clearer: Callable[[list[tuple[int, str]]], None] | None,
     ) -> None:
         self._clear_checked_channels = clearer
         self.workspace.set_clear_checked_channels(clearer)
@@ -448,7 +448,7 @@ class DataProcessWidget(QWidget):
         self.workspace.close_pipeline_windows_for_data(data_id)
 
     @property
-    def pipeline_widget(self) -> Optional[DataProcessPipelineWidget]:
+    def pipeline_widget(self) -> DataProcessPipelineWidget | None:
         return self.workspace.active_pipeline_window() or self.workspace.last_pipeline_window()
 
 

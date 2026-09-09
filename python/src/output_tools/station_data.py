@@ -38,8 +38,10 @@ def station_data_package(data_manager: DataManager, data_id: int) -> dict | None
         "x": x_values,
         "y": np.array([]),
         "channel_names": channel_names,
+        # Output tools treat these arrays as immutable.  Keeping views avoids a
+        # full multi-channel copy on the Qt thread when a large station opens.
         "all_y": {
-            channel: em_data.get_channel_series(channel).to_numpy(dtype=np.float64, copy=True)
+            channel: em_data.get_channel_series(channel).to_numpy(dtype=np.float64, copy=False)
             for channel in channel_names
         },
         "npts": em_data.npts,

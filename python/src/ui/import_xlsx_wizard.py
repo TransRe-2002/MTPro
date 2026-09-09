@@ -14,7 +14,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import Qt, QEventLoop, QObject, Signal
 from PySide6.QtGui import QFont
@@ -94,7 +93,7 @@ _TZ_DISPLAY_NAMES = [f"{tz} ({offset})" for tz, offset in _TIMEZONE_DATA]
 
 
 class ImportXlsxWizard(QWizard):
-    def __init__(self, data_manager: Optional[DataManager] = None, parent=None) -> None:
+    def __init__(self, data_manager: DataManager | None = None, parent=None) -> None:
         super().__init__(parent)
         self._data_manager = data_manager
         self._imported_key: int | None = None

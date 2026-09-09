@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 import sys
 import tomllib
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any
+from collections.abc import Iterable, Iterator, Mapping
 import zipfile
 
 from plugin_api import (

@@ -9,7 +9,7 @@ feeds into ``tranmt`` for transfer function estimation.
 """
 
 from pathlib import Path
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from emtf._binaries import resolve_binary
 from emtf._config import render_paths, render_decset, render_pwset, render_dnff_stdin
@@ -27,7 +27,7 @@ def dnff(
     fc_dir: str = "FC",
     ar_order: int = 3,
     ascii_mode: bool = False,
-    workspace: Optional[Workspace] = None,
+    workspace: Workspace | None = None,
     cleanup: bool = True,
 ) -> Workspace:
     """Run ``dnff`` — decimate + FFT time series → Fourier coefficient files.
@@ -108,16 +108,16 @@ def dnff_from_arrays(
     dt: float,
     decimation_levels: Sequence[DecimationLevel],
     *,
-    channel_ids: Optional[list[str]] = None,
+    channel_ids: list[str] | None = None,
     station_name: str = "STATION",
-    scales: Optional[Sequence[float]] = None,
+    scales: Sequence[float] | None = None,
     latitude: float = 0.0,
     longitude: float = 0.0,
     elevation: float = 0.0,
     declination: float = 0.0,
-    line_lengths_km: Optional[Sequence[float]] = None,
+    line_lengths_km: Sequence[float] | None = None,
     ar_order: int = 3,
-    workspace: Optional[Workspace] = None,
+    workspace: Workspace | None = None,
     cleanup: bool = True,
 ) -> Workspace:
     """Run ``dnff`` directly from numpy arrays — write ASC + SP, then run ``dnff -a``.

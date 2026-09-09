@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterator, Optional
+from collections.abc import Iterator
 
 import numpy as np
 import pandas as pd
@@ -11,18 +11,18 @@ import xarray as xr
 class EMData(ABC):
     name: str
     path: str
-    zero_time: Optional[pd.Timestamp]
+    zero_time: pd.Timestamp | None
     start_time: pd.Timestamp
     end_time: pd.Timestamp
     dt: pd.Timedelta
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    elevation: Optional[float] = None
-    e_units: Optional[str] = None
-    m_units: Optional[str] = None
+    latitude: float | None = None
+    longitude: float | None = None
+    elevation: float | None = None
+    e_units: str | None = None
+    m_units: str | None = None
 
-    timezone: Optional[str] = None  # 采集站原始时区，用于保存时转换
-    kp_data: Optional[pd.DataFrame]
+    timezone: str | None = None  # 采集站原始时区，用于保存时转换
+    kp_data: pd.DataFrame | None
     datetime_index: pd.DatetimeIndex
     data: xr.Dataset
 
@@ -119,7 +119,7 @@ class EMData(ABC):
         self,
         channel_name: str,
         values: np.ndarray | list[float],
-        index: Optional[pd.DatetimeIndex] = None,
+        index: pd.DatetimeIndex | None = None,
     ) -> None:
         if index is None:
             index = self.datetime_index
@@ -140,12 +140,12 @@ class EMData(ABC):
     def set_metadata(
         self,
         *,
-        name: Optional[str] = None,
-        latitude: Optional[float] = None,
-        longitude: Optional[float] = None,
-        elevation: Optional[float] = None,
-        e_units: Optional[str] = None,
-        m_units: Optional[str] = None,
+        name: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        elevation: float | None = None,
+        e_units: str | None = None,
+        m_units: str | None = None,
     ) -> None:
         """更新台站标量元数据。参数为 None 表示保持原值。
 
@@ -166,8 +166,8 @@ class EMData(ABC):
 
     def trim_time_range(
         self,
-        start: Optional[pd.Timestamp] = None,
-        end: Optional[pd.Timestamp] = None,
+        start: pd.Timestamp | None = None,
+        end: pd.Timestamp | None = None,
     ) -> int:
         """裁剪时间范围到 [start, end]（含端点），对齐到最近采样点。
 
@@ -277,7 +277,7 @@ class EMData(ABC):
             raise ValueError("不能删除最后一个通道")
         self.data = self.data.drop_vars(channel_name)
 
-    def first_channel_name(self) -> Optional[str]:
+    def first_channel_name(self) -> str | None:
         names = self.channel_names()
         if not names:
             return None

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
 
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QMdiArea, QMdiSubWindow, QWidget
@@ -28,12 +27,17 @@ class StationOutputHost(QWidget):
 
     station_data_ready = Signal(int, str, object)
 
-    def __init__(self, data_manager: Optional[DataManager] = None, parent=None):
+    def __init__(self, data_manager: DataManager | None = None, parent=None):
         super().__init__(parent)
         self.data_manager = data_manager
         self.data_id = 0
         self.em_data = None
+        self._package_cache: dict[int, dict] = {}
         self.mdi_area = QMdiArea(self)
+
+        if self.data_manager is not None:
+            self.data_manager.data_changed.connect(self._on_data_changed)
+            self.data_manager.data_removed.connect(self._on_data_removed)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -42,6 +46,7 @@ class StationOutputHost(QWidget):
     def init_data(self, data, data_id: int = 0) -> None:
         self.data_id = data_id
         self.em_data = data
+        self._package_cache.clear()
         if data is None:
             self.close_all_windows()
 
@@ -49,8 +54,8 @@ class StationOutputHost(QWidget):
         self,
         tool_id: str,
         data_id: int,
-        position: Optional[QPoint] = None,
-    ) -> Optional[QMdiSubWindow]:
+        position: QPoint | None = None,
+    ) -> QMdiSubWindow | None:
         if self.data_manager is None:
             return None
 
@@ -87,7 +92,7 @@ class StationOutputHost(QWidget):
         self._provide_station_data(data_id, "")
         return window
 
-    def present_window(self, window: Optional[QMdiSubWindow]) -> None:
+    def present_window(self, window: QMdiSubWindow | None) -> None:
         if window is None:
             return
         window.show()
@@ -96,24 +101,41 @@ class StationOutputHost(QWidget):
 
     def close_all_windows(self) -> None:
         for window in list(self.mdi_area.subWindowList()):
-            self.mdi_area.removeSubWindow(window)
-            window.close()
+            if window.close():
+                self.mdi_area.removeSubWindow(window)
 
     def close_windows_for_data(self, data_id: int) -> None:
         for window in list(self.mdi_area.subWindowList()):
             if window.property("data_id") != data_id:
                 continue
-            self.mdi_area.removeSubWindow(window)
-            window.close()
+            if window.close():
+                self.mdi_area.removeSubWindow(window)
+
+    def invalidate_data(self, data_id: int, refresh: bool = True) -> None:
+        """Discard a stale station package and refresh interested output tools."""
+        self._package_cache.pop(data_id, None)
+        if refresh and self.mdi_area.subWindowList():
+            self._provide_station_data(data_id, "")
+
+    def _on_data_changed(self, data_id: int, structural: bool) -> None:
+        del structural
+        self.invalidate_data(data_id)
+
+    def _on_data_removed(self, data_id: int) -> None:
+        self._package_cache.pop(data_id, None)
 
     def _provide_station_data(self, data_id: int, channel: str = "") -> None:
         if self.data_manager is None:
             return
-        package = station_data_package(self.data_manager, data_id)
+        package = self._package_cache.get(data_id)
+        if package is None:
+            package = station_data_package(self.data_manager, data_id)
+            if package is not None:
+                self._package_cache[data_id] = package
         if package is not None:
             self.station_data_ready.emit(data_id, channel, package)
 
-    def _find_window(self, tool_id: str, data_id: int) -> Optional[QMdiSubWindow]:
+    def _find_window(self, tool_id: str, data_id: int) -> QMdiSubWindow | None:
         for window in self.mdi_area.subWindowList():
             if window.property("tool_id") == tool_id and window.property("data_id") == data_id:
                 return window
@@ -122,7 +144,7 @@ class StationOutputHost(QWidget):
     def _apply_window_size(
         self,
         window: QMdiSubWindow,
-        position: Optional[QPoint],
+        position: QPoint | None,
     ) -> None:
         width, height = _mdi_target_size(self.mdi_area)
         if position is None:

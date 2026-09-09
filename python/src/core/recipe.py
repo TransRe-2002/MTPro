@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import tomllib
-from typing import Any, Mapping, Sequence
+from typing import Any
+from collections.abc import Mapping, Sequence
 
 import pandas as pd
 

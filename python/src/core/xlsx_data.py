@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -18,8 +17,8 @@ class XlsxEMData(EMData):
         timezone: str,
         dt: pd.Timedelta,
         path: str,
-        name: Optional[str] = None,
-        diagnostics: Optional[dict] = None,
+        name: str | None = None,
+        diagnostics: dict | None = None,
     ):
         super().__init__(path)
         if not channel_series:

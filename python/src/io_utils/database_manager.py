@@ -1,10 +1,10 @@
 import sqlite3
-from typing import Any, Optional
+from typing import Any
 
 class DatabaseManager:
     def __init__(self, db_path: str):
         self.db_path: str = db_path
-        self.connection: Optional[sqlite3.Connection] = None
+        self.connection: sqlite3.Connection | None = None
 
     def connect(self):
         if self.connection is None:

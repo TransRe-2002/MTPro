@@ -4,7 +4,7 @@ Guidance for agents working in this repo. MTPro = PySide6 desktop app for magnet
 
 ## Environment (get this wrong and nothing runs)
 
-- **Use the project venv at `python/.venv`** (Anaconda Python 3.13) for every Python/pip/pytest command. Use `python/.venv/bin/python` / `bin/pip` / `bin/pytest` directly, or `source python/.venv/bin/activate` (does not persist across separate bash calls).
+- **Use the project venv at `python/.venv`** (CPython 3.14) for every Python/pip/pytest command. Use `python/.venv/bin/python` / `bin/pip` / `bin/pytest` directly, or `source python/.venv/bin/activate` (does not persist across separate bash calls).
 - **`PYTHONPATH=python/src` is required** to run the app or tests — sources live in `python/src/` and are imported as top-level packages (`from ui.mainwindow import MainWindow`).
 - No linter/typecheck/codegen is configured. There is no formatter; match surrounding style.
 

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 class Welcome(QWidget):
     recent_file_requested = Signal(str)
+    recent_files_requested = Signal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -119,17 +120,27 @@ class Welcome(QWidget):
         self.recent_view.setRootIsDecorated(False)
         self.recent_view.setAlternatingRowColors(True)
         self.recent_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.recent_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.recent_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.recent_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.recent_view.setUniformRowHeights(True)
         self.recent_view.setSortingEnabled(False)
-        self.recent_view.setToolTip("双击打开最近使用的文件")
+        self.recent_view.setToolTip("可用 Ctrl/Shift 多选；双击打开单个文件")
         self.recent_view.doubleClicked.connect(self._open_recent_index)
         self.recent_view.hide()
         header = self.recent_view.header()
         header.setStretchLastSection(True)
         header.resizeSection(0, 180)
         self.recent_layout.addWidget(self.recent_view, 1)
+
+        self.open_recent_button = QPushButton("打开所选文件", recent_group)
+        self.open_recent_button.setEnabled(False)
+        self.open_recent_button.setToolTip("一次打开选中的一个或多个最近文件")
+        self.open_recent_button.clicked.connect(self._open_selected_recent_files)
+        self.recent_view.selectionModel().selectionChanged.connect(
+            self._update_recent_selection
+        )
+        self.open_recent_button.hide()
+        self.recent_layout.addWidget(self.open_recent_button)
 
         right_layout.addWidget(action_group)
         right_layout.addWidget(recent_group, 1)
@@ -145,6 +156,8 @@ class Welcome(QWidget):
         has_items = bool(paths)
         self.recent_placeholder.setVisible(not has_items)
         self.recent_view.setVisible(has_items)
+        self.open_recent_button.setVisible(has_items)
+        self._update_recent_selection()
         if not has_items:
             return
 
@@ -161,6 +174,31 @@ class Welcome(QWidget):
             self.recent_model.appendRow([name_item, path_item])
 
         self.recent_view.resizeColumnToContents(0)
+
+    def _selected_recent_paths(self) -> list[str]:
+        indexes = sorted(
+            self.recent_view.selectionModel().selectedRows(0),
+            key=lambda index: index.row(),
+        )
+        return [
+            str(path)
+            for index in indexes
+            if (path := index.data(Qt.ItemDataRole.UserRole))
+        ]
+
+    def _update_recent_selection(self, *_args) -> None:
+        count = len(self._selected_recent_paths())
+        self.open_recent_button.setEnabled(count > 0)
+        self.open_recent_button.setText(
+            f"打开所选文件（{count}）" if count > 1 else "打开所选文件"
+        )
+
+    def _open_selected_recent_files(self) -> None:
+        paths = self._selected_recent_paths()
+        if len(paths) == 1:
+            self.recent_file_requested.emit(paths[0])
+        elif paths:
+            self.recent_files_requested.emit(paths)
 
     def _open_recent_index(self, index) -> None:
         if not index.isValid():

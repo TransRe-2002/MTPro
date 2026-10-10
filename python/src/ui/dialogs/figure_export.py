@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
+
+import numpy as np
+from matplotlib import rc_context
+from matplotlib.container import ErrorbarContainer
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -232,6 +237,61 @@ def export_matplotlib_figure_with_dialog(
     return path
 
 
+@contextmanager
+def _bounded_svg_errorbars(figure):
+    """Bound rectilinear error bars before SVG serializes their coordinates.
+
+    Log axes map nonpositive error bounds far outside the figure. SVG clipping
+    normally hides these, but retaining such paths makes the export fragile.
+    Keep the original data and cap positions intact in the interactive figure.
+    """
+    collections = []
+    caps = []
+    try:
+        for axis in figure.axes:
+            if axis.name != "rectilinear":
+                continue
+            lower = np.array([min(axis.get_xlim()), min(axis.get_ylim())])
+            upper = np.array([max(axis.get_xlim()), max(axis.get_ylim())])
+            for container in axis.containers:
+                if not isinstance(container, ErrorbarContainer):
+                    continue
+                for collection in container.lines[2]:
+                    if not collection.get_clip_on() or collection.get_transform() != axis.transData:
+                        continue
+                    segments = collection.get_segments()
+                    bounded = []
+                    for segment in segments:
+                        if segment.shape != (2, 2) or not np.isfinite(segment).all():
+                            bounded.append(segment)
+                            continue
+                        # Standard errorbar segments are horizontal or vertical.
+                        if not np.any(segment[0] == segment[1]):
+                            bounded.append(segment)
+                            continue
+                        if np.any(segment.max(axis=0) < lower) or np.any(segment.min(axis=0) > upper):
+                            bounded.append(np.empty((0, 2)))
+                        else:
+                            bounded.append(np.clip(segment, lower, upper))
+                    collections.append((collection, segments))
+                    collection.set_segments(bounded)
+                for cap in container.lines[1]:
+                    if not cap.get_clip_on() or cap.get_transform() != axis.transData:
+                        continue
+                    x, y = cap.get_data()
+                    points = np.column_stack(cap.get_data(orig=False))
+                    outside = ((points < lower) | (points > upper)).any(axis=1)
+                    caps.append((cap, x, y))
+                    cap.set_data(np.where(outside, np.nan, points[:, 0]),
+                                 np.where(outside, np.nan, points[:, 1]))
+        yield
+    finally:
+        for collection, segments in collections:
+            collection.set_segments(segments)
+        for cap, x, y in caps:
+            cap.set_data(x, y)
+
+
 def save_matplotlib_figure(
     figure,
     canvas,
@@ -245,17 +305,34 @@ def save_matplotlib_figure(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     old_size = figure.get_size_inches()
+    old_dpi = figure.dpi
+    old_layout = figure.get_layout_engine()
+    old_subplot_params = {name: getattr(figure.subplotpars, name)
+                          for name in ("left", "right", "bottom", "top", "wspace", "hspace")}
+    old_positions = [(axis, axis.get_position().frozen(),
+                      axis.get_position(original=True).frozen(), axis.get_in_layout())
+                     for axis in figure.axes]
     try:
         figure.set_size_inches(width_px / dpi, height_px / dpi, forward=False)
-        figure.savefig(
-            path,
-            dpi=dpi,
-            format=fmt,
-            facecolor="white",
-            edgecolor="white",
-            bbox_inches=None,
-        )
+        figure.set_dpi(dpi)
+        # Update text positions at the export size before calculating margins.
+        figure.draw_without_rendering()
+        if figure.axes and old_layout is None:
+            figure.tight_layout()
+            figure.set_layout_engine(None)
+        # A global savefig.bbox='tight' must not override the requested size.
+        errorbar_bounds = _bounded_svg_errorbars(figure) if fmt.lower() == "svg" else nullcontext()
+        with rc_context({"savefig.bbox": None}), errorbar_bounds:
+            figure.savefig(path, dpi=dpi, format=fmt, facecolor="white",
+                           edgecolor="white", bbox_inches=None)
     finally:
+        figure.set_layout_engine(old_layout)
         figure.set_size_inches(old_size, forward=False)
+        figure.set_dpi(old_dpi)
+        figure.subplotpars.update(**old_subplot_params)
+        for axis, active, original, in_layout in old_positions:
+            axis.set_position(original, which="original")
+            axis.set_position(active, which="active")
+            axis.set_in_layout(in_layout)
         if canvas is not None:
             canvas.draw_idle()

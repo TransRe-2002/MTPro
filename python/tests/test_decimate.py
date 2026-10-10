@@ -1,9 +1,61 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import utils.decimate as dec
 from utils.decimate import LODPyramid, minmax_decimate, slice_visible
+
+
+@pytest.mark.skipif(not dec._HAS_RUST, reason="Rust extension is not installed")
+@pytest.mark.parametrize("operation", ["minmax_decimate", "build_lod_pyramid"])
+@pytest.mark.parametrize("layout", ["strided", "unaligned"])
+def test_native_decimation_handles_channel_views_without_python_fallback(monkeypatch, operation, layout):
+    """MATLAB-style channel views must not trigger the slow per-bin fallback."""
+    n = 10_000
+    if layout == "strided":
+        matrix = np.empty((3, n), dtype=np.float64, order="F")
+        matrix[0] = np.arange(n)
+        matrix[1] = np.sin(np.arange(n) / 20.0)
+        x, y = matrix[0], matrix[1]
+        assert not y.flags.c_contiguous
+    else:
+        x = np.arange(n, dtype=np.float64)
+        buffer = bytearray(n * 8 + 1)
+        y = np.ndarray(n, dtype=np.float64, buffer=buffer, offset=1)
+        y[:] = np.sin(x / 20.0)
+        assert not y.flags.aligned
+    y[100:120] = np.nan
+    y[500] = 100.0
+    original = y.copy()
+
+    native_name = "minmax_decimate_rs" if operation == "minmax_decimate" else "build_lod_pyramid_rs"
+    native = getattr(dec.rust_lib, native_name)
+    successful_calls = []
+
+    def capture(native_x, native_y, argument):
+        result = native(native_x, native_y, argument)
+        successful_calls.append((native_x.flags.c_contiguous, native_y.flags.aligned))
+        return result
+
+    monkeypatch.setattr(dec.rust_lib, native_name, capture)
+    if operation == "minmax_decimate":
+        expected = native(np.require(x, requirements=["C", "A"]),
+                          np.require(y, requirements=["C", "A"]), 1000)
+        actual = minmax_decimate(x, y, 1000)
+        pairs = [(actual, expected)]
+    else:
+        expected = native(np.require(x, requirements=["C", "A"]),
+                          np.require(y, requirements=["C", "A"]), None)
+        pyramid = LODPyramid(x, y)
+        assert np.shares_memory(pyramid.y_raw, y)
+        assert len(pyramid._levels) == len(expected)
+        pairs = zip(pyramid._levels, expected)
+    assert successful_calls == [(True, True)]
+    for (actual_x, actual_y), (expected_x, expected_y) in pairs:
+        np.testing.assert_array_equal(actual_x, expected_x)
+        np.testing.assert_array_equal(actual_y, expected_y)
+    np.testing.assert_array_equal(y, original)
 
 
 def _spiky_series(n: int = 200_000, seed: int = 7):

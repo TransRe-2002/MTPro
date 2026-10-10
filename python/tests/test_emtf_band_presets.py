@@ -1,4 +1,4 @@
-from emtf._config import render_bands
+from emtf.config import render_bands
 from emtf.band_presets import (
     fine_bands,
     half_decade_bands,

@@ -26,7 +26,7 @@ from base.plugin_runtime import run_plugin_process
 from plugin_api import ChannelBlock, ParamSpec, complete_params
 from plugins.common.display import decimate_for_display
 from plugins.common.plotting import StepPlotWidget
-from utils.qt_bridge import run as run_in_pool
+from base.qt_bridge import run as run_in_pool
 from utils.theme import subtle_pen, transparent_legend_brush
 
 

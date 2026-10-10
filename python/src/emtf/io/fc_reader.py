@@ -91,31 +91,36 @@ def _read_fc_open(
     # Build a header record dtype
     dt_rec = np.dtype(">i4") if endian == "big" else np.dtype("<i4")
 
-    start_dec: list[int] = []
-    start_freqs = np.zeros((nd, nf), dtype=np.int32)
+    start_dec: list[int] = [-1] * nd
+    start_freqs = np.full((nd, nf), -1, dtype=np.int64)
 
     with open(path, "rb") as fh:
         fh.seek(header_records * 4 * irecl)
 
-        for id_ in range(nd):
-            start_dec.append(fh.tell())
-            while True:
-                pos_before = fh.tell()
-                head = np.frombuffer(fh.read(4 * irecl), dtype=dt_rec)
-                if len(head) < 3:
-                    break
-                idec = int(head[0])
-                ifreq = int(head[1])
-                nsegs = int(head[2])
-                if idec > id_ + 1:
-                    break
-                if 1 <= idec <= nd and 1 <= ifreq <= nf:
-                    start_freqs[idec - 1, ifreq - 1] = pos_before
-                fh.seek(4 * irecl * nsegs, 1)
+        file_size = path.stat().st_size
+        while fh.tell() < file_size:
+            pos_before = fh.tell()
+            head = np.frombuffer(fh.read(4 * irecl), dtype=dt_rec)
+            if len(head) != irecl:
+                raise ValueError("Truncated FC record header")
+            idec, ifreq, nsegs = map(int, head[:3])
+            if not (1 <= idec <= nd and 1 <= ifreq <= nf and nsegs >= 0):
+                raise ValueError(f"Invalid FC record at byte {pos_before}")
+            if start_dec[idec - 1] < 0:
+                start_dec[idec - 1] = pos_before
+            start_freqs[idec - 1, ifreq - 1] = pos_before
+            # pack.f writes a whole scale record before the nsegs data records.
+            next_record = fh.tell() + 4 * irecl * (nsegs + 1)
+            if next_record > file_size:
+                raise ValueError("Truncated FC scale/data records")
+            fh.seek(next_record)
 
         # Read set numbers per decimation level
         i_sets: list[NDArray[np.int32]] = []
         for id_ in range(nd):
+            if start_dec[id_] < 0:
+                i_sets.append(np.zeros(0, dtype=np.int32))
+                continue
             fh.seek(start_dec[id_])
             head = np.frombuffer(fh.read(12), dtype=dt_rec)
             nsets = int(head[2])

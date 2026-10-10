@@ -203,8 +203,7 @@ def build_spectrum_kwargs(
 ) -> dict:
     """构造传给 emtf_rs.estimate_*_spectrum() 的 kwargs 字典。
 
-    RS 后端只需基本参数；pywrap 后端还需 decimation_levels / bands /
-    station_name（通过 :func:`emtf_period_grid` 计算）。
+    两个后端共用 decimation_levels / bands，不再对 Rust 结果二次平均。
     """
     step_size = max(1, int(window_size * step_pct / 100.0))
     kwargs: dict = {
@@ -216,11 +215,12 @@ def build_spectrum_kwargs(
         "max_iterations": max_iterations,
         "tolerance": tolerance,
     }
-    if backend == BACKEND_EMTF_PYWRAP:
-        decimation_levels, bands = emtf_period_grid(
-            sample_rate, window_size, fft_window_size, n_bands,
-        )
-        kwargs["decimation_levels"] = decimation_levels
-        kwargs["bands"] = bands
-        kwargs["station_name"] = station_name
+    decimation_levels, bands = emtf_period_grid(
+        sample_rate, window_size,
+        128 if fft_window_size is None else fft_window_size,
+        40 if n_bands is None else n_bands,
+    )
+    kwargs["decimation_levels"] = decimation_levels
+    kwargs["bands"] = bands
+    kwargs["station_name"] = station_name
     return kwargs

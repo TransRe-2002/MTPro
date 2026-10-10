@@ -21,15 +21,80 @@ def detrend_series(
     kind: str = "linear",
     min_segment_points: int = 4,
 ) -> FiniteRunFilterResult:
-    """Remove a constant or linear trend without interpolating across NaNs."""
+    """Remove one global constant/linear trend and restore missing samples.
+
+    Missing samples are interpolated before applying the transform so the
+    numerical path always receives a dense array.  The fitted mean/line uses
+    only samples that were finite in the original input; interpolated gaps
+    therefore never acquire artificial statistical weight.  All original
+    non-finite values are restored afterwards.
+    """
 
     if kind not in {"linear", "constant"}:
         raise ValueError("kind must be 'linear' or 'constant'")
-    return _filter_finite_runs(
-        series,
-        min_segment_points,
-        lambda values: signal.detrend(values, type=kind),
+    if min_segment_points < 2:
+        raise ValueError("min_segment_points must be at least two")
+    values = series.to_numpy(dtype=np.float64, copy=True)
+    finite = np.isfinite(values)
+    finite_runs = tuple(_finite_runs(finite))
+    if int(finite.sum()) < min_segment_points:
+        return FiniteRunFilterResult(
+            cleaned=pd.Series(values, index=series.index, name=series.name),
+            processed_segments=(),
+            skipped_segments=finite_runs,
+        )
+
+    dense = _interpolate_nonfinite(values, finite)
+    if kind == "constant":
+        trend = np.full(values.size, float(np.mean(values[finite])), dtype=np.float64)
+    else:
+        x_axis = _normalized_sample_axis(values.size)
+        design = np.column_stack((x_axis[finite], np.ones(int(finite.sum()))))
+        slope, intercept = np.linalg.lstsq(design, values[finite], rcond=None)[0]
+        trend = slope * x_axis + intercept
+    cleaned = dense - trend
+    cleaned[~finite] = values[~finite]
+    return FiniteRunFilterResult(
+        cleaned=pd.Series(cleaned, index=series.index, name=series.name),
+        processed_segments=finite_runs,
+        skipped_segments=(),
     )
+
+
+def demean_series(series: pd.Series) -> FiniteRunFilterResult:
+    """Subtract one mean fitted from the original finite samples."""
+    values = series.to_numpy(dtype=np.float64, copy=True)
+    finite = np.isfinite(values)
+    finite_runs = tuple(_finite_runs(finite))
+    if not finite.any():
+        return FiniteRunFilterResult(
+            cleaned=pd.Series(values, index=series.index, name=series.name),
+            processed_segments=(),
+            skipped_segments=(),
+        )
+    dense = _interpolate_nonfinite(values, finite)
+    cleaned = dense - float(np.mean(values[finite]))
+    cleaned[~finite] = values[~finite]
+    return FiniteRunFilterResult(
+        cleaned=pd.Series(cleaned, index=series.index, name=series.name),
+        processed_segments=finite_runs,
+        skipped_segments=(),
+    )
+
+
+def _interpolate_nonfinite(values: np.ndarray, finite: np.ndarray) -> np.ndarray:
+    dense = values.copy()
+    dense[~finite] = np.nan
+    return pd.Series(dense).interpolate(
+        method="linear",
+        limit_direction="both",
+    ).to_numpy(dtype=np.float64)
+
+
+def _normalized_sample_axis(size: int) -> np.ndarray:
+    if size <= 1:
+        return np.zeros(size, dtype=np.float64)
+    return np.linspace(-1.0, 1.0, size, dtype=np.float64)
 
 
 def median_filter_series(
@@ -169,6 +234,7 @@ def _validate_odd_window(window_points: int) -> None:
 
 
 __all__ = [
+    "demean_series",
     "FiniteRunFilterResult",
     "detrend_series",
     "median_filter_series",

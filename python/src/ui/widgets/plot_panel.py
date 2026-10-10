@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from base.time_viewport_mixin import TimeViewportMixin
+from ui.widgets.time_viewport import TimeViewportMixin
 from utils.decimate import LODPyramid
 from utils.series import dti_to_numpy
 from utils.time_convert import pts_to_qdt, qdt_to_pts

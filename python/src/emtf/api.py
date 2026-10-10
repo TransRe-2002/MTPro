@@ -57,6 +57,7 @@ class SpectrumResult:
     tzy_se: NDArray[np.float64] | None = None
     station_name: str = "unknown"
     mode: str = "ss"
+    processing_scheme: str | None = None
 
     def __post_init__(self) -> None:
         n = len(self.frequencies_hz)
@@ -250,23 +251,7 @@ def _from_zfile_data(
     from emtf.io import to_banded_result
 
     banded = to_banded_result(zdata, station_name=station_name, mode=mode)
-    _scale_banded_periods_from_samples(banded, sample_rate_hz)
     return _from_banded_result(banded, segment_count=_segment_count(banded.n_observations))
-
-
-def _scale_banded_periods_from_samples(banded: Any, sample_rate_hz: float) -> None:
-    """Convert EMTF Fortran sample-period output to physical seconds.
-
-    The bundled Fortran Z-file reports period values in sample intervals for
-    non-1 Hz input.  The public emtf-rs-compatible API uses seconds/Hz, so
-    convert once at the Z-file boundary before UI display, banding, and export.
-    """
-    if sample_rate_hz <= 0:
-        raise ValueError("sample_rate_hz must be positive")
-    periods = np.asarray(getattr(banded, "periods", []), dtype=np.float64)
-    if periods.size == 0:
-        return
-    banded.periods = periods / float(sample_rate_hz)
 
 
 def _from_banded_result(banded: Any, *, segment_count: int = 0) -> SpectrumResult:

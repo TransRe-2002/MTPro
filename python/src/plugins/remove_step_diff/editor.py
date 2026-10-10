@@ -110,7 +110,8 @@ class RemoveStepByDiff(BaseProcessorWidget):
         """搭建主序列图、差分图和控制区。"""
         instruction_label = QLabel(
             "差分去阶跃: 可以按阈值/次数自动将一阶差分置零，也可以像 remove_spike 一样框选差分点后手动置零。\n"
-            "下图支持双击添加连续区域，右键删除区域，Shift/Alt 可约束缩放轴。"
+            "下图支持双击添加连续区域、右键删除区域；"
+            "Ctrl+滚轮/中键拖动仅操作X轴，Shift+滚轮/中键拖动仅操作Y轴。"
         )
 
         self.signal_plot_widget.getAxis("left").setStyle(tickLength=0)

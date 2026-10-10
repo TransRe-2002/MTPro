@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 
 import numpy as np
@@ -135,7 +137,7 @@ class MatEMData(EMData):
 
         elev = _opt_field(ts, 'elevation', default=None)
         if elev is not None and elev[0, 0].size > 0:
-            self.elevation = elev[0, 0][0]
+            self.elevation = float(np.asarray(elev[0, 0]).flat[0])
         else:
             self.elevation = None
 
@@ -171,6 +173,94 @@ class MatEMData(EMData):
         )
 
         self.kp_data = fetch_kp(self.start_time, self.end_time)
+        self._source_channels = {ch: ch for ch in self.channel_names()}
+        self._source_dt = self.dt
+        self._source_time_operations = []
+
+    def rename_channel(self, old_name: str, new_name: str) -> None:
+        source_name = self._source_channels.get(old_name, old_name)
+        super().rename_channel(old_name, new_name)
+        self._source_channels.pop(old_name, None)
+        self._source_channels[new_name] = source_name
+
+    def remove_channel(self, channel_name: str) -> None:
+        super().remove_channel(channel_name)
+        self._source_channels.pop(channel_name, None)
+
+    def trim_time_range(self, start=None, end=None) -> int:
+        npts = super().trim_time_range(start, end)
+        self._source_time_operations.append(("trim", self.start_time, self.end_time))
+        return npts
+
+    def decimate(self, factor: int, max_missing_fraction: float = 1.0) -> int:
+        npts = super().decimate(factor, max_missing_fraction)
+        self._source_time_operations.append(("decimate", factor, max_missing_fraction))
+        return npts
+
+    def source_channel_series(self, source: "MatEMData", channel: str) -> pd.Series:
+        """Prepare source values on the current grid, without mutating either dataset.
+
+        Replay structural operations, not signal processing. Repeated boxcar
+        averages with missing samples are not equivalent to one larger average.
+        """
+        from utils.signal_decimate import decimate_nan_aware, decimated_length
+
+        if not self.has_channel(channel):
+            raise ValueError(f"当前数据中没有通道：{channel}")
+        source_name = self._source_channels.get(channel, channel)
+        if not source.has_channel(source_name):
+            raise ValueError(f"源文件中找不到对应通道：{source_name}（当前名称：{channel}）")
+        if source.dt <= pd.Timedelta(0) or self.dt < source.dt:
+            raise ValueError("源文件采样率低于当前采样率，无法通过降采样还原。")
+        if self.dt.value % source.dt.value:
+            raise ValueError("采样间隔不是整数倍，无法使用当前降采样算法还原。")
+
+        series = source.get_channel_series(source_name)
+        dt = source.dt
+        if dt == self._source_dt:
+            for operation, first, second in self._source_time_operations:
+                if operation == "trim":
+                    if first not in series.index or second not in series.index:
+                        raise ValueError("源文件时间范围已改变，无法重放裁剪；请整组还原。")
+                    series = series.loc[first:second]
+                else:
+                    factor = first
+                    series = pd.Series(
+                        decimate_nan_aware(
+                            series.to_numpy(), factor, decimated_length(len(series), factor),
+                            max_missing_fraction=second,
+                        ),
+                        index=series.index[::factor],
+                    )
+                    dt *= factor
+        elif dt != self.dt:
+            # The on-disk version may have changed. Only support exact integer
+            # downsampling anchored at the current first sample, never interpolation.
+            if self.datetime_index[0] not in series.index:
+                raise ValueError("源文件与当前时间轴无法对齐，请使用整个数据集还原。")
+            series = series.loc[self.datetime_index[0]:]
+            factor = int(self.dt.value // dt.value)
+            series = pd.Series(
+                decimate_nan_aware(series.to_numpy(), factor, decimated_length(len(series), factor)),
+                index=series.index[::factor],
+            )
+            dt *= factor
+
+        if dt != self.dt or not self.datetime_index.isin(series.index).all():
+            raise ValueError("源文件与当前时间轴不匹配，请使用整个数据集还原。")
+        return series.loc[self.datetime_index].rename(channel).copy()
+
+    def restore_dataset(self, source: "MatEMData", *, keep_station_metadata: bool = False) -> None:
+        """Adopt a successfully loaded source while preserving this object's identity."""
+        state = dict(vars(source))
+        state["data"] = source.data.copy(deep=False)
+        state["_source_channels"] = dict(source._source_channels)
+        state["_source_time_operations"] = list(source._source_time_operations)
+        if keep_station_metadata:
+            for field in ("name", "latitude", "longitude", "elevation"):
+                state[field] = getattr(self, field)
+        self.__dict__.clear()
+        self.__dict__.update(state)
 
     # ─── update_meta ───────────────────────────────────────
 
@@ -189,11 +279,9 @@ class MatEMData(EMData):
             first_valid, last_valid = min(all_first), max(all_last)
             if first_valid > 0 or last_valid < self.npts - 1:
                 old_npts = self.npts
-                self.data = self.data.isel(time=slice(first_valid, last_valid + 1))
-                self.datetime_index = self.datetime_index[first_valid:last_valid + 1]
-                self.npts = last_valid - first_valid + 1
-                self.start_time = self.datetime_index[0]
-                self.end_time = self.datetime_index[-1]
+                self.trim_time_range(
+                    self.datetime_index[first_valid], self.datetime_index[last_valid],
+                )
 
                 # timeStamp 加载时被释放、保存时整体重建（见 mat_io
                 # 的 _build_mdict），裁剪只同步 npts/start_time 即可，
@@ -268,5 +356,5 @@ class MatEMData(EMData):
         except (ValueError, KeyError):
             pass
 
-    def restore_data(self, ch: str):
-        pass
+    def restore_data(self, ch: str, *, source: "MatEMData") -> None:
+        self.set_channel_series(ch, self.source_channel_series(source, ch))

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import utils.app_state as app_state_module
-from utils.app_state import (
+import base.app_state as app_state_module
+from base.app_state import (
     APP_NAME,
     APP_VERSION,
     AppState,

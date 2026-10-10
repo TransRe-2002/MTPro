@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
 from concurrent.futures import as_completed
 from pathlib import Path
 
@@ -37,12 +36,8 @@ from ui.data_process import DataProcessWidget
 from ui.data_process_pipeline import refresh_tool_meta
 from ui.data_tree_view import DataTreeViewer
 from ui.data_view_widget import DataViewWidget
-from ui.log_console import (
-    LogConsoleWidget,
-    QtTextEditHandler,
-    configure_application_logging,
-    log_session_banner,
-)
+from base.logging_setup import configure_application_logging, log_session_banner
+from ui.widgets.log_console import LogConsoleWidget, QtTextEditHandler
 from ui.plugin_manager_dialog import PluginManagerDialog
 from ui.impedance_output import ImpedanceOutputWidget
 from ui.impedance_preview import ImpedancePreviewWidget, ImpedanceResultPool
@@ -50,9 +45,9 @@ from ui.welcome import Welcome
 from ui.dialogs.batch_save_dialog import BatchSaveDialog
 from ui.tools import registry as tool_registry
 from io_utils import file_ops
-from utils.concurrency import io_pool
-from utils.qt_bridge import run as run_in_pool
-from utils.app_state import (
+from base.concurrency import io_pool
+from base.qt_bridge import run as run_in_pool
+from base.app_state import (
     AppState,
     load_app_state,
     remember_recent_file,
@@ -219,6 +214,7 @@ class MainWindow(QMainWindow):
         self.welcome.open_button.clicked.connect(self.open_file)
         self.welcome.continue_button.clicked.connect(self._continue_to_workspace)
         self.welcome.recent_file_requested.connect(self._open_recent_file)
+        self.welcome.recent_files_requested.connect(self._open_recent_files)
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
         self.data_tree_viewer.tool_requested.connect(self._open_processing_tool_from_sidebar)
         self.data_process_widget.change_finished_signal.connect(self.on_data_change_finished)
@@ -226,6 +222,7 @@ class MainWindow(QMainWindow):
         self.data_manager.active_changed.connect(self.on_activate_changed)
         self.data_manager.data_removed.connect(self.on_data_removed)
         self.data_manager.data_changed.connect(self.on_data_changed)
+        self.data_manager.data_restored.connect(self.on_data_restored)
 
         # DataManager 可能在 MainWindow 创建前就已有活动数据集；此时不会
         # 再发一次 active_changed，需主动同步数据处理页和阻抗输出页。
@@ -488,6 +485,11 @@ class MainWindow(QMainWindow):
         import_xlsx_action.setShortcut("Ctrl+Shift+I")
         import_xlsx_action.setStatusTip("以向导方式批量导入 xlsx 时序数据")
         import_xlsx_action.triggered.connect(self.import_xlsx)
+        import_txt_action = QAction("从 MT TXT 文件导入(&T)...", self)
+        import_txt_action.setStatusTip(
+            "读取 MT Portable 格式的空白分隔 TXT 时序文件"
+        )
+        import_txt_action.triggered.connect(self.import_txt)
         open_folder_action = QAction("批量打开文件夹(&B)...", self)
         open_folder_action.setShortcut("Ctrl+Shift+O")
         open_folder_action.setStatusTip("打开指定文件夹下所有 MAT 文件")
@@ -510,6 +512,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_action)
         file_menu.addAction(import_bin_action)
         file_menu.addAction(import_xlsx_action)
+        file_menu.addAction(import_txt_action)
         file_menu.addSeparator()
         file_menu.addAction(open_folder_action)
         self.recent_files_menu = file_menu.addMenu("最近打开")
@@ -627,6 +630,28 @@ class MainWindow(QMainWindow):
             len(wizard.selected_files()),
         )
 
+    def import_txt(self):
+        """通过向导一次性选择并导入一组 TXT 时序文件。"""
+        from ui.import_txt_wizard import ImportTxtWizard
+
+        wizard = ImportTxtWizard(self.data_manager, self)
+        if wizard.exec() != QWizard.DialogCode.Accepted:
+            self.logger.info("TXT import wizard cancelled")
+            return
+
+        key = wizard.imported_key()
+        if key is None:
+            self.logger.info("TXT import wizard completed without a registered dataset")
+            return
+
+        self._continue_to_workspace()
+        self.data_manager.set_active(key)
+        self.logger.info(
+            "TXT group import completed: key=%d, files=%d",
+            key,
+            len(wizard.selected_files()),
+        )
+
     def open_folder(self):
         """批量打开文件夹下所有 MAT 文件。"""
         initial_dir = self.app_state.last_open_dir if self.app_state.last_open_dir else ""
@@ -655,7 +680,7 @@ class MainWindow(QMainWindow):
 
     def _prompt_timezone_for_files(self, filenames: list[str]) -> bool:
         """弹出一次时区选择对话框（批量打开共用）。返回 True 表示用户已确认。"""
-        from ui.timezone_dialog import TimezoneDialog
+        from ui.dialogs.timezone_dialog import TimezoneDialog
 
         tz_dialog = TimezoneDialog(filenames[0], self)
         if tz_dialog.exec() != QDialog.DialogCode.Accepted:
@@ -852,7 +877,7 @@ class MainWindow(QMainWindow):
             self.logger.warning("File not found: %s", normalized)
             return
 
-        from ui.timezone_dialog import TimezoneDialog
+        from ui.dialogs.timezone_dialog import TimezoneDialog
 
         tz_dialog = TimezoneDialog(normalized, self)
         if tz_dialog.exec() != QDialog.DialogCode.Accepted:
@@ -863,7 +888,60 @@ class MainWindow(QMainWindow):
         self._open_file_path_with_tz(filename, tz, from_recent=from_recent)
 
     def _open_recent_file(self, filename: str) -> None:
-        self._open_file_path(filename, from_recent=True)
+        self._open_recent_files([filename])
+
+    def _open_recent_files(self, filenames: list[str]) -> None:
+        """Open selected recent MAT files, using one timezone for a batch."""
+        normalized_files = list(dict.fromkeys(
+            str(Path(filename).expanduser().resolve(strict=False))
+            for filename in filenames
+            if filename
+        ))
+        if not normalized_files:
+            return
+
+        missing: list[str] = []
+        unsupported: list[str] = []
+        supported: list[str] = []
+        for filename in normalized_files:
+            if not Path(filename).exists():
+                missing.append(filename)
+            elif Path(filename).suffix.lower() != ".mat":
+                unsupported.append(filename)
+            else:
+                supported.append(filename)
+
+        if missing:
+            for filename in missing:
+                self.app_state = remove_recent_file(self.app_state, filename)
+            self._persist_app_state()
+            self._refresh_recent_file_views()
+
+        skipped_messages: list[str] = []
+        if missing:
+            skipped_messages.append(
+                "找不到以下文件，已从最近记录中移除：\n"
+                + "\n".join(missing)
+            )
+        if unsupported:
+            skipped_messages.append(
+                "以下文件不能从最近列表直接打开，请使用对应的导入向导"
+                "（TXT 请使用“从 MT TXT 文件导入”）：\n"
+                + "\n".join(unsupported)
+            )
+        if skipped_messages:
+            QMessageBox.warning(
+                self,
+                "部分文件未打开" if supported else "无法打开所选文件",
+                "\n\n".join(skipped_messages),
+            )
+
+        if len(supported) == 1:
+            self._open_file_path(supported[0], from_recent=True)
+            return
+        if not supported or not self._prompt_timezone_for_files(supported):
+            return
+        self._open_files_batch(supported, self._batch_tz)
 
     def _clear_recent_files(self) -> None:
         self.app_state.recent_files = []
@@ -1053,6 +1131,10 @@ class MainWindow(QMainWindow):
         if viewer is not None:
             viewer.on_change_data_finished(channel)
         self.logger.info("Data updated: dataset #%s, channel %s", data_id, channel)
+
+    def on_data_restored(self, data_id: int, channel: str | None) -> None:
+        if channel is not None:
+            self.on_data_change_finished(data_id, channel)
 
     def on_data_changed(self, data_id: int, structural: bool) -> None:
         """就地预处理结果路由。

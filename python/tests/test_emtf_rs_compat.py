@@ -3,7 +3,7 @@ import numpy as np
 
 def test_emtf_exposes_rs_compatible_api():
     import emtf
-    from emtf._binaries import resolve_binary
+    from emtf.binaries import resolve_binary
 
     assert "/python/src/emtf/" in emtf.__file__
     assert "/python/src/bin/" in str(resolve_binary("dnff"))
@@ -139,7 +139,7 @@ def test_emtf_rs_shim_passes_decimation_levels_to_pywrap(monkeypatch):
     assert captured["decimation_levels"] is levels
 
 
-def test_zfile_periods_from_pywrap_are_scaled_to_seconds(monkeypatch):
+def test_zfile_periods_from_pywrap_remain_physical_seconds(monkeypatch):
     import emtf
     from emtf.io import BandedResult
 
@@ -164,5 +164,5 @@ def test_zfile_periods_from_pywrap_are_scaled_to_seconds(monkeypatch):
         sample_rate_hz=0.2,
     )
 
-    np.testing.assert_allclose(result.periods, [112.28, 10240.0])
-    np.testing.assert_allclose(result.frequencies_hz, [1.0 / 112.28, 1.0 / 10240.0])
+    np.testing.assert_allclose(result.periods, [22.456, 2048.0])
+    np.testing.assert_allclose(result.frequencies_hz, [1.0 / 22.456, 1.0 / 2048.0])

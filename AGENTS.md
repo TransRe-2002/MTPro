@@ -44,11 +44,11 @@ CI (`.github/workflows/`): `CI.yml` only builds/uploads `rust_lib` wheels via ma
 ## Architecture (not obvious from filenames)
 
 - **Data model**: `core/em_data.py` `EMData` stores channels as an `xarray.Dataset` keyed by channel name (`Ex`, `Hy`, ...). `pd.Series` with `DatetimeIndex` is the exchange format between `EMData` and processors — use `get_channel_series()` / `set_channel_series()`.
-- **Registry**: `base/data_manager.py` `DataManager(QObject)` owns `Dict[int, EMData]` and emits `data_added` / `data_removed` / `active_changed`. **Key `0` means "no active data"** — never use it for a dataset. All UI references datasets by integer key.
+- **Registry**: `base/data_manager.py` `DataManager(QObject)` owns `dict[int, EMData]` and emits `data_added` / `data_removed` / `active_changed`. **Key `0` means "no active data"** — never use it for a dataset. All UI references datasets by integer key.
 - **MAT format**: `io_utils/mat_io.py` reads/writes the legacy `tsStruct` dict with nested `(1,1)` MATLAB cell arrays (see `TS_STRUCT_TEMPLATE`). `MatSaver.save()` calls `em_data.update_meta()` to sync changes back into the raw `mat_meta` dict before writing. `core/mat_data.py` auto-fetches Kp-index data on construction from a local HDF5 file (`utils/fetch_kp.py`).
 - **Signal-driven flow**: `DataManager` signals → `MainWindow` slots → viewer/processor updates. UI is MDI-based; tools open as `QMdiSubWindow` children.
-- **Processing tools** (`processor/_base_processor.py` `BaseProcessorWidget`) share a pattern: load channel → interpolate NaN → history stack for undo → `_confirm_and_close()` restores NaN positions and emits `result_signal(ch_name, ndarray)`.
-- **Plugin layer**: `plugin_api.py` is the Qt-free public contract; discovery/runtime live in `base/plugin_{loader,runtime}.py`; seven first-party transforms live in `builtin_plugins/`. Pipeline is enabled and deterministically executes plugin `process()` calls.
+- **Processing tools** (`plugins/common/base_processor.py` `BaseProcessorWidget`) share a pattern: load channel → interpolate NaN → history stack for undo → `_confirm_and_close()` restores NaN positions and emits `result_signal(ch_name, ndarray)`.
+- **Plugin layer**: `plugin_api.py` is the Qt-free public contract; discovery/runtime live in `base/plugin_{loader,runtime}.py`; first-party transform shims live in `builtin_plugins/`. Pipeline is enabled and deterministically executes plugin `process()` calls.
 - `core/db_data.py` `EMDBData` is a stub for future DB-backed loading.
 
 ## Conventions
@@ -57,7 +57,9 @@ CI (`.github/workflows/`): `CI.yml` only builds/uploads `rust_lib` wheels via ma
 - `from __future__ import annotations` at the top of files using forward references.
 - Default timezone is `Asia/Shanghai` (CST); timestamps are timezone-aware `pd.Timestamp`.
 - Rust: `rustfmt` defaults, snake_case; edition 2024, PyO3 0.28.
-- Keep new runtime code in `python/src/{ui,core,io_utils,processor,utils,base,emtf}` — not in `python/scripts/` or `python/old/`.
+- Python module filenames use `snake_case` without a leading underscore; `__init__.py` is the only filename exception.
+- Keep pure domain models and numerical logic in `core/`, application services and orchestration in `base/`, reusable Qt controls in `ui/widgets/`, dialogs in `ui/dialogs/`, Qt item models in `ui/models/`, and file-format code in `io_utils/`.
+- Keep new runtime code under `python/src/` — not in `python/scripts/` or `python/old/`.
 
 ## Testing quirks
 

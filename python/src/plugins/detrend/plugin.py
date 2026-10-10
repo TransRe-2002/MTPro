@@ -9,13 +9,12 @@ class DetrendPlugin:
 
     info = PluginInfo(
         plugin_id="detrend",
-        display_name="去趋势",
+        display_name="线性去趋势",
         version="1.0.0",
         category="auto",
-        description="按连续有效段去除常数或线性趋势，不跨越缺失值拟合。",
+        description="根据整条通道的原始有效样点拟合并去除全局线性趋势。",
         params_schema=(
-            ParamSpec("kind", "趋势类型", str, "linear", options=("linear", "constant")),
-            ParamSpec("min_segment_points", "最短有效段点数", int, 4, minimum=2),
+            ParamSpec("min_segment_points", "最少有效点数", int, 4, minimum=2),
         ),
     )
 
@@ -23,7 +22,9 @@ class DetrendPlugin:
         ctx.progress(0.1, "去除趋势")
         result = detrend_series(
             block.series,
-            kind=str(params["kind"]),
+            # Keep old recipes containing kind="constant" executable while
+            # new UI entries expose this tool specifically as linear detrend.
+            kind=str(params.get("kind", "linear")),
             min_segment_points=int(params["min_segment_points"]),
         )
         ctx.progress(1.0, "去趋势完成")

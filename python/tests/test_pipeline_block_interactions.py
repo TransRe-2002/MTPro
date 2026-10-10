@@ -19,7 +19,7 @@ from ui.data_process_pipeline import (
     DataProcessPipelineWidget,
     PipelineTrackWidget,
 )
-from ui.plugin_adapter import PluginSliceEditor
+from ui.widgets.plugin_editor import PluginSliceEditor
 
 
 class InteractionData(EMData):

@@ -64,6 +64,7 @@ class ChannelBlock:
     channel: str
     series: pd.Series
     meta: ChannelMeta = field(default_factory=ChannelMeta)
+    auxiliary: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

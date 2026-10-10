@@ -95,7 +95,7 @@ class RemoveStepByWindow(BaseProcessorWidget):
         """构建日志区、主图和参数按钮区。"""
         instruction_label = QLabel(
             "窗口均值去阶跃: 先用阈值定位一阶差分峰值，再用局部窗口均值估计台阶幅度。\n"
-            "Shift+鼠标滚轮/中键拖动仅操作 X 轴，Alt+鼠标滚轮/中键拖动仅操作 Y 轴。"
+            "Ctrl+鼠标滚轮/中键拖动仅操作 X 轴，Shift+鼠标滚轮/中键拖动仅操作 Y 轴。"
         )
 
         self.plot_widget.getAxis("left").setStyle(tickLength=0)

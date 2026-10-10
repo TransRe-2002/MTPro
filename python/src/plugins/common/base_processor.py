@@ -246,11 +246,11 @@ class BaseProcessorWidget(QWidget):
         - ``compute_fn``：纯函数（只碰 numpy，禁止碰 Qt），在池线程执行；
         - ``apply_fn(result)``：拿到结果后在主线程执行的收尾（更新图/日志/y_data）。
 
-        用 ``utils.qt_bridge.run`` 把结果排队回主线程；``on_done``/``on_error``
+        用 ``base.qt_bridge.run`` 把结果排队回主线程；``on_done``/``on_error``
         必须是 QObject 绑定方法（这里用 ``_on_heavy_done``/``_on_heavy_failed``），
         真正的 apply 逻辑暂存在 ``_pending_apply`` 里，回到主线程后再调用。
         """
-        from utils.qt_bridge import run as run_in_pool
+        from base.qt_bridge import run as run_in_pool
 
         self._pending_apply = apply_fn
         busy = QProgressDialog(description, None, 0, 0, self)

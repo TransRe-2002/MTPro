@@ -94,6 +94,7 @@ wine "$WIN_PY" -m nuitka \
   --static-libpython=no \
   "${INCLUDE_PACKAGES[@]}" \
   --include-module=rust_lib \
+  --include-package=matio \
   --include-data-dir=python/src/bin=bin \
   --mingw64 \
   --experimental=force-mingw64 \

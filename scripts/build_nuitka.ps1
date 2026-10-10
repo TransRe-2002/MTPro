@@ -1,6 +1,7 @@
 param(
     [switch]$InstallDeps,
     [switch]$BuildRust,
+    [switch]$IncludeEmtfRs,
     [switch]$Zip,
     [switch]$KeepBuild,
     [switch]$Installer,
@@ -36,8 +37,19 @@ Create the Windows venv first, then install dependencies, for example:
 "@
 }
 
+# Resolve while still in the caller's directory; Rust builds change location.
+$PythonExe = (Resolve-Path -LiteralPath $PythonExe).Path
+
 if (-not (Test-Path $SrcMain)) {
     Write-Error "Missing application entry point: $SrcMain"
+}
+
+$EmtfExecutables = @("dnff.exe", "tranmt.exe")
+foreach ($Executable in $EmtfExecutables) {
+    $Source = Join-Path (Join-Path $SrcBin "win64") $Executable
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        throw "Missing Windows EMTF executable: $Source"
+    }
 }
 
 if ($InstallDeps) {
@@ -71,6 +83,17 @@ if ($BuildRust) {
 & $PythonExe -c "import nuitka" | Out-Null
 & $PythonExe -c "import PySide6" | Out-Null
 & $PythonExe -c "import rust_lib" | Out-Null
+& $PythonExe -c "from matio import load_from_mat, save_to_mat; from matio.utils import MatlabOpaque" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Install python/requirements.txt into $PythonExe (mat-io 1.0.0 is required for TS object I/O)"
+}
+
+if ($IncludeEmtfRs) {
+    & $PythonExe -c "import emtf_rs; assert callable(getattr(emtf_rs, 'estimate_emtf_bands', None)), 'Rebuild emtf-rs with the EMTF band estimation API'; print('emtf-rs backend:', emtf_rs.__file__)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Install the current emtf-rs Windows wheel into $PythonExe before using -IncludeEmtfRs"
+    }
+}
 
 $ExcludedUnusedPackages = @(
     "annotated_types",
@@ -118,6 +141,7 @@ $NuitkaArgs = @(
     "--include-package=base",
     "--include-package=processor",
     "--include-package=io_utils",
+    "--include-package=matio",
     "--include-package=utils",
     "--include-package=emtf",
     "--include-data-dir=$SrcBin=bin",
@@ -126,14 +150,19 @@ $NuitkaArgs = @(
     "--lto=yes",
     "--noinclude-pytest-mode=nofollow",
     "--noinclude-unittest-mode=nofollow",
-    "--noinclude-pydoc-mode=nofollow",
+    # pyqtgraph.parametertree.interactive imports pydoc during application startup.
+    "--include-module=pydoc",
     "--noinclude-IPython-mode=nofollow",
     "--noinclude-setuptools-mode=nofollow",
-    "--mingw64",
+    "--msvc=latest",
     "--output-dir=$BuildDir",
     "--assume-yes-for-downloads",
     "--show-progress"
 )
+
+if ($IncludeEmtfRs) {
+    $NuitkaArgs += "--include-package=emtf_rs"
+}
 
 foreach ($Package in $ExcludedUnusedPackages) {
     $NuitkaArgs += "--nofollow-import-to=$Package"
@@ -168,6 +197,14 @@ finally {
 $MainDist = Join-Path $BuildDir "main.dist"
 if (-not (Test-Path $MainDist)) {
     Write-Error "Nuitka build finished without expected dist directory: $MainDist"
+}
+
+# Nuitka data-directory inclusion filters out executables; bundle these explicitly.
+$EmtfDistDir = Join-Path $MainDist "bin\win64"
+New-Item -ItemType Directory -Force -Path $EmtfDistDir | Out-Null
+foreach ($Executable in $EmtfExecutables) {
+    Copy-Item -LiteralPath (Join-Path (Join-Path $SrcBin "win64") $Executable) `
+        -Destination (Join-Path $EmtfDistDir $Executable) -Force
 }
 
 if (Test-Path $DistDir) {

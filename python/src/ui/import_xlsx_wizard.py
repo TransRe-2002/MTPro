@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from base.data_manager import DataManager
-from utils.qt_bridge import run as run_in_pool
+from base.qt_bridge import run as run_in_pool
 from io_utils.xlsx_io import (
     INTERP_LINEAR,
     INTERPOLATION_METHODS,
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 class _ImportSignals(QObject):
     """后台导入的信号总线。
 
-    导入任务跑在全局共享 compute 池上（见 ``utils.concurrency``），
+    导入任务跑在全局共享 compute 池上（见 ``base.concurrency``），
     通过本对象的信号回报进度——信号从池线程 emit，经 Qt 排队连接
     回主线程槽，因此导入期间 UI 保持响应、取消按钮可用。
     """

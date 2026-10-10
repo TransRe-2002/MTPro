@@ -7,7 +7,7 @@ import h5py
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
-from utils.app_state import load_app_state
+from base.app_state import load_app_state
 
 logger = logging.getLogger(__name__)
 

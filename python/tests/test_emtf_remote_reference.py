@@ -33,6 +33,13 @@ def test_matching_remote_slice_requires_exact_timestamp_alignment():
         matching_remote_slice(local, delayed_remote, 0, 4)
 
 
+def test_matching_remote_slice_accepts_same_instants_in_different_timezones():
+    local = pd.date_range("2024-01-01", periods=8, freq="s", tz="Asia/Shanghai")
+    remote = pd.date_range("2023-12-31 15:59:58", periods=12, freq="s", tz="UTC")
+
+    assert matching_remote_slice(local, remote, 2, 6) == (4, 8)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="bundled EMTF integration binary is Linux-only")
 def test_remote_reference_builds_and_processes_a_two_channel_remote_fc_group():
     n_samples = 4096

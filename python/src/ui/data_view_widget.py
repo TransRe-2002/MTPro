@@ -15,16 +15,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
-from ui.brief_plot import BriefPlot
+from ui.widgets.brief_plot import BriefPlot
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from utils.series import dti_to_numpy, safe_nanmean
 from utils.decimate import LODPyramid, PYRAMID_MAX_FINEST_POINTS
-from utils.qt_bridge import run as run_in_pool
+from base.qt_bridge import run as run_in_pool
 from utils.signals import block_signals
 
 logger = logging.getLogger(__name__)
 from core.em_data import EMData
-from base.time_viewport_mixin import TimeViewportMixin
+from ui.widgets.time_viewport import TimeViewportMixin
 
 _DISPLAY_CHANNEL_PREFIXES = ("Ex", "Ey", "Hx", "Hy", "Hz", "Bx", "By", "Bz")
 

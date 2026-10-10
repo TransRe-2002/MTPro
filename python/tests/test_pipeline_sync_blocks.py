@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 from base.data_manager import DataManager
 from core.em_data import EMData
 from core.pipeline_model import PipelineBlock
-from ui.data_process_shared import (
+from ui.models.processing_tools import (
     PROCESSING_TOOL_MIME,
     PIPELINE_TOOL_MIME,
     create_processing_tool_model,

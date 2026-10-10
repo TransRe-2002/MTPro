@@ -61,11 +61,19 @@ def test_dataset_menu_contains_preprocessing_items():
 
     texts = _menu_texts(menu)
     assert texts == [
-        "保存", "另存为", "关闭数据",
+        "保存", "另存为", "关闭数据", "预处理",
         "编辑台站元数据…", "降采样…", "裁剪时间范围…", "通道管理…",
     ]
+    preprocess = next(action.menu() for action in menu.actions() if action.text() == "预处理")
+    assert _menu_texts(preprocess) == [
+        "按 Kp 阈值选取…", "撤销该数据集全部处理",
+    ]
     # 每个 action 都有处理器
-    assert all(callable(actions[a]) for a in menu.actions() if not a.isSeparator())
+    action_items = [
+        action for action in menu.actions()
+        if not action.isSeparator() and action.menu() is None
+    ] + preprocess.actions()
+    assert all(callable(actions[action]) for action in action_items)
     menu.close()
     viewer.close()
 
@@ -76,8 +84,16 @@ def test_channel_menu_contains_channel_items():
     menu, actions = viewer._build_channel_context_menu()
 
     texts = _menu_texts(menu)
-    assert texts == ["显示曲线", "查看能量谱", "序列对比", "重命名通道…", "删除通道"]
-    assert all(callable(actions[a]) for a in menu.actions() if not a.isSeparator())
+    assert texts == [
+        "显示曲线", "查看能量谱", "序列对比", "重命名通道…", "删除通道", "预处理",
+    ]
+    preprocess = next(action.menu() for action in menu.actions() if action.text() == "预处理")
+    assert _menu_texts(preprocess) == ["去均值", "线性去趋势", "撤销该通道全部处理"]
+    action_items = [
+        action for action in menu.actions()
+        if not action.isSeparator() and action.menu() is None
+    ] + preprocess.actions()
+    assert all(callable(actions[action]) for action in action_items)
     menu.close()
     viewer.close()
 

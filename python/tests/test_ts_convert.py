@@ -1,9 +1,8 @@
-"""TS 对象 .mat 文件读取测试：纯 Python MCOS 解析 + mtpro_ts_convert 兜底。
+"""TS 对象读写测试：两种 MCOS 读取器和免 Runtime 写入。
 
 scipy.io 无法解析序列化的 MATLAB TS 对象（只得到 MatlabOpaque 占位），
-主路径由 io_utils/mcos_reader.py 纯 Python 重建 tsStruct（免 MATLAB Runtime）；
-scripts/build_matlab.sh 编译的 mtpro_ts_convert 作为可选兜底（如 v7.3 对象文件）。
-缺失 fixture 或可执行文件时相应测试自动跳过。
+主路径由 mcos_reader 重建 tsStruct，mat-io 负责完整 MCOS 解析和 TS 写入。
+只在样本缺失时跳过；不需要转换器、MATLAB 或 Runtime。
 """
 
 from pathlib import Path
@@ -27,21 +26,9 @@ STRUCT_MAT = TESTS_DIR / "test1.mat"                       # fixture 的数据�
 N_KEEP = 2000                                              # fixture 保留的采样数
 
 
-def _converter_available() -> bool:
-    try:
-        ts_convert.find_converter()
-        return True
-    except FileNotFoundError:
-        return False
-
-
 needs_fixture = pytest.mark.skipif(
     not TS_OBJECT_MAT.exists(),
     reason=f"缺少 fixture: {TS_OBJECT_MAT}（matlab/make_test_fixture.m 生成）",
-)
-needs_converter = pytest.mark.skipif(
-    not _converter_available(),
-    reason="未找到 mtpro_ts_convert 可执行文件（scripts/build_matlab.sh 构建）",
 )
 
 
@@ -133,7 +120,6 @@ NE_NEW_LAYOUT_MAT = Path('/home/transen5/Works/数据处理/东北数据/22-2026
 
 
 @pytest.mark.skipif(not NE_NEW_LAYOUT_MAT.exists(), reason="缺少东北数据测试文件")
-@needs_converter
 def test_load_and_save_new_layout_ts_object(tmp_path):
     em = MatLoader.load(str(NE_NEW_LAYOUT_MAT))
     assert set(em.mat_meta['tsStruct'].dtype.names) <= mcos_reader._TS_FIELDS
@@ -151,9 +137,8 @@ def test_load_and_save_new_layout_ts_object(tmp_path):
 
 
 @needs_fixture
-@needs_converter
-def test_load_ts_object_mat_via_converter_fallback(monkeypatch):
-    """纯 Python 解析不可用时，回退到 mtpro_ts_convert 可执行文件。"""
+def test_load_ts_object_mat_via_matio_fallback(monkeypatch):
+    """轻量解析不可用时使用 mat-io，而非外部转换器。"""
     monkeypatch.setattr(mcos_reader, 'extract_ts_struct', lambda mat_data: None)
     em = MatLoader.load(str(TS_OBJECT_MAT))
     assert em.name == '039BE'
@@ -162,7 +147,6 @@ def test_load_ts_object_mat_via_converter_fallback(monkeypatch):
     assert np.allclose(actual, _expected_data(), equal_nan=True)
 
 
-@needs_converter
 def test_save_mat_writes_ts_object(tmp_path):
     """MatSaver.save 默认写 TS 对象格式，且可往返读取。"""
     em = MatLoader.load(str(STRUCT_MAT))
@@ -186,7 +170,6 @@ def test_save_mat_writes_ts_object(tmp_path):
 
 
 @needs_fixture
-@needs_converter
 def test_convert_to_struct(tmp_path):
     """直接调用转换器：TS 对象 → tsStruct，字段可由 scipy 读取。"""
     out = ts_convert.convert_to_struct(str(TS_OBJECT_MAT), tmp_path / "out.mat")
@@ -196,10 +179,9 @@ def test_convert_to_struct(tmp_path):
     assert int(ts['NCh'][0, 0][0, 0]) == 7
 
 
-@needs_converter
 def test_convert_rejects_plain_struct_file(tmp_path):
     """显式 ts2struct 作用于普通 tsStruct 文件时应报错（而非静默通过）。"""
-    with pytest.raises(RuntimeError, match="mtpro_ts_convert failed"):
+    with pytest.raises(ValueError, match="contains no TS object"):
         ts_convert.convert_to_struct(str(STRUCT_MAT), tmp_path / "out.mat")
 
 

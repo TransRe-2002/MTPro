@@ -9,8 +9,8 @@ import pandas as pd
 import pytest
 from PySide6.QtWidgets import QApplication, QSpinBox
 
-from ui.data_process_pipeline import PreviewChannelSlice
-from ui.filter_preview_editor import FilterPreviewEditor
+from core.pipeline_model import PreviewChannelSlice
+from ui.widgets.filter_preview_editor import FilterPreviewEditor
 from ui.tools import registry
 
 

@@ -22,7 +22,7 @@ def _plugins():
     return report.by_id()
 
 
-def test_all_sixteen_builtin_plugins_validate_and_have_json_defaults():
+def test_all_eighteen_builtin_plugins_validate_and_have_json_defaults():
     plugins = _plugins()
 
     assert set(plugins) == {
@@ -30,7 +30,9 @@ def test_all_sixteen_builtin_plugins_validate_and_have_json_defaults():
         "remove_spike",
         "auto_spike_filter",
         "emd_denoise",
+        "demean",
         "detrend",
+        "kp_selection",
         "median_filter",
         "morphological_filter",
         "iir_filter",
@@ -56,7 +58,9 @@ def test_builtin_plugin_entries_live_in_their_feature_packages():
         "remove_spike": "plugins.remove_spike.plugin",
         "auto_spike_filter": "plugins.auto_spike_filter.plugin",
         "emd_denoise": "plugins.emd_denoise.plugin",
+        "demean": "plugins.demean.plugin",
         "detrend": "plugins.detrend.plugin",
+        "kp_selection": "plugins.kp_selection.plugin",
         "median_filter": "plugins.median_filter.plugin",
         "morphological_filter": "plugins.morphological_filter.plugin",
         "iir_filter": "plugins.iir_filter.plugin",

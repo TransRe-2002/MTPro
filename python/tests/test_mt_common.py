@@ -112,7 +112,7 @@ def test_preprocess_channel_skips_nan_data():
     assert np.array_equal(result[~np.isnan(result)], arr[~np.isnan(arr)])
 
 
-def test_build_spectrum_kwargs_rs_backend_omits_pywrap_keys():
+def test_build_spectrum_kwargs_rs_backend_uses_emtf_fc_grid():
     kwargs = build_spectrum_kwargs(
         sample_rate=100.0,
         window_size=1024,
@@ -127,9 +127,10 @@ def test_build_spectrum_kwargs_rs_backend_omits_pywrap_keys():
     assert kwargs["window_size"] == 1024
     assert kwargs["step_size"] == 512
     assert kwargs["huber_threshold"] == 1.5
-    assert "decimation_levels" not in kwargs
-    assert "bands" not in kwargs
-    assert "station_name" not in kwargs
+    assert kwargs["decimation_levels"][0].nwin == 128
+    assert kwargs["decimation_levels"][0].nfft == 32
+    assert kwargs["bands"]
+    assert kwargs["station_name"] == "STATION"
 
 
 def test_build_spectrum_kwargs_pywrap_backend_adds_grid_keys():

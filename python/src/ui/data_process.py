@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QMdiArea,
     QMdiSubWindow,
     QMessageBox,
+    QTabBar,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -21,7 +23,7 @@ from base.data_manager import DataManager
 from core.em_data import EMData
 from ui.data_process_pipeline import DataProcessPipelineWidget, pipeline_tool_id_from_mime
 from ui.batch_process_dialog import BatchProcessDialog
-from ui.data_process_shared import DATA_TREE_SELECTION_MIME
+from ui.models.processing_tools import DATA_TREE_SELECTION_MIME
 
 
 def _mdi_target_size(
@@ -81,6 +83,8 @@ class WorkspaceMdiArea(QMdiArea):
         return widget if isinstance(widget, DataProcessPipelineWidget) else None
 
     def last_pipeline_window(self) -> DataProcessPipelineWidget | None:
+        if self.pipeline_subwindow(self._last_pipeline_window) is None:
+            self._last_pipeline_window = None
         return self._last_pipeline_window
 
     def pipeline_subwindow(self, pipeline_widget: DataProcessPipelineWidget) -> QMdiSubWindow | None:
@@ -326,10 +330,166 @@ class WorkspaceMdiArea(QMdiArea):
                     self.removeSubWindow(sub_window)
                     sub_window.close()
 
+    def has_blocks_for_channel(self, data_id: int, channel: str) -> bool:
+        return any(
+            isinstance(widget := sub_window.widget(), DataProcessPipelineWidget)
+            and widget.has_blocks_for_channel(data_id, channel)
+            for sub_window in self.subWindowList()
+        )
+
     def closeEvent(self, event):
         for sub_window in list(self.subWindowList()):
             self.removeSubWindow(sub_window)
             sub_window.close()
+        super().closeEvent(event)
+
+
+class WorkspaceTabPanel(QWidget):
+    """Independent MDI workspaces, with a trailing + tab to create another."""
+
+    change_finished_signal = Signal(int, str)
+
+    def __init__(self, data_manager: DataManager | None = None, parent=None):
+        super().__init__(parent)
+        self.data_manager = data_manager
+        self.data_id = 0
+        self.em_data: EMData | None = None
+        self._context_resolver = None
+        self._selection_payload_resolver = None
+        self._clear_checked_channels = None
+        self._workspace_counter = 0
+        self._moving_add_tab = False
+        self.workspace_tabs = QTabWidget(self)
+        self.workspace_tabs.setMovable(True)
+        self.workspace_tabs.setTabsClosable(True)
+        self._add_tab = QWidget(self.workspace_tabs)
+        self.workspace_tabs.addTab(self._add_tab, "+")
+        self.workspace_tabs.setTabToolTip(0, "新建工作区")
+        self.workspace_tabs.currentChanged.connect(self._on_tab_changed)
+        self.workspace_tabs.tabCloseRequested.connect(self._close_workspace)
+        self.workspace_tabs.tabBar().tabMoved.connect(self._on_tab_moved)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.workspace_tabs)
+        self._create_workspace()
+
+    def workspaces(self) -> list[WorkspaceMdiArea]:
+        # Use widget identity and the live tab order, not a parallel index list:
+        # reordering tabs must never switch/close a different workspace.
+        return [
+            widget for index in range(self.workspace_tabs.count())
+            if isinstance(widget := self.workspace_tabs.widget(index), WorkspaceMdiArea)
+        ]
+
+    def current_workspace(self) -> WorkspaceMdiArea | None:
+        widget = self.workspace_tabs.currentWidget()
+        return widget if isinstance(widget, WorkspaceMdiArea) else None
+
+    def _create_workspace(self) -> WorkspaceMdiArea:
+        self._workspace_counter += 1
+        workspace = WorkspaceMdiArea(self.data_manager, self.workspace_tabs)
+        workspace.set_context_resolver(self._context_resolver)
+        workspace.set_selection_payload_resolver(self._selection_payload_resolver)
+        workspace.set_clear_checked_channels(self._clear_checked_channels)
+        workspace.change_finished_signal.connect(self.change_finished_signal)
+        workspace.init_data(self.em_data, self.data_id)
+        self.workspace_tabs.blockSignals(True)
+        try:
+            index = self.workspace_tabs.indexOf(self._add_tab)
+            self.workspace_tabs.insertTab(index, workspace, f"工作区 {self._workspace_counter}")
+            self.workspace_tabs.setCurrentWidget(workspace)
+        finally:
+            self.workspace_tabs.blockSignals(False)
+        self._update_tab_buttons()
+        return workspace
+
+    def _update_tab_buttons(self) -> None:
+        tab_bar = self.workspace_tabs.tabBar()
+        show_close = len(self.workspaces()) > 1
+        for index in range(self.workspace_tabs.count()):
+            is_workspace = self.workspace_tabs.widget(index) is not self._add_tab
+            for side in (QTabBar.ButtonPosition.LeftSide, QTabBar.ButtonPosition.RightSide):
+                button = tab_bar.tabButton(index, side)
+                if button is not None:
+                    button.setVisible(is_workspace and show_close)
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.workspace_tabs.widget(index) is self._add_tab:
+            self._create_workspace()
+
+    def _on_tab_moved(self, _from: int, _to: int) -> None:
+        if self._moving_add_tab:
+            return
+        self._moving_add_tab = True
+        try:
+            self.workspace_tabs.tabBar().moveTab(
+                self.workspace_tabs.indexOf(self._add_tab), self.workspace_tabs.count() - 1,
+            )
+        finally:
+            self._moving_add_tab = False
+        self._update_tab_buttons()
+
+    def _close_workspace(self, index: int) -> None:
+        workspace = self.workspace_tabs.widget(index)
+        if not isinstance(workspace, WorkspaceMdiArea) or len(self.workspaces()) <= 1:
+            return
+        current = self.current_workspace()
+        workspace.close()
+        self.workspace_tabs.blockSignals(True)
+        try:
+            self.workspace_tabs.removeTab(index)
+            if current is not workspace and current is not None:
+                self.workspace_tabs.setCurrentWidget(current)
+            else:
+                self.workspace_tabs.setCurrentIndex(min(index, self.workspace_tabs.count() - 2))
+        finally:
+            self.workspace_tabs.blockSignals(False)
+        workspace.deleteLater()
+        self._update_tab_buttons()
+
+    def init_data(self, data, data_id: int = 0) -> None:
+        self.em_data = data
+        self.data_id = data_id
+        for workspace in self.workspaces():
+            workspace.init_data(data, data_id)
+
+    def set_context_resolver(self, resolver) -> None:
+        self._context_resolver = resolver
+        for workspace in self.workspaces():
+            workspace.set_context_resolver(resolver)
+
+    def set_selection_payload_resolver(self, resolver) -> None:
+        self._selection_payload_resolver = resolver
+        for workspace in self.workspaces():
+            workspace.set_selection_payload_resolver(resolver)
+
+    def set_clear_checked_channels(self, clearer) -> None:
+        self._clear_checked_channels = clearer
+        for workspace in self.workspaces():
+            workspace.set_clear_checked_channels(clearer)
+
+    def close_windows_for_data(self, data_id: int) -> None:
+        for workspace in self.workspaces():
+            workspace.close_pipeline_windows_for_data(data_id)
+
+    def has_blocks_for_channel(self, data_id: int, channel: str) -> bool:
+        return any(
+            workspace.has_blocks_for_channel(data_id, channel)
+            for workspace in self.workspaces()
+        )
+
+    def reset_restored_data(self, data_id: int, channel: str | None) -> None:
+        for workspace in self.workspaces():
+            for window in list(workspace.subWindowList()):
+                widget = window.widget()
+                if isinstance(widget, DataProcessPipelineWidget):
+                    widget.reset_restored_data(data_id, channel)
+                    window.setWindowTitle(widget.window_title())
+
+    def closeEvent(self, event) -> None:
+        for workspace in self.workspaces():
+            workspace.close()
         super().closeEvent(event)
 
 
@@ -349,8 +509,10 @@ class DataProcessWidget(QWidget):
         self.batch_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.batch_button.clicked.connect(self._open_batch_process)
 
-        self.workspace = WorkspaceMdiArea(data_manager, self)
-        self.workspace.change_finished_signal.connect(self.change_finished_signal)
+        self.pipeline_panel = WorkspaceTabPanel(data_manager, self)
+        self.pipeline_panel.change_finished_signal.connect(self.change_finished_signal)
+        if self.data_manager is not None:
+            self.data_manager.data_restored.connect(self.reset_restored_data)
         self.new_pipeline_button = QToolButton(self)
         self.new_pipeline_button.setText("新建 Pipeline")
         self.new_pipeline_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -360,6 +522,7 @@ class DataProcessWidget(QWidget):
         header_layout.setContentsMargins(8, 6, 8, 6)
         header_layout.setSpacing(10)
         header_layout.addWidget(QLabel("Pipeline", self))
+        header_layout.addWidget(QLabel("从数据管理器拖入数据集或通道，开始处理", self))
         header_layout.addStretch(1)
         header_layout.addWidget(self.new_pipeline_button)
         header_layout.addWidget(self.batch_button)
@@ -368,7 +531,7 @@ class DataProcessWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(header_layout)
-        layout.addWidget(self.workspace, 1)
+        layout.addWidget(self.pipeline_panel, 1)
 
     def _open_batch_process(self) -> None:
         if self.data_manager is None:
@@ -415,41 +578,57 @@ class DataProcessWidget(QWidget):
         return pipeline_widget
 
     def current_workspace(self) -> WorkspaceMdiArea | None:
-        return self.workspace
+        return self.pipeline_panel.current_workspace()
+
+    @property
+    def workspace(self) -> WorkspaceMdiArea | None:
+        """The current tab's MDI area, for callers of the former single workspace."""
+        return self.current_workspace()
 
     def init_data(self, data, data_id: int = 0):
+        # Selecting data updates the context only. A workspace stays empty
+        # until a drop or an explicit user command creates a Pipeline.
         self.data_id = data_id
         self.em_data = data
-        self.workspace.init_data(data, data_id)
-        self.workspace.ensure_pipeline_window()
+        self.pipeline_panel.init_data(data, data_id)
 
     def set_context_resolver(
         self,
         resolver: Callable[[], tuple[int, str] | None] | None,
     ) -> None:
         self._context_resolver = resolver
-        self.workspace.set_context_resolver(resolver)
+        self.pipeline_panel.set_context_resolver(resolver)
 
     def set_selection_payload_resolver(
         self,
         resolver: Callable[[], dict | None] | None,
     ) -> None:
         self._selection_payload_resolver = resolver
-        self.workspace.set_selection_payload_resolver(resolver)
+        self.pipeline_panel.set_selection_payload_resolver(resolver)
 
     def set_clear_checked_channels(
         self,
         clearer: Callable[[list[tuple[int, str]]], None] | None,
     ) -> None:
         self._clear_checked_channels = clearer
-        self.workspace.set_clear_checked_channels(clearer)
+        self.pipeline_panel.set_clear_checked_channels(clearer)
 
     def close_windows_for_data(self, data_id: int):
-        self.workspace.close_pipeline_windows_for_data(data_id)
+        self.pipeline_panel.close_windows_for_data(data_id)
+
+    def has_blocks_for_channel(self, data_id: int, channel: str) -> bool:
+        return self.pipeline_panel.has_blocks_for_channel(data_id, channel)
+
+    def reset_restored_data(self, data_id: int, channel: str | None) -> None:
+        self.pipeline_panel.reset_restored_data(data_id, channel)
 
     @property
     def pipeline_widget(self) -> DataProcessPipelineWidget | None:
         return self.workspace.active_pipeline_window() or self.workspace.last_pipeline_window()
+
+    def closeEvent(self, event) -> None:
+        self.pipeline_panel.close()
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":

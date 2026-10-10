@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
 import json
 import math
 
@@ -29,13 +28,10 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QMenu,
     QPushButton,
@@ -51,39 +47,48 @@ from base.data_manager import DataManager
 from core.em_data import EMData
 from core.pipeline_model import (
     ChannelPipeline,
+    PreviewChannelSlice,
     PipelineBlock,
     PipelineLayer,
     PipelineSettingsGroup,
     SnapEngine,
     uid,
 )
+from core.pipeline_layout import (
+    fit_timeline_px_per_point,
+    linked_group_label,
+    linked_group_label_index,
+    px_per_point,
+)
 from core.recipe import recipe_from_pipeline, save_recipe
 from plugin_api import ChannelBlock, ChannelMeta
-from ui.plugin_adapter import (
+from ui.dialogs.kp_selection_dialog import KpSelectionDialog
+from ui.dialogs.pipeline_param_dialog import PipelineParamDialog
+from base.plugin_runtime import run_plugin_process
+from ui.dialogs.plugin_parameters import (
     PIPELINE_LINK_ALL_TEXT,
     PluginParamDialog,
     create_pipeline_link_all_checkbox,
-    run_plugin_process,
 )
-from ui.data_process_shared import PROCESSING_TOOL_MIME, PIPELINE_TOOL_MIME
+from ui.models.processing_tools import PROCESSING_TOOL_MIME, PIPELINE_TOOL_MIME
+from ui.widgets.pipeline_overview import (
+    CHANNEL_HEADER_H,
+    LAYER_H,
+    RULER_H,
+    ChannelOverviewWidget,
+    RulerWidget,
+)
 from ui.tools import registry as tool_registry
-from utils.decimate import LODPyramid
-from utils.qt_bridge import run as run_in_pool
+from base.qt_bridge import run as run_in_pool
 
 
-LAYER_H = 34
 HEADER_W = 120
-CHANNEL_HEADER_H = LAYER_H * 2
 ADD_ROW_H = 24
-RULER_H = 24
 HANDLE_W = 7
 MIN_BLOCK_SPAN = 100
 PIPELINE_BLOCK_CLIPBOARD_MIME = "application/x-mtpro-pipeline-block"
 READY_BY_DEFAULT_INTERACTIVE_TOOLS = frozenset({"remove_spike", "remove_region"})
-# Pipeline overviews are short, screen-resolution summaries.  Keeping million-
-# point fine LOD levels here wastes memory without adding visible detail; deep
-# zooms can still fall back to the raw array held by LODPyramid.
-PIPELINE_OVERVIEW_MAX_FINEST_POINTS = 250_000
+GLOBAL_TIME_TOOL_IDS = frozenset({"demean", "detrend", "kp_selection"})
 LOCAL_SETTING_KEYS = frozenset({"indices", "operations", "region", "time_ranges"})
 TIMESTAMP_INDEX_TOOLS = frozenset({"remove_spike", "remove_step_diff"})
 POINT_SETTING_KEYS = frozenset({
@@ -108,69 +113,6 @@ LINKED_GROUP_COLORS = (
     "#795548",
     "#607d8b",
 )
-
-
-def linked_group_label(index: int) -> str:
-    """Return compact spreadsheet-style labels: A..Z, AA..AZ, ..."""
-    index = max(0, int(index))
-    chars: list[str] = []
-    while True:
-        index, remainder = divmod(index, 26)
-        chars.append(chr(ord("A") + remainder))
-        if index == 0:
-            return "".join(reversed(chars))
-        index -= 1
-
-
-def linked_group_label_index(label: str) -> int:
-    """Return the zero-based color slot source for a group display label."""
-    value = 0
-    for char in label.upper():
-        if not "A" <= char <= "Z":
-            continue
-        value = value * 26 + ord(char) - ord("A") + 1
-    return max(0, value - 1)
-
-
-def px_per_point(zoom: float) -> float:
-    return max(0.02, zoom * 8 / 1000)
-
-
-def points_to_pixels(points: int, zoom: float) -> float:
-    return points * px_per_point(zoom)
-
-
-def fit_timeline_px_per_point(zoom: float, data_len: int, viewport_width: int) -> float:
-    """Return a timeline scale where zoom 1 fits the full channel width."""
-    return max(1e-9, float(viewport_width) * max(1.0, zoom) / max(1, data_len))
-
-
-def _nice_tick_multiple(minimum: float) -> int:
-    """Return a 1/2/5-based integer multiple no smaller than ``minimum``."""
-    if minimum <= 1.0:
-        return 1
-    magnitude = 10 ** math.floor(math.log10(minimum))
-    for factor in (1, 2, 5, 10):
-        candidate = int(factor * magnitude)
-        if candidate >= minimum:
-            return candidate
-    return int(10 * magnitude)
-
-
-def ruler_tick_multipliers(
-    grid_points: int,
-    zoom: float,
-    *,
-    min_tick_pixels: float = 8.0,
-    min_label_pixels: float = 48.0,
-    pixels_per_point: float | None = None,
-) -> tuple[int, int]:
-    """Choose minor and labeled-tick strides that stay legible at ``zoom``."""
-    scale = px_per_point(zoom) if pixels_per_point is None else pixels_per_point
-    grid_pixels = max(max(1, grid_points) * scale, 1e-6)
-    tick_multiple = _nice_tick_multiple(min_tick_pixels / grid_pixels)
-    label_multiple = _nice_tick_multiple(min_label_pixels / grid_pixels)
-    return tick_multiple, max(tick_multiple, label_multiple)
 
 
 def _is_pipeline_capable(spec) -> bool:
@@ -210,74 +152,6 @@ BLOCK_STATUS_STYLE: dict[str, dict[str, str]] = {
     "error": {"accent": "#b34b4b", "label": "执行失败"},
 }
 
-class PipelineParamDialog(QDialog):
-    def __init__(
-        self,
-        channel_name: str,
-        layer_label: str,
-        block: PipelineBlock,
-        parent=None,
-    ):
-        super().__init__(parent)
-        meta = TOOL_META.get(block.tool_id, {})
-        self.params: dict = {}
-        self._fields: dict[str, tuple[QLineEdit, type]] = {}
-        self.setWindowTitle(meta.get("name", block.tool_id))
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        form.addRow("channel", QLabel(channel_name))
-        form.addRow("layer", QLabel(layer_label))
-        form.addRow("tool", QLabel(str(meta.get("name", block.tool_id))))
-        form.addRow("range", QLabel(f"{block.start} ~ {block.end}"))
-
-        for key, label, parser, default in meta.get("fields", []):
-            edit = QLineEdit(str(block.params.get(key, default)), self)
-            form.addRow(label, edit)
-            self._fields[key] = (edit, parser)
-
-        layout.addLayout(form)
-
-        tip = QLabel(
-            "这类 block 先保存参数，不直接执行。\n"
-            "后续接入真实 processor 后再参与 preview/commit。"
-        )
-        tip.setWordWrap(True)
-        layout.addWidget(tip)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def accept(self) -> None:
-        values: dict[str, object] = {}
-        for key, (edit, parser) in self._fields.items():
-            text = edit.text().strip()
-            if not text:
-                QMessageBox.warning(self, "参数错误", f"{key} 不能为空")
-                return
-            try:
-                values[key] = parser(text)
-            except ValueError:
-                QMessageBox.warning(self, "参数错误", f"{key} 的值无效: {text}")
-                return
-
-        self.params = values
-        super().accept()
-
-
-@dataclass
-class PreviewChannelSlice:
-    name: str
-    cts: pd.Series
-
-    def datetime_index(self):
-        return self.cts.index
-
-
 class _PluginTaskBridge(QObject):
     """Relay a worker result through a QObject-bound queued signal."""
 
@@ -309,178 +183,8 @@ def pipeline_tool_id_from_mime(mime_data) -> str | None:
     return None
 
 
-class ChannelOverviewWidget(QWidget):
-    """Viewport-aware LOD envelope for one Pipeline channel.
-
-    Pipeline lanes can be much wider than their visible scroll-area viewport.
-    Rendering only the visible LOD section keeps long channels responsive while
-    preserving extrema through the min/max pyramid.
-    """
-
-    def __init__(self, samples: np.ndarray, data_len: int, parent=None):
-        super().__init__(parent)
-        self._data_len = max(1, data_len)
-        self._zoom = 6.0
-        self._pixels_per_point = px_per_point(self._zoom)
-        self._samples = np.empty(0, dtype=np.float64)
-        self._pyramid: LODPyramid | None = None
-        self._y_min = -0.5
-        self._y_max = 0.5
-        self._show_baseline = False
-        self.setFixedHeight(CHANNEL_HEADER_H)
-        self.setMinimumWidth(600)
-        self.set_samples(samples)
-
-    def set_zoom(self, zoom: float, pixels_per_point: float | None = None):
-        self._zoom = zoom
-        self._pixels_per_point = (
-            px_per_point(zoom) if pixels_per_point is None else pixels_per_point
-        )
-        self.setMinimumWidth(max(1, int(self._data_len * self._pixels_per_point)))
-        self.update()
-
-    def set_samples(self, samples: np.ndarray):
-        normalized = np.asarray(samples, dtype=np.float64)
-        if normalized is self._samples:
-            return
-        self._samples = normalized
-        if self._samples.size:
-            x_data = np.arange(self._samples.size, dtype=np.float64)
-            self._pyramid = LODPyramid(
-                x_data,
-                self._samples,
-                max_finest_points=PIPELINE_OVERVIEW_MAX_FINEST_POINTS,
-            )
-            finite = self._samples[np.isfinite(self._samples)]
-            if finite.size:
-                self._y_min = float(finite.min())
-                self._y_max = float(finite.max())
-            else:
-                self._y_min, self._y_max = -0.5, 0.5
-        else:
-            self._pyramid = None
-            self._y_min, self._y_max = -0.5, 0.5
-        self.update()
-
-    def set_baseline_visible(self, visible: bool) -> None:
-        self._show_baseline = bool(visible)
-        self.update()
-
-    def _visible_lod(self, left_px: int, right_px: int) -> tuple[np.ndarray, np.ndarray]:
-        if self._pyramid is None or self._samples.size == 0:
-            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
-        scale = self._pixels_per_point
-        start = max(0.0, float(left_px) / scale)
-        end = min(float(self._samples.size - 1), float(right_px + 1) / scale)
-        return self._pyramid.get(start, end, max(1, right_px - left_px + 1))
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        palette = self.palette()
-        painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
-
-        rect = event.rect()
-        if rect.width() <= 0:
-            painter.end()
-            return
-
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 1))
-
-        x_lod, y_lod = self._visible_lod(rect.left(), rect.right())
-        finite = np.isfinite(y_lod)
-        if not finite.any():
-            painter.end()
-            return
-
-        y_min, y_max = self._y_min, self._y_max
-        span = y_max - y_min
-        if span < 1e-12:
-            span = 1.0
-            y_min -= 0.5
-            y_max += 0.5
-
-        top = 3
-        bottom = self.height() - 3
-        height = max(1, bottom - top)
-
-        def to_y(value: float) -> int:
-            ratio = (value - y_min) / span
-            return int(bottom - ratio * height)
-
-        scale = self._pixels_per_point
-        x_pixels = np.rint(x_lod[finite] * scale).astype(np.int64)
-        values = y_lod[finite]
-        order = np.argsort(x_pixels, kind="stable")
-        x_pixels = x_pixels[order]
-        values = values[order]
-        starts = np.r_[0, np.flatnonzero(np.diff(x_pixels)) + 1]
-        ends = np.r_[starts[1:], x_pixels.size]
-        for start, end in zip(starts, ends):
-            x_pos = int(x_pixels[start])
-            if x_pos < rect.left() or x_pos > rect.right():
-                continue
-            bucket = values[start:end]
-            painter.drawLine(x_pos, to_y(float(bucket.min())), x_pos, to_y(float(bucket.max())))
-
-        if self._show_baseline and y_min <= 0.0 <= y_max:
-            painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 1))
-            baseline_y = to_y(0.0)
-            painter.drawLine(rect.left(), baseline_y, rect.right(), baseline_y)
-        painter.end()
-
-
-class RulerWidget(QWidget):
-    def __init__(self, snap: SnapEngine, data_len: int, parent=None) -> None:
-        super().__init__(parent)
-        self.snap = snap
-        self.data_len = max(1, data_len)
-        self.zoom = 6.0
-        self._pixels_per_point = px_per_point(self.zoom)
-        self.setFixedHeight(RULER_H)
-        self.setMinimumWidth(600)
-
-    def set_data_len(self, data_len: int):
-        self.data_len = max(1, data_len)
-        self.set_zoom(self.zoom, self._pixels_per_point)
-
-    def set_zoom(self, zoom: float, pixels_per_point: float | None = None):
-        self.zoom = zoom
-        self._pixels_per_point = (
-            px_per_point(zoom) if pixels_per_point is None else pixels_per_point
-        )
-        self.setMinimumWidth(max(1, int(self.data_len * self._pixels_per_point)))
-        self.update()
-
-    def paintEvent(self, _event) -> None:
-        painter = QPainter(self)
-        palette = self.palette()
-        painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
-        painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 0.5))
-        ruler_font = QFont("Courier New", 9)
-        painter.setFont(ruler_font)
-
-        step = max(50, self.snap.grid_pts)
-        label_width = painter.fontMetrics().horizontalAdvance(str(self.data_len))
-        tick_multiple, label_multiple = ruler_tick_multipliers(
-            step,
-            self.zoom,
-            min_label_pixels=max(48.0, label_width + 12.0),
-            pixels_per_point=self._pixels_per_point,
-        )
-        tick_step = step * tick_multiple
-        label_step = step * label_multiple
-        pts = 0
-        while pts <= self.data_len:
-            x_pos = int(pts * self._pixels_per_point)
-            is_labeled_tick = pts % label_step == 0
-            painter.drawLine(x_pos, 10 if is_labeled_tick else 16, x_pos, self.height())
-            if is_labeled_tick:
-                painter.setPen(palette.color(QPalette.ColorRole.Text))
-                painter.drawText(x_pos + 2, 13, str(pts))
-                painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 0.5))
-            pts += tick_step
-        painter.end()
+def is_global_time_tool(tool_id: str) -> bool:
+    return tool_registry.canonical_id(tool_id) in GLOBAL_TIME_TOOL_IDS
 
 
 class PipelineTrackWidget(QWidget):
@@ -597,10 +301,12 @@ class PipelineTrackWidget(QWidget):
         painter.fillRect(rect, color)
 
         status_meta = BLOCK_STATUS_STYLE.get(block.status, BLOCK_STATUS_STYLE["empty"])
-        handle_color = palette.color(QPalette.ColorRole.Light)
-        handle_color.setAlpha(24)
-        painter.fillRect(x1, 3, HANDLE_W, height, handle_color)
-        painter.fillRect(x2 - HANDLE_W, 3, HANDLE_W, height, handle_color)
+        locked = is_global_time_tool(block.tool_id)
+        if not locked:
+            handle_color = palette.color(QPalette.ColorRole.Light)
+            handle_color.setAlpha(24)
+            painter.fillRect(x1, 3, HANDLE_W, height, handle_color)
+            painter.fillRect(x2 - HANDLE_W, 3, HANDLE_W, height, handle_color)
 
         owner = self._owner()
         group_label = ""
@@ -662,7 +368,7 @@ class PipelineTrackWidget(QWidget):
         painter.drawText(
             rect.adjusted(content_left, 0, -(HANDLE_W + 4), -2),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-            f"{tool_text} [{status_text}]",
+            f"{'🔒 ' if locked else ''}{tool_text} [{status_text}]",
         )
 
     def dragEnterEvent(self, event) -> None:
@@ -691,6 +397,8 @@ class PipelineTrackWidget(QWidget):
         for block in reversed(self.layer.sorted_blocks()):
             x1 = int(self._pts_to_px(block.start))
             x2 = max(int(self._pts_to_px(block.end)), x1 + 12)
+            if is_global_time_tool(block.tool_id) and x1 <= x_pos <= x2:
+                return block, "locked"
             if x1 <= x_pos <= x1 + HANDLE_W:
                 return block, "resize_left"
             if x2 - HANDLE_W <= x_pos <= x2:
@@ -809,6 +517,11 @@ class PipelineTrackWidget(QWidget):
         if block is not None:
             self.selected_block_id = block.block_id
             self.block_selected.emit(block.block_id)
+            if mode == "locked":
+                self.setToolTip("全局处理覆盖完整时间范围，不能移动或调整时长。")
+                self.update()
+                event.accept()
+                return
             self._drag_block = block
             self._drag_mode = mode
             self._drag_origin_start = block.start
@@ -842,6 +555,8 @@ class PipelineTrackWidget(QWidget):
             owner = self._owner()
             if block is not None and block.settings_group_id and owner is not None:
                 self.setToolTip(owner._settings_group_tooltip(block.settings_group_id))
+            elif mode == "locked":
+                self.setToolTip("全局处理覆盖完整时间范围，不能移动或调整时长。")
             else:
                 self.setToolTip("")
             if mode in ("resize_left", "resize_right"):
@@ -1380,6 +1095,54 @@ class DataProcessPipelineWidget(QWidget):
     def channel_count(self) -> int:
         return len(self._channel_refs)
 
+    def has_blocks_for_channel(self, data_id: int, channel: str) -> bool:
+        pipeline = self._find_pipeline(data_id, channel)
+        return bool(
+            pipeline is not None
+            and any(layer.blocks for layer in pipeline.layers)
+        )
+
+    def reset_restored_data(self, data_id: int, channel: str | None) -> None:
+        """Discard only restored lanes, including open editors and late worker results."""
+        affected = {
+            ref for ref in self._channel_refs
+            if ref[0] == data_id and (channel is None or ref[1] == channel)
+        }
+        if not affected:
+            return
+        block_ids = {
+            block.block_id for pipeline in self.pipelines if pipeline.ref in affected
+            for layer in pipeline.layers for block in layer.blocks
+        }
+        for block_id in block_ids:
+            self._plugin_tasks.pop(block_id, None)
+            # The worker may still emit; generation lookup now rejects it.
+            self._plugin_bridges.pop(block_id, None)
+        for dialog in list(self._editor_dialogs):
+            if dialog.property("pipeline_block_id") in block_ids:
+                dialog.reject()
+        self.pipelines = [pipeline for pipeline in self.pipelines if pipeline.ref not in affected]
+        for ref in affected:
+            self._preview_cache.pop(ref, None)
+        if self.selected_block_id in block_ids:
+            self.selected_block_id = ""
+        if channel is None:
+            data = self._data_for(data_id)
+            refs = []
+            inserted = False
+            for ref in self._channel_refs:
+                if ref[0] != data_id:
+                    refs.append(ref)
+                elif not inserted:
+                    refs.extend((data_id, name) for name in data.channel_names())
+                    inserted = True
+            self._channel_refs = refs
+        self._sync_pipelines(self._channel_refs)
+        self._normalize_pipelines_for_current_window()
+        self._rebuild_lanes()
+        self._refresh_all_pipeline_statuses()
+        self._refresh_selection()
+
     def channel_refs(self) -> list[tuple[int, str]]:
         return list(self._channel_refs)
 
@@ -1551,6 +1314,16 @@ class DataProcessPipelineWidget(QWidget):
                 for block in layer.blocks:
                     if data_len <= 0:
                         self._invalidate_block_cache(block, "channel has no samples in the common time window")
+                        continue
+                    if is_global_time_tool(block.tool_id):
+                        if block.start != 0 or block.end != data_len:
+                            block.start = 0
+                            block.end = data_len
+                            self._invalidate_block_cache(
+                                block,
+                                "global time range changed; regenerating full-channel preview",
+                            )
+                        normalized_blocks.append(block)
                         continue
                     block.start = max(0, min(block.start, data_len))
                     block.end = max(block.start, min(block.end, data_len))
@@ -1774,10 +1547,28 @@ class DataProcessPipelineWidget(QWidget):
             QMessageBox.information(self, "提示", "当前 channel 在公共时间窗口内没有样点。")
             return
 
-        span = min(
+        global_time = is_global_time_tool(tool_id)
+        if global_time:
+            full_series = self._channel_series(data_id, channel_name)
+            common_series = self._channel_slice(data_id, channel_name)
+            if (
+                full_series is None
+                or len(full_series) != len(common_series)
+                or not full_series.index.equals(common_series.index)
+            ):
+                QMessageBox.warning(
+                    self,
+                    "无法添加全局处理",
+                    "当前 Pipeline 的公共时间范围没有覆盖该通道全部数据。\n"
+                    "请为该通道单独创建 Pipeline，或在数据管理器中右键立即处理。",
+                )
+                return
+        span = data_len if global_time else min(
             data_len,
             max(1, min(2000, max(200, data_len // 10))),
         )
+        if global_time:
+            start = 0
         snapped_start, _guides = self._snap.snap_interval(
             start,
             start + span,
@@ -1930,8 +1721,23 @@ class DataProcessPipelineWidget(QWidget):
         data_len = self._pipeline_data_len(pipeline)
         if data_len <= 0:
             return
-        span = min(data_len, int(payload["span_points"]))
-        start = max(0, min(data_len - span, int(start)))
+        global_time = is_global_time_tool(tool_id)
+        if global_time:
+            full_series = self._channel_series(data_id, channel_name)
+            common_series = self._channel_slice(data_id, channel_name)
+            if (
+                full_series is None
+                or len(full_series) != len(common_series)
+                or not full_series.index.equals(common_series.index)
+            ):
+                QMessageBox.warning(
+                    self,
+                    "无法粘贴全局处理",
+                    "当前 Pipeline 的公共时间范围没有覆盖该通道全部数据。",
+                )
+                return
+        span = data_len if global_time else min(data_len, int(payload["span_points"]))
+        start = 0 if global_time else max(0, min(data_len - span, int(start)))
         snapped_start, _guides = self._snap.snap_interval(
             start,
             start + span,
@@ -2657,7 +2463,22 @@ class DataProcessPipelineWidget(QWidget):
         block: PipelineBlock,
     ):
         plugin = tool_registry.get_plugin(block.tool_id)
-        if plugin is not None:
+        data = self._data_for(pipeline.data_id)
+        if plugin is not None and self._canonical_tool_id(block.tool_id) == "kp_selection":
+            series = self._channel_series(pipeline.data_id, pipeline.channel)
+            if data is None or series is None:
+                return
+            dialog = KpSelectionDialog(
+                f"#{pipeline.data_id} {data.name}",
+                series.index,
+                getattr(data, "kp_data", None),
+                self._editor_params(block),
+                self,
+                mode="pipeline",
+                allow_link_all=True,
+                link_all=bool(block.settings_group_id),
+            )
+        elif plugin is not None:
             dialog = PluginParamDialog(
                 plugin.info,
                 self._editor_params(block),
@@ -2676,7 +2497,11 @@ class DataProcessPipelineWidget(QWidget):
                 )
         else:
             dialog = PipelineParamDialog(
-                f"#{pipeline.data_id} {pipeline.channel}", layer.label, block, self
+                f"#{pipeline.data_id} {pipeline.channel}",
+                layer.label,
+                block,
+                TOOL_META,
+                self,
             )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2783,6 +2608,19 @@ class DataProcessPipelineWidget(QWidget):
         target = self._channel_slice(target_pipeline.data_id, target_pipeline.channel)
         if source.empty or target.empty:
             return None
+
+        if is_global_time_tool(source_block.tool_id):
+            full_target = self._channel_series(
+                target_pipeline.data_id,
+                target_pipeline.channel,
+            )
+            if (
+                full_target is None
+                or len(full_target) != len(target)
+                or not full_target.index.equals(target.index)
+            ):
+                return None
+            return 0, len(target)
 
         source_start = max(0, min(source_block.start, len(source)))
         source_end = max(source_start, min(source_block.end, len(source)))
@@ -3010,10 +2848,17 @@ class DataProcessPipelineWidget(QWidget):
             dt = (series.index[1] - series.index[0]).total_seconds()
         else:
             dt = 0.0
+        data = self._data_for(pipeline.data_id)
+        auxiliary = {}
+        if data is not None:
+            kp_data = getattr(data, "kp_data", None)
+            if isinstance(kp_data, pd.DataFrame):
+                auxiliary["kp_data"] = kp_data.copy(deep=True)
         channel_block = ChannelBlock(
             pipeline.channel,
             series,
             ChannelMeta(sample_rate=(1.0 / dt if dt > 0 else 0.0)),
+            auxiliary,
         )
         input_generation = self._pipeline_preview_signature(
             pipeline,
@@ -3350,6 +3195,11 @@ class DataProcessPipelineWidget(QWidget):
             if np.array_equal(current_snapshot, preview_snapshot, equal_nan=True):
                 continue
 
+            if self.data_manager is not None:
+                self.data_manager.capture_channel_processing_baseline(
+                    pipeline.data_id,
+                    pipeline.channel,
+                )
             updated_series = data.get_channel_series(pipeline.channel).copy()
             updated_series.loc[target_series.index] = preview_snapshot
             data.set_channel_series(pipeline.channel, updated_series)

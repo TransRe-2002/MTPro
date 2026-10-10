@@ -35,9 +35,9 @@ Typical pipeline::
     zf.to_edi("output.edi")
 """
 
-from emtf._binaries import resolve_binary, get_platform
-from emtf._runner import Workspace
-from emtf._config import (
+from emtf.binaries import resolve_binary, get_platform
+from emtf.runner import Workspace
+from emtf.config import (
     render_paths, render_decset, render_pwset,
     render_bands, render_options, render_tranmt_control,
 )

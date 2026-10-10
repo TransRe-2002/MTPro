@@ -245,7 +245,7 @@ def _estimate(
     levels = list(decimation_levels) if decimation_levels else _default_decimation(sample_rate_hz)
     band_list = list(bands) if bands else _default_bands(len(levels))
 
-    from emtf._runner import Workspace as _Workspace
+    from emtf.runner import Workspace as _Workspace
     ws = _Workspace(cleanup=cleanup, prefix="emtf_estimate_")
     try:
         # -- build channel list ------------------------------------------
@@ -296,9 +296,9 @@ def _estimate(
                      scales=[100.0, 100.0])
 
         # -- run dnff -a (ASCII mode) -------------------------------------
-        from emtf._binaries import resolve_binary
-        from emtf._config import render_paths, render_decset, render_pwset, render_dnff_stdin
-        from emtf._runner import run as _run
+        from emtf.binaries import resolve_binary
+        from emtf.config import render_paths, render_decset, render_pwset, render_dnff_stdin
+        from emtf.runner import run as _run
 
         ws.write("paths.cfg", render_paths(
             data_dir=".", sp_dir=".", fc_dir="FC",

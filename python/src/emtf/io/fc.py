@@ -137,6 +137,10 @@ class FCOutput:
         """
         id_zero = decimation_level - 1
         if_zero = freq_idx - 1
+        if not (0 <= id_zero < self.nd and 0 <= if_zero < self.nf):
+            raise ValueError("FC level/frequency index out of range")
+        if self.start_freqs[id_zero, if_zero] < 0:
+            raise ValueError("FC level/frequency not present in file")
         nch = self.nch
 
         dt = np.dtype(">i4") if self.endian == "big" else np.dtype("<i4")
@@ -151,23 +155,23 @@ class FCOutput:
             fh.seek(int(self.start_freqs[id_zero, if_zero]))
             head = np.frombuffer(fh.read(4 * irecl), dtype=dt)
             nsets = int(head[2])
+            # The scale record contains nch floats followed by record padding;
+            # unlike the data records it does NOT start with a set number.
+            scale_record = fh.read(4 * irecl)
+            scales = np.frombuffer(scale_record[:4 * nch], dtype=dt_f4) / 1000.0
 
             if self.lpack:
-                # Read scales
-                fh.seek(4, 1)  # skip leading 4 bytes
-                scales = np.frombuffer(fh.read(4 * nch), dtype=dt_f4)
-                scales = scales / 1000.0
                 # Read packed integers
                 ifc = np.frombuffer(fh.read(4 * (nch + 1) * nsets), dtype=dt)
                 ifc = ifc.reshape((nch + 1, nsets), order="F")
                 # Row 0 = set numbers, rows 1:nch+1 = packed FC values
                 return _unpack(ifc[1:, :], scales)
             else:
-                # Raw float pair format: skip one record then read interleaved real/imag
-                fh.seek(4 * irecl, 1)
-                raw = np.frombuffer(fh.read(4 * 2 * nch * nsets), dtype=dt_f4)
-                fc = raw.reshape((2 * nch, nsets), order="F")
-                return fc[0::2, :] + 1j * fc[1::2, :]
+                # Each record starts with an integer set number, followed by
+                # interleaved real/imaginary values normalised by the scales.
+                raw = np.frombuffer(fh.read(4 * irecl * nsets), dtype=dt_f4)
+                fc = raw.reshape((irecl, nsets), order="F")[1:]
+                return (fc[0::2, :] + 1j * fc[1::2, :]) * scales[:, None]
 
 
 def read_fc_spectrum(

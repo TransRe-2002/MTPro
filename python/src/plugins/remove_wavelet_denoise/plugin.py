@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from plugins.common.edit_codec import apply_operations, encode_edit
-from core.algorithms.step import wavelet_multiscale_denoise
+from core.algorithms.wavelet import wavelet_multiscale_denoise
 from plugin_api import ParamSpec, PluginInfo, TransformResult
 
 

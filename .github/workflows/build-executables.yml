@@ -55,6 +55,7 @@ jobs:
             --include-package=base \
             --include-package=processor \
             --include-package=io_utils \
+            --include-package=matio \
             --include-package=utils \
             --include-module=rust_lib \
             --include-data-dir=python/src/bin=bin \
@@ -120,6 +121,7 @@ jobs:
             --include-package=base `
             --include-package=processor `
             --include-package=io_utils `
+            --include-package=matio `
             --include-package=utils `
             --include-module=rust_lib `
             --include-data-dir=python/src/bin=bin `

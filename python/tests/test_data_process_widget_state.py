@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from PySide6.QtCore import QByteArray, QMimeData, QPoint, Qt
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTabWidget
 from unittest.mock import patch
 
 from base.data_manager import DataManager
 from core.em_data import EMData
 from ui.data_process import DataProcessWidget, WorkspaceMdiArea
-from ui.data_process_shared import DATA_TREE_SELECTION_MIME
+from ui.models.processing_tools import DATA_TREE_SELECTION_MIME
 from ui.data_process_pipeline import DataProcessPipelineWidget, PipelineBlock, TOOL_META
 from ui.data_tree_view import DataTreeViewer
 
@@ -66,17 +66,17 @@ def test_pipeline_toolbar_omits_preview_summary_button(qtbot):
     pipeline.close()
 
 
-def test_data_process_host_creates_an_all_channel_pipeline_for_active_data():
+def test_data_process_host_stays_empty_when_active_data_changes():
     _app()
     widget = DataProcessWidget()
     data = DemoData("demo", ["Ex1", "Hy1"])
 
     widget.init_data(data, 1)
-    assert len(widget.workspace.subWindowList()) == 1
-
-    pipeline = widget.pipeline_widget
-    assert pipeline is not None
-    assert pipeline.channel_refs() == [(1, "Ex1"), (1, "Hy1")]
+    assert widget.workspace.subWindowList() == []
+    assert widget.pipeline_widget is None
+    widget.init_data(DemoData("other", ["Hy1"]), 2)
+    assert widget.workspace.subWindowList() == []
+    assert widget.pipeline_widget is None
 
     widget.close()
 
@@ -98,15 +98,103 @@ def test_data_process_host_adds_selected_tool_to_pipeline_channel():
     widget.close()
 
 
-def test_data_process_uses_a_single_mdi_workspace():
+def test_data_process_restores_workspace_tabs():
     _app()
     widget = DataProcessWidget()
 
     assert isinstance(widget.workspace, WorkspaceMdiArea)
     assert widget.current_workspace() is widget.workspace
-    assert not hasattr(widget, "pipeline_panel")
+    tabs = widget.pipeline_panel.workspace_tabs
+    assert isinstance(tabs, QTabWidget)
+    assert [tabs.tabText(index) for index in range(tabs.count())] == ["工作区 1", "+"]
+    assert tabs.currentWidget() is widget.workspace
 
     widget.close()
+
+
+def test_workspace_plus_tab_starts_empty_and_preserves_other_workspace_state(qtbot):
+    widget = DataProcessWidget()
+    qtbot.addWidget(widget)
+    widget.init_data(DemoData("demo", ["Ex1"]), 1)
+    panel = widget.pipeline_panel
+    tabs = panel.workspace_tabs
+    first_workspace = widget.workspace
+    first_pipeline = widget._create_pipeline_window()
+    block = PipelineBlock(tool_id="remove_spike", start=0, end=3)
+    first_pipeline.pipelines[0].layers[0].blocks.append(block)
+
+    tabs.setCurrentIndex(tabs.count() - 1)
+
+    assert tabs.count() == 3
+    assert widget.workspace is not first_workspace
+    assert widget.pipeline_widget is None
+    assert widget.workspace.subWindowList() == []
+    tabs.setCurrentWidget(first_workspace)
+    assert widget.pipeline_widget is first_pipeline
+    assert first_pipeline.pipelines[0].layers[0].blocks == [block]
+
+
+def test_reordered_workspace_tabs_close_the_selected_page_and_keep_plus_last(qtbot):
+    widget = DataProcessWidget()
+    qtbot.addWidget(widget)
+    widget.init_data(DemoData("demo", ["Ex1"]), 1)
+    panel = widget.pipeline_panel
+    tabs = panel.workspace_tabs
+    first = widget.workspace
+    second = panel._create_workspace()
+    third = panel._create_workspace()
+    tabs.tabBar().moveTab(tabs.indexOf(first), tabs.indexOf(third))
+    tabs.tabBar().moveTab(tabs.count() - 1, 0)
+    assert tabs.count() == 4
+    assert tabs.tabText(tabs.count() - 1) == "+"
+
+    tabs.setCurrentWidget(second)
+    panel._close_workspace(tabs.indexOf(first))
+    assert panel.workspaces() == [second, third]
+    assert widget.workspace is second
+    panel._close_workspace(tabs.indexOf(second))
+    assert widget.workspace is third
+    panel._close_workspace(tabs.indexOf(third))
+    assert panel.workspaces() == [third]
+    assert tabs.count() == 2
+
+
+def test_workspace_context_and_data_cleanup_reach_inactive_tabs(qtbot):
+    manager = DataManager()
+    first_data = DemoData("one", ["Ex1"])
+    second_data = DemoData("two", ["Hy1"])
+    first_key, second_key = manager.add(first_data), manager.add(second_data)
+    widget = DataProcessWidget(manager)
+    qtbot.addWidget(widget)
+    widget.init_data(first_data, first_key)
+    widget._create_pipeline_window()
+    panel = widget.pipeline_panel
+    first = widget.workspace
+    second = panel._create_workspace()
+    widget._create_pipeline_window()
+    resolver = lambda: (second_key, "Hy1")
+    payload = lambda: {"kind": "dataset", "data_id": second_key}
+    cleared = []
+    widget.set_context_resolver(resolver)
+    widget.set_selection_payload_resolver(payload)
+    widget.set_clear_checked_channels(cleared.extend)
+    widget.init_data(second_data, second_key)
+    third = panel._create_workspace()
+    widget._create_pipeline_window()
+    for workspace in (first, second, third):
+        assert workspace.data_id == second_key
+        assert workspace._context_resolver is resolver
+        assert workspace._selection_payload_resolver is payload
+        workspace._clear_checked_channels([(second_key, "Hy1")])
+    assert cleared == [(second_key, "Hy1")] * 3
+    widget.close_windows_for_data(first_key)
+    for workspace in panel.workspaces():
+        for subwindow in workspace.subWindowList():
+            assert all(key != first_key for key, _ in subwindow.widget().channel_refs())
+    # Closing a workspace must not unload its source datasets.
+    panel._close_workspace(panel.workspace_tabs.indexOf(second))
+    assert manager.get(first_key) is first_data
+    assert manager.get(second_key) is second_data
 
 
 def test_data_process_creates_a_new_pipeline_mdi_subwindow(qtbot):
@@ -116,6 +204,8 @@ def test_data_process_creates_a_new_pipeline_mdi_subwindow(qtbot):
     qtbot.addWidget(widget)
     widget.init_data(data, 1)
 
+    assert widget.pipeline_widget is None
+    qtbot.mouseClick(widget.new_pipeline_button, Qt.MouseButton.LeftButton)
     first_pipeline = widget.pipeline_widget
     qtbot.mouseClick(widget.new_pipeline_button, Qt.MouseButton.LeftButton)
     second_pipeline = widget.workspace.active_pipeline_window()
@@ -246,6 +336,49 @@ class DropStub:
 
     def ignore(self):
         self.ignored = True
+
+
+def test_empty_tab_populates_only_from_dropped_data_and_appends_channels(qtbot, monkeypatch):
+    manager = DataManager()
+    first_key = manager.add(DemoData("first", ["Ex1", "Hy1"]))
+    second_key = manager.add(DemoData("second", ["Hy1"]))
+    widget = DataProcessWidget(manager)
+    qtbot.addWidget(widget)
+    widget.init_data(manager.get(first_key), first_key)
+    first_workspace = widget.workspace
+    assert first_workspace.subWindowList() == []
+
+    dataset_drop = DropStub({"kind": "dataset", "data_id": second_key})
+    first_workspace.dropEvent(dataset_drop)
+    assert dataset_drop.accepted
+    first_pipeline = widget.pipeline_widget
+    assert first_pipeline.channel_refs() == [(second_key, "Hy1")]
+
+    second_workspace = widget.pipeline_panel._create_workspace()
+    assert second_workspace.subWindowList() == []
+    channel_drop = DropStub({
+        "kind": "channels", "refs": [{"data_id": first_key, "channel_name": "Ex1"}],
+    })
+    second_workspace.dropEvent(channel_drop)
+    assert channel_drop.accepted
+    second_pipeline = widget.pipeline_widget
+    assert second_pipeline.channel_refs() == [(first_key, "Ex1")]
+
+    subwindow = second_workspace.pipeline_subwindow(second_pipeline)
+    monkeypatch.setattr(second_workspace, "_subwindow_at", lambda _pos: subwindow)
+    append_drop = DropStub({
+        "kind": "channels", "refs": [{"data_id": first_key, "channel_name": "Hy1"}],
+    })
+    second_workspace.dropEvent(append_drop)
+    assert append_drop.accepted
+    assert second_pipeline.channel_refs() == [(first_key, "Ex1"), (first_key, "Hy1")]
+    assert len(second_workspace.subWindowList()) == 1
+    widget.init_data(manager.get(second_key), second_key)
+    assert widget.pipeline_widget is second_pipeline
+    assert len(second_workspace.subWindowList()) == 1
+    widget.pipeline_panel.workspace_tabs.setCurrentWidget(first_workspace)
+    assert widget.pipeline_widget is first_pipeline
+    assert first_pipeline.channel_refs() == [(second_key, "Hy1")]
 
 
 def test_workspace_drop_uses_mime_payload_and_clears_added_refs(qtbot):
@@ -392,6 +525,7 @@ def test_pipeline_uses_shared_tool_drag_instead_of_a_second_tool_tree():
     data = DemoData("demo", ["Ex1"])
 
     widget.init_data(data, 1)
+    widget._create_pipeline_window()
 
     pipeline = widget.workspace.last_pipeline_window()
     assert pipeline is not None
@@ -408,6 +542,7 @@ def test_pipeline_drop_adds_block_from_shared_tool_payload():
     data = DemoData("demo", ["Ex1"])
 
     widget.init_data(data, 1)
+    widget._create_pipeline_window()
 
     pipeline = widget.workspace.last_pipeline_window()
     assert pipeline is not None
@@ -426,6 +561,7 @@ def test_manual_removal_blocks_start_ready_with_an_identity_preview():
     widget = DataProcessWidget()
     data = DemoData("demo", ["Ex1"])
     widget.init_data(data, 1)
+    widget._create_pipeline_window()
 
     pipeline_widget = widget.pipeline_widget
     assert pipeline_widget is not None
@@ -451,6 +587,7 @@ def test_pipeline_preview_commit_replays_downstream_edit_on_updated_upstream():
     data = DemoData("demo", ["Ex1"])
 
     widget.init_data(data, 1)
+    widget._create_pipeline_window()
 
     pipeline_widget = widget.workspace.last_pipeline_window()
     assert pipeline_widget is not None
@@ -593,7 +730,7 @@ def test_pipeline_commit_never_closes_other_pipeline_mdi_windows(qtbot):
     data = DemoData("demo", ["Ex1"])
     widget.init_data(data, 1)
 
-    first_pipeline = widget.pipeline_widget
+    first_pipeline = widget._create_pipeline_window()
     assert first_pipeline is not None
     second_pipeline = widget._create_pipeline_window()
     assert second_pipeline is not None

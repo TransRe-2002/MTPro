@@ -22,7 +22,7 @@ from plugin_api import (
     ParamSpec,
     PluginInfo,
 )
-from utils.app_state import AppState, default_app_state_path, load_app_state
+from base.app_state import AppState, default_app_state_path, load_app_state
 
 
 ENTRY_POINT_GROUP = "mtpro.plugins"

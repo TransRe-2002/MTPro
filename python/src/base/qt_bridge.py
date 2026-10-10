@@ -6,8 +6,8 @@
 
 典型用法::
 
-    from utils.concurrency import submit
-    from utils.qt_bridge import FutureBridge
+    from base.concurrency import submit
+    from base.qt_bridge import FutureBridge
 
     bridge = FutureBridge(owner=self)          # parent 防止提前析构
     bridge.done.connect(self._on_loaded)       # 主线程槽: (result,)
@@ -29,7 +29,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal
 
-from utils.concurrency import submit as _pool_submit
+from base.concurrency import submit as _pool_submit
 
 logger = logging.getLogger(__name__)
 

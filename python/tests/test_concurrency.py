@@ -7,8 +7,8 @@ import pytest
 from PySide6.QtCore import QEventLoop, QObject, QTimer
 from PySide6.QtWidgets import QApplication
 
-from utils.concurrency import compute_pool, io_pool, pool_for, submit
-from utils.qt_bridge import FutureBridge, run
+from base.concurrency import compute_pool, io_pool, pool_for, submit
+from base.qt_bridge import FutureBridge, run
 
 
 def _app():
@@ -111,7 +111,7 @@ def test_run_queues_callback_for_an_already_completed_future(monkeypatch):
     collector = _Collector()
     future = Future()
     future.set_exception(ValueError("already done"))
-    monkeypatch.setattr("utils.qt_bridge._pool_submit", lambda *a, **k: future)
+    monkeypatch.setattr("base.qt_bridge._pool_submit", lambda *a, **k: future)
 
     run("compute", lambda: None, on_error=collector.on_failed)
 

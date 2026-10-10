@@ -4,10 +4,22 @@ import uuid
 from dataclasses import dataclass, field
 
 import numpy as np
+import pandas as pd
 
 
 def uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+@dataclass
+class PreviewChannelSlice:
+    """Pipeline 编辑器传给插件预览器的单通道时间序列切片。"""
+
+    name: str
+    cts: pd.Series
+
+    def datetime_index(self):
+        return self.cts.index
 
 
 @dataclass

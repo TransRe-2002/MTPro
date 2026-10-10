@@ -7,7 +7,7 @@ from base.plugin_runtime import run_plugin_process
 from core.algorithms.spike import detect_auto_spikes
 from plugin_api import ChannelBlock
 from plugins.auto_spike_filter.plugin import AutoSpikeFilterPlugin
-from ui.data_process_shared import create_processing_tool_model
+from ui.models.processing_tools import create_processing_tool_model
 
 
 def _baseline(size: int = 301) -> np.ndarray:
@@ -79,7 +79,7 @@ def test_auto_spike_plugin_preserves_index_existing_nans_and_recipe_params():
 
 def test_auto_spike_filter_is_listed_in_processing_tools():
     model = create_processing_tool_model()
-    auto_category = model.item(1)
+    auto_category = model.item(2)
     tool_ids = {
         auto_category.child(row).data()
         for row in range(auto_category.rowCount())

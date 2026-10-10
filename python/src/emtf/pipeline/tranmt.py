@@ -8,14 +8,14 @@ estimate magnetotelluric impedance tensors from Fourier coefficient
 from pathlib import Path
 from collections.abc import Sequence
 
-from emtf._binaries import resolve_binary
-from emtf._config import (
+from emtf.binaries import resolve_binary
+from emtf.config import (
     render_bands,
     render_options,
     render_paths,
     render_tranmt_control,
 )
-from emtf._runner import Workspace, run
+from emtf.runner import Workspace, run
 from emtf.types import FrequencyBand, ProcessingOptions
 
 

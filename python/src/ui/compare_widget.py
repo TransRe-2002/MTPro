@@ -18,12 +18,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from base.time_viewport_mixin import TimeViewportMixin
+from ui.widgets.time_viewport import TimeViewportMixin
 from core.em_data import EMData
-from ui.brief_plot import BriefPlot
+from ui.widgets.brief_plot import BriefPlot
 from utils.series import dti_to_numpy, safe_nanmean
 from utils.decimate import LODPyramid, PYRAMID_MAX_FINEST_POINTS
-from utils.qt_bridge import run as run_in_pool
+from base.qt_bridge import run as run_in_pool
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 
 logger = logging.getLogger(__name__)

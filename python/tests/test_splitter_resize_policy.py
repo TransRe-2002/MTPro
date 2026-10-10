@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QLabel
 
 from base.data_manager import DataManager
 from core.em_data import EMData
-from ui.brief_plot import BOTTOM_AXIS_HEIGHT, LEFT_AXIS_WIDTH
+from ui.widgets.brief_plot import BOTTOM_AXIS_HEIGHT, LEFT_AXIS_WIDTH
 from ui.data_tree_view import DataTreeViewer
 from ui.data_view_widget import DataViewWidget
 

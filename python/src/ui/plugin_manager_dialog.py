@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from base.plugin_loader import LoadReport, default_plugin_dir, load_all_plugins
-from utils.app_state import AppState, save_app_state
+from base.app_state import AppState, save_app_state
 
 
 class PluginManagerDialog(QDialog):

@@ -10,7 +10,8 @@ from PySide6 import QtCore, QtWidgets
 from core.algorithms.spike import AutoSpikeDetection, detect_auto_spikes
 from plugins.common.base_processor import build_pkg_from_series
 from plugins.common.display import decimate_for_display
-from utils.qt_bridge import run as run_in_pool
+from plugins.common.plotting import ProcessingPlotWidget
+from base.qt_bridge import run as run_in_pool
 from utils.theme import configure_pyqtgraph_theme, pg_background
 
 
@@ -89,7 +90,9 @@ class AutoSpikeFilter(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel("等待加载数据…", self)
         self.status_label.setWordWrap(True)
 
-        self.plot_widget = pg.PlotWidget(self, axisItems={"bottom": pg.DateAxisItem()})
+        self.plot_widget = ProcessingPlotWidget(
+            self, axisItems={"bottom": pg.DateAxisItem()},
+        )
         self.plot_widget.setBackground(pg_background(self.plot_widget))
         self.plot_widget.getViewBox().setMouseEnabled(x=True, y=True)
         self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
@@ -103,7 +106,9 @@ class AutoSpikeFilter(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(
             QtWidgets.QLabel(
-                "红点为将自动置为 NaN 的短脉冲；橙点为长异常段或潜在台阶，仅标记不删除。",
+                "红点为将自动置为 NaN 的短脉冲；橙点为长异常段或潜在台阶，仅标记不删除。\n"
+                "图形操作：滚轮缩放；Ctrl+滚轮/中键拖动仅操作X轴；"
+                "Shift+滚轮/中键拖动仅操作Y轴；双击自适应视图。",
                 self,
             )
         )

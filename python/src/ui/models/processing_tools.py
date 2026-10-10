@@ -13,7 +13,8 @@ def create_processing_tool_model() -> QStandardItemModel:
     tree_model.setHorizontalHeaderLabels(["数据处理工具"])
 
     cat_manual_process = QStandardItem("手动数据处理")
-    cat_auto_process = QStandardItem("自动数据处理")
+    cat_global_process = QStandardItem("全局自动处理")
+    cat_auto_process = QStandardItem("局部自动处理")
 
     remove_region_item = QStandardItem("框选区域去噪")
     remove_region_item.setData("remove region", Qt.UserRole + 1)
@@ -35,9 +36,17 @@ def create_processing_tool_model() -> QStandardItemModel:
     emd_denoise_item.setData("emd_denoise", Qt.UserRole + 1)
     cat_auto_process.appendRow(emd_denoise_item)
 
-    detrend_item = QStandardItem("去趋势")
+    demean_item = QStandardItem("去均值")
+    demean_item.setData("demean", Qt.UserRole + 1)
+    cat_global_process.appendRow(demean_item)
+
+    detrend_item = QStandardItem("线性去趋势")
     detrend_item.setData("detrend", Qt.UserRole + 1)
-    cat_auto_process.appendRow(detrend_item)
+    cat_global_process.appendRow(detrend_item)
+
+    kp_selection_item = QStandardItem("Kp 阈值选取")
+    kp_selection_item.setData("kp_selection", Qt.UserRole + 1)
+    cat_global_process.appendRow(kp_selection_item)
 
     median_filter_item = QStandardItem("滑动中值滤波")
     median_filter_item.setData("median_filter", Qt.UserRole + 1)
@@ -81,5 +90,6 @@ def create_processing_tool_model() -> QStandardItemModel:
 
     root = tree_model.invisibleRootItem()
     root.appendRow(cat_manual_process)
+    root.appendRow(cat_global_process)
     root.appendRow(cat_auto_process)
     return tree_model

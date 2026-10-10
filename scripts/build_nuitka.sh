@@ -80,6 +80,7 @@ COMMON_FLAGS=(
   --include-package=base
   --include-package=processor
   --include-package=io_utils
+  --include-package=matio
   --include-package=utils
   --include-package=emtf
   --include-data-dir="$PY_DIR/src/bin=bin"
@@ -88,7 +89,7 @@ COMMON_FLAGS=(
   --lto=yes
   --noinclude-pytest-mode=nofollow
   --noinclude-unittest-mode=nofollow
-  --noinclude-pydoc-mode=nofollow
+  --include-module=pydoc
   --noinclude-IPython-mode=nofollow
   --noinclude-setuptools-mode=nofollow
   "${EXCLUDE_FLAGS[@]}"

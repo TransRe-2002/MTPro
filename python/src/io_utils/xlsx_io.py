@@ -20,7 +20,7 @@ import pytz
 
 from core.xlsx_data import XlsxEMData
 from io_utils.em_io import EMDataLoader
-from utils.concurrency import io_pool
+from base.concurrency import io_pool
 # 阈值与点数格式化已提升至 utils.limits（降采样对话框共用）；
 # 此处 import 兼作 re-export，现有 `from io_utils.xlsx_io import ...` 不受影响。
 from utils.limits import MAX_POINTS_PER_CHANNEL, format_points  # noqa: F401

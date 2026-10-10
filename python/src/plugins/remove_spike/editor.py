@@ -261,14 +261,8 @@ class SpikePlotWidget(pg.PlotWidget):
             logger.warning("更新选择矩形错误: %s", e)
 
     def wheelEvent(self, ev: QtGui.QWheelEvent) -> None:
-        modifiers = ev.modifiers()
         vb = self.getViewBox()
-        if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
-            vb.setMouseEnabled(x=True, y=False)
-        elif modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
-            vb.setMouseEnabled(x=False, y=True)
-        else:
-            vb.setMouseEnabled(x=True, y=True)
+        apply_modifier_axis_constraint(vb, ev.modifiers())
         super().wheelEvent(ev)
         vb.setMouseEnabled(x=True, y=True)
 
@@ -435,13 +429,11 @@ class RemoveSpike(QtWidgets.QWidget):
         self.plot_item = None
 
         self.status_label = QtWidgets.QLabel("当前选中: 0 个数据点")
-        self.instruction_label = QtWidgets.QLabel(
-            "操作说明: 左键框选添加点 | 右键框选取消点 | 中键移动视图 | "
-            "Ctrl+Z撤销删除 | Ctrl+S保存 | Delete删除选中点 | Tab切换模式 | 双击自适应视图\n"
-            "         Shift+滚轮/中键拖动 → 约束X轴 | Alt+滚轮/中键拖动 → 约束Y轴"
-        )
+        self.instruction_label = QtWidgets.QLabel()
+        self.instruction_label.setWordWrap(True)
 
         self._init_ui()
+        self._update_instruction_label()
         self._connect_signals()
         self._init_shortcuts()
         if self._series_source is not None:
@@ -568,6 +560,18 @@ class RemoveSpike(QtWidgets.QWidget):
             self.plot_widget.set_selection_mode('zoom')
             self.mode_toggle_btn.setText("切换为选点模式")
             self.mode_label.setText("当前模式: 框选放大")
+        self._update_instruction_label()
+
+    def _update_instruction_label(self) -> None:
+        if self.plot_widget.selection_mode == 'select':
+            mode_help = "框选选点模式：左键框选添加点 | 右键框选取消点 | Tab/按钮切换为放大模式"
+        else:
+            mode_help = "框选放大模式：左键框选放大 | 右键拖动缩放 | Tab/按钮切换为选点模式"
+        self.instruction_label.setText(
+            f"操作说明（{mode_help}） | 中键移动视图 | 双击自适应视图\n"
+            "         Ctrl+滚轮/中键拖动 → 仅操作X轴 | Shift+滚轮/中键拖动 → 仅操作Y轴 | "
+            "Ctrl+Z撤销删除 | Ctrl+S保存 | Delete删除选中点"
+        )
 
     def _on_selection_changed(self, count: int):
         self.status_label.setText(f"当前选中: {count} 个数据点")

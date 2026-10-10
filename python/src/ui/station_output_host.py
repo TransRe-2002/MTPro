@@ -38,6 +38,7 @@ class StationOutputHost(QWidget):
         if self.data_manager is not None:
             self.data_manager.data_changed.connect(self._on_data_changed)
             self.data_manager.data_removed.connect(self._on_data_removed)
+            self.data_manager.data_restored.connect(self._on_data_restored)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -120,6 +121,13 @@ class StationOutputHost(QWidget):
     def _on_data_changed(self, data_id: int, structural: bool) -> None:
         del structural
         self.invalidate_data(data_id)
+
+    def _on_data_restored(self, data_id: int, channel: str | None) -> None:
+        for window in self.mdi_area.subWindowList():
+            widget = window.widget()
+            invalidate = getattr(widget, "on_source_restored", None)
+            if invalidate is not None:
+                invalidate(data_id)
 
     def _on_data_removed(self, data_id: int) -> None:
         self._package_cache.pop(data_id, None)

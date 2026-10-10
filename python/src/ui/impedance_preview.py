@@ -10,7 +10,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView,
+    QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
     QPushButton, QSplitter, QStackedWidget, QTabWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
@@ -18,9 +18,15 @@ from PySide6.QtWidgets import (
 
 from core.impedance_result import ImpedanceResult
 from ui.impedance_comparison import ImpedanceComparisonWindow
-from ui.impedance_plot import draw_impedance_response, draw_tipper_response
+from ui.impedance_stitch import ImpedanceStitchWidget
+from ui.impedance_plot import draw_c_response, draw_impedance_response, draw_tipper_response
+from output_tools.shared.c_response import c_response_from_bands
 from ui.dialogs.figure_export import default_export_name, export_matplotlib_figure_with_dialog
-from ui.theme import configure_matplotlib_canvas, configure_matplotlib_fonts
+from ui.theme import (
+    configure_matplotlib_canvas,
+    configure_matplotlib_fonts,
+    hide_matplotlib_reset_button,
+)
 from utils.plot_colors import DistinctColorAllocator
 
 configure_matplotlib_fonts()
@@ -151,6 +157,7 @@ class ImpedancePreviewWidget(QWidget):
         self.method_filter.addItem("全部", "all")
         self.method_filter.addItem("Robust 估计", "robust estimate")
         self.method_filter.addItem("远参考法", "remote reference")
+        self.method_filter.addItem("拼接结果", "stitched impedance")
         self.method_filter.currentIndexChanged.connect(self._refresh_list)
 
         self.rename_btn = QPushButton("重命名", self)
@@ -166,6 +173,9 @@ class ImpedancePreviewWidget(QWidget):
         self.compare_btn = QPushButton("对比所选 (0)", self)
         self.compare_btn.setEnabled(False)
         self.compare_btn.clicked.connect(self._open_comparison)
+        self.stitch_btn = QPushButton("拼接所选 (0)", self)
+        self.stitch_btn.setEnabled(False)
+        self.stitch_btn.clicked.connect(self._open_stitch)
 
         left_toolbar = QHBoxLayout()
         left_toolbar.addWidget(self.method_filter, 1)
@@ -177,6 +187,7 @@ class ImpedancePreviewWidget(QWidget):
         comparison_toolbar.addWidget(self.select_all_btn)
         comparison_toolbar.addWidget(self.clear_selection_btn)
         comparison_toolbar.addStretch(1)
+        comparison_toolbar.addWidget(self.stitch_btn)
         comparison_toolbar.addWidget(self.compare_btn)
 
         left_panel = QWidget(self)
@@ -196,11 +207,14 @@ class ImpedancePreviewWidget(QWidget):
         self.export_csv_btn.clicked.connect(lambda: self._export_data("csv"))
         self.export_figure_btn = QPushButton("输出图像", self)
         self.export_figure_btn.clicked.connect(self._export_figure)
+        self.reset_view_btn = QPushButton("复原", self)
+        self.reset_view_btn.clicked.connect(self._reset_current_figure)
 
         # ── Impedance tab: figure / adjustable table area ──────────
         self.main_figure = Figure(figsize=(8, 6), tight_layout=True)
         self.main_canvas = FigureCanvas(self.main_figure)
         configure_matplotlib_canvas(self.main_canvas, self.main_figure, self)
+        hide_matplotlib_reset_button(self.main_canvas)
 
         self.impedance_table = self._make_table([
             "freq (Hz)", "period (s)", "Zxx", "Zxy", "Zyx", "Zyy",
@@ -210,34 +224,14 @@ class ImpedancePreviewWidget(QWidget):
             "freq (Hz)", "period (s)", "ρxy", "ρyx", "φxy", "φyx",
             "ρxy SE", "ρyx SE", "φxy SE", "φyx SE",
         ])
-        self.impedance_table_stack = QStackedWidget(self)
-        self.impedance_table_stack.addWidget(self.impedance_table)
-        self.impedance_table_stack.addWidget(self.rho_table)
-
-        self.tensor_table_btn = QPushButton("阻抗张量", self)
-        self.tensor_table_btn.setCheckable(True)
-        self.tensor_table_btn.setChecked(True)
-        self.tensor_table_btn.clicked.connect(lambda: self._show_impedance_table(0))
-        self.rho_table_btn = QPushButton("视电阻率/相位", self)
-        self.rho_table_btn.setCheckable(True)
-        self.rho_table_btn.clicked.connect(lambda: self._show_impedance_table(1))
-        table_switch = QHBoxLayout()
-        table_switch.setContentsMargins(0, 0, 0, 0)
-        table_switch.addWidget(self.tensor_table_btn)
-        table_switch.addWidget(self.rho_table_btn)
-        table_switch.addStretch(1)
-
-        impedance_table_area = QWidget(self)
-        impedance_table_grid = QGridLayout(impedance_table_area)
-        impedance_table_grid.setContentsMargins(0, 0, 0, 0)
-        impedance_table_grid.addLayout(table_switch, 0, 0)
-        impedance_table_grid.addWidget(self.impedance_table_stack, 1, 0)
-        impedance_table_grid.setRowStretch(1, 1)
+        self.impedance_table_tabs = QTabWidget(self)
+        self.impedance_table_tabs.addTab(self.impedance_table, "阻抗张量")
+        self.impedance_table_tabs.addTab(self.rho_table, "视电阻率/相位")
 
         self.impedance_splitter = QSplitter(Qt.Orientation.Vertical, self)
         self.impedance_splitter.setChildrenCollapsible(False)
         self.impedance_splitter.addWidget(self.main_canvas)
-        self.impedance_splitter.addWidget(impedance_table_area)
+        self.impedance_splitter.addWidget(self.impedance_table_tabs)
         self.impedance_splitter.setSizes([520, 280])
         impedance_page = QWidget(self)
         impedance_layout = QVBoxLayout(impedance_page)
@@ -261,6 +255,7 @@ class ImpedancePreviewWidget(QWidget):
         self.tipper_figure = Figure(figsize=(8, 5), tight_layout=True)
         self.tipper_canvas = FigureCanvas(self.tipper_figure)
         configure_matplotlib_canvas(self.tipper_canvas, self.tipper_figure, self)
+        hide_matplotlib_reset_button(self.tipper_canvas)
 
         tipper_plot_area = QWidget(self)
         tipper_plot_layout = QVBoxLayout(tipper_plot_area)
@@ -279,6 +274,40 @@ class ImpedancePreviewWidget(QWidget):
         tipper_layout.addWidget(self.tipper_splitter)
         self._tipper_page = tipper_page
 
+        # ── C-response tab ────────────────────────────────────────
+        self.c_response_table = self._make_table([
+            "freq (Hz)", "period (s)", "Cxx (m)", "Cxy (m)", "Cyx (m)", "Cyy (m)",
+        ])
+        self.c_response_mode = QComboBox(self)
+        self.c_response_mode.addItem("实部/虚部", "re_im")
+        self.c_response_mode.addItem("幅值/相位", "amp_phase")
+        self.c_response_mode.currentIndexChanged.connect(lambda _index: self._draw_c_response())
+        c_response_mode_row = QHBoxLayout()
+        c_response_mode_row.addStretch(1)
+        c_response_mode_row.addWidget(QLabel("图形类型："))
+        c_response_mode_row.addWidget(self.c_response_mode)
+
+        self.c_response_figure = Figure(figsize=(8, 6), tight_layout=True)
+        self.c_response_canvas = FigureCanvas(self.c_response_figure)
+        configure_matplotlib_canvas(self.c_response_canvas, self.c_response_figure, self)
+        hide_matplotlib_reset_button(self.c_response_canvas)
+        c_response_plot_area = QWidget(self)
+        c_response_plot_layout = QVBoxLayout(c_response_plot_area)
+        c_response_plot_layout.setContentsMargins(0, 0, 0, 0)
+        c_response_plot_layout.addLayout(c_response_mode_row)
+        c_response_plot_layout.addWidget(self.c_response_canvas, 1)
+
+        self.c_response_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self.c_response_splitter.setChildrenCollapsible(False)
+        self.c_response_splitter.addWidget(c_response_plot_area)
+        self.c_response_splitter.addWidget(self.c_response_table)
+        self.c_response_splitter.setSizes([520, 280])
+        c_response_page = QWidget(self)
+        c_response_layout = QVBoxLayout(c_response_page)
+        c_response_layout.setContentsMargins(0, 0, 0, 0)
+        c_response_layout.addWidget(self.c_response_splitter)
+        self._c_response_page = c_response_page
+
         # ── Snapshot information tab ───────────────────────────────
         self.name_edit, self.station_edit, self.remote_edit = QLineEdit(), QLineEdit(), QLineEdit()
         self.lat_edit, self.lon_edit, self.elev_edit = QLineEdit(), QLineEdit(), QLineEdit()
@@ -296,6 +325,7 @@ class ImpedancePreviewWidget(QWidget):
         self.tabs = QTabWidget(self)
         self._impedance_tab_index = self.tabs.addTab(impedance_page, "阻抗数据")
         self._tipper_tab_index = self.tabs.addTab(tipper_page, "倾子数据")
+        self._c_response_tab_index = self.tabs.addTab(c_response_page, "C 响应函数")
         self._info_tab_index = self.tabs.addTab(info_page, "快照信息")
         self.tabs.currentChanged.connect(self._sync_export_controls)
 
@@ -303,6 +333,7 @@ class ImpedancePreviewWidget(QWidget):
         export_layout = QHBoxLayout(export_corner)
         export_layout.setContentsMargins(0, 0, 4, 0)
         export_layout.setSpacing(4)
+        export_layout.addWidget(self.reset_view_btn)
         for button in (
             self.export_edi_btn, self.export_z_btn,
             self.export_csv_btn, self.export_figure_btn,
@@ -355,19 +386,9 @@ class ImpedancePreviewWidget(QWidget):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         return table
 
-    def _show_impedance_table(self, index: int) -> None:
-        self.impedance_table_stack.setCurrentIndex(index)
-        self.tensor_table_btn.setChecked(index == 0)
-        self.rho_table_btn.setChecked(index == 1)
-
     @staticmethod
     def _snapshot_has_tipper(snapshot: ImpedanceSnapshot) -> bool:
-        bands = snapshot.bands
-        return (
-            bands is not None
-            and getattr(bands, "tzx", None) is not None
-            and getattr(bands, "tzy", None) is not None
-        )
+        return snapshot.has_tipper
 
     def _begin_item_rename(self, item: QListWidgetItem, _column: int = 0) -> None:
         if item is None:
@@ -405,6 +426,8 @@ class ImpedancePreviewWidget(QWidget):
         count = len(self._checked_results())
         self.compare_btn.setText(f"对比所选 ({count})")
         self.compare_btn.setEnabled(count >= 2)
+        self.stitch_btn.setText(f"拼接所选 ({count})")
+        self.stitch_btn.setEnabled(count == 2)
         self.select_all_btn.setEnabled(self.list.count() > 0)
         self.clear_selection_btn.setEnabled(count > 0)
 
@@ -432,10 +455,27 @@ class ImpedancePreviewWidget(QWidget):
                 self._color_allocator,
                 self.window(),
             )
-        self._comparison_window.set_results(results)
+        self._comparison_window.set_results(
+            results,
+            tipper_mode=str(self.tipper_mode.currentData()),
+        )
         self._comparison_window.show()
         self._comparison_window.raise_()
         self._comparison_window.activateWindow()
+
+    def _open_stitch(self) -> None:
+        results = self._checked_results()
+        if len(results) != 2:
+            QMessageBox.information(self, "阻抗周期拼接", "请勾选恰好两个阻抗结果。")
+            return
+        widget = ImpedanceStitchWidget(results, self)
+        widget.result_created.connect(self._save_stitched_result)
+        widget.exec()
+
+    def _save_stitched_result(self, payload: dict) -> None:
+        result = self.pool.add_payload(payload)
+        self.method_filter.setCurrentIndex(self.method_filter.findData("all"))
+        self.select_snapshot(result.snapshot_id)
 
     def _show_list_context_menu(self, pos) -> None:
         item = self.list.itemAt(pos)
@@ -462,7 +502,8 @@ class ImpedancePreviewWidget(QWidget):
         current = self.tabs.currentWidget()
         figure_page = current is self._impedance_page or (
             current is self._tipper_page and self.tabs.isTabVisible(self._tipper_tab_index)
-        )
+        ) or current is self._c_response_page
+        self.reset_view_btn.setEnabled(bool(selected) and figure_page)
         self.export_figure_btn.setEnabled(bool(selected) and figure_page)
 
     def select_snapshot(self, snapshot_id: str) -> None:
@@ -539,6 +580,7 @@ class ImpedancePreviewWidget(QWidget):
         self.tabs.setTabVisible(self._tipper_tab_index, has_tipper)
         self._draw_main(selected)
         self._draw_tipper()
+        self._draw_c_response(selected)
         self._fill_details(selected[0] if one else None)
         self.rename_btn.setEnabled(one)
         self.delete_btn.setEnabled(bool(selected))
@@ -562,8 +604,21 @@ class ImpedancePreviewWidget(QWidget):
             self,
         )
 
+    def _draw_c_response(self, selected: list[ImpedanceSnapshot] | None = None) -> None:
+        selected = self._selected() if selected is None else selected
+        draw_c_response(
+            self.c_response_figure,
+            self.c_response_canvas,
+            [snapshot.bands for snapshot in selected],
+            mode=str(self.c_response_mode.currentData()),
+            widget=self,
+        )
+
     def _fill_details(self, snapshot: ImpedanceSnapshot | None) -> None:
-        for table in (self.impedance_table, self.rho_table, self.tipper_table): table.setRowCount(0)
+        for table in (
+            self.impedance_table, self.rho_table, self.tipper_table, self.c_response_table,
+        ):
+            table.setRowCount(0)
         edits = (self.name_edit, self.station_edit, self.remote_edit, self.lat_edit, self.lon_edit, self.elev_edit)
         for edit in edits: edit.setEnabled(snapshot is not None); edit.clear()
         self.range_label.clear(); self.channels_label.clear()
@@ -588,6 +643,13 @@ class ImpedancePreviewWidget(QWidget):
         if tzx is not None and tzy is not None:
             tzx, tzy = np.asarray(tzx), np.asarray(tzy); tzx_se = np.asarray(getattr(bands, "tzx_se", np.full(len(p), np.nan))); tzy_se = np.asarray(getattr(bands, "tzy_se", np.full(len(p), np.nan))); n = min(map(len, (p, f, tzx, tzy, tzx_se, tzy_se)))
             self._set_rows(self.tipper_table, [[f[i], p[i], self._complex_text(tzx[i]), self._complex_text(tzy[i]), tzx_se[i], tzy_se[i]] for i in range(n)])
+        components = c_response_from_bands(bands)
+        if components:
+            n = min(len(p), len(f), *(len(values) for values in components.values()))
+            self._set_rows(
+                self.c_response_table,
+                [[f[i], p[i], *(self._complex_text(components[name][i]) for name in ("cxx", "cxy", "cyx", "cyy"))] for i in range(n)],
+            )
 
     @staticmethod
     def _set_rows(table: QTableWidget, rows: list[list[object]]) -> None:
@@ -663,8 +725,22 @@ class ImpedancePreviewWidget(QWidget):
         elif self.tabs.currentWidget() is self._tipper_page:
             mode = str(self.tipper_mode.currentData())
             figure, canvas, slug = self.tipper_figure, self.tipper_canvas, f"tipper_{mode}"
+        elif self.tabs.currentWidget() is self._c_response_page:
+            mode = str(self.c_response_mode.currentData())
+            figure, canvas, slug = self.c_response_figure, self.c_response_canvas, f"c_response_{mode}"
         else: QMessageBox.information(self, "输出图像", "请先切换到视电阻率/相位图或倾子图。"); return
         export_matplotlib_figure_with_dialog(self, figure, canvas, default_directory=Path.cwd(), default_name=default_export_name(selected[0].station_name or "comparison", slug))
+
+    def _reset_current_figure(self) -> None:
+        canvas = {
+            self._impedance_page: self.main_canvas,
+            self._tipper_page: self.tipper_canvas,
+            self._c_response_page: self.c_response_canvas,
+        }.get(self.tabs.currentWidget())
+        controller = getattr(canvas, "_mtpro_interaction_controller", None)
+        if controller is not None:
+            controller.reset()
+
     def closeEvent(self, event) -> None:
         if self._comparison_window is not None:
             self._comparison_window.close()

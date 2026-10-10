@@ -20,8 +20,8 @@ Layout summary (verified against R2025b-written files)::
                   [2:]  property values, arr[2+i] <-> i-th property name
                         (string table order, class name excluded)
 
-Files this cannot handle (e.g. v7.3/HDF5 object saves) fall back to the
-optional external ``mtpro_ts_convert`` executable if available.
+Files this cannot handle (e.g. v7.3/HDF5 object saves) use the complete
+mat-io reader in ts_object_io, also without MATLAB Runtime.
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ _MCOS_WORKSPACE_MINI_HEADER = 8  # version(2B) + endian(2B) + zeros(4B)
 
 # 与 matlab/TS.m 一致的属性集合。新版 MATLAB 的 TS 对象文件可能携带额外的
 # table 内部属性（ndims/nrows/rownames/nvars/varnames/props/table 等），
-# 其中可能含有 scipy 无法写回的值（如 None），且 mtpro_ts_convert 的
-# struct_to_ts 只会拷贝 TS 类已定义的属性——这些额外属性在所有路径上都是
+# 其中可能含有 scipy 无法写回的值（如 None），TS 写入适配器
+# 只会拷贝 TS 类已定义的属性——这些额外属性在所有路径上都是
 # 死数据，重建时直接丢弃。
 _TS_FIELDS = frozenset({
     'NCh', 'npts', 'data', 'startTime', 'zeroTime', 'endTime',

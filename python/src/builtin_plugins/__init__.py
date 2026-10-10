@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from plugins.auto_spike_filter.plugin import AutoSpikeFilterPlugin
+from plugins.demean.plugin import DemeanPlugin
 from plugins.detrend.plugin import DetrendPlugin
 from plugins.emd_denoise.plugin import EMDDenoisePlugin
 from plugins.iir_filter.plugin import IIRFilterPlugin
+from plugins.kp_selection.plugin import KpSelectionPlugin
 from plugins.median_filter.plugin import MedianFilterPlugin
 from plugins.morphological_filter.plugin import MorphologicalFilterPlugin
 from plugins.remove_diurnal_sinusoid.plugin import DiurnalSinusoidPlugin
@@ -24,7 +26,9 @@ BUILTIN_PLUGINS: list[type] = [
     SpikeRemovalPlugin,
     AutoSpikeFilterPlugin,
     EMDDenoisePlugin,
+    DemeanPlugin,
     DetrendPlugin,
+    KpSelectionPlugin,
     MedianFilterPlugin,
     MorphologicalFilterPlugin,
     IIRFilterPlugin,

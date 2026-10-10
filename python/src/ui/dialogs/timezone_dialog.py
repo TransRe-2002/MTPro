@@ -1,4 +1,4 @@
-"""MAT 文件时区选择对话框。
+"""无时区文件的时区选择对话框。
 
 MAT 格式的 tsStruct 中时间字段（startTime / endTime / zeroTime）
 仅存储为 [year, month, day, hour, minute, second] 数组，不包含时区信息。
@@ -96,9 +96,16 @@ class TimezoneDialog(QDialog):
         # 说明文字
         info_label = QLabel(self)
         info_label.setWordWrap(True)
+        suffix = Path(filepath).suffix.lower()
+        format_name = "TXT" if suffix == ".txt" else "MAT"
+        unit_note = (
+            "\nTXT 不声明物理单位，导入后按磁场 nT、电场 mV/km 解释。"
+            if suffix == ".txt"
+            else ""
+        )
         info_label.setText(
-            "MAT 文件中存储的时间数据不包含时区信息。\n"
-            "请选择该数据采集站点所在的时区，以便正确解析时间坐标。"
+            f"{format_name} 文件中存储的时间数据不包含时区信息。\n"
+            f"请选择该数据采集站点所在的时区，以便正确解析时间坐标。{unit_note}"
         )
         layout.addWidget(info_label)
 

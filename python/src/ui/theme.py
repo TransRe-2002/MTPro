@@ -103,8 +103,28 @@ def configure_matplotlib_figure(figure, widget: QWidget | None = None) -> None:
 
 
 def configure_matplotlib_canvas(canvas, figure, widget: QWidget | None = None) -> None:
+    from ui.widgets.matplotlib_interaction import configure_matplotlib_interactions
+
     configure_matplotlib_figure(figure, widget)
     bg = QColor("white").name()
     canvas.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
     canvas.setAutoFillBackground(True)
     canvas.setStyleSheet(f"background-color: {bg};")
+    configure_matplotlib_interactions(canvas, figure)
+
+
+def add_matplotlib_reset_button(canvas, layout):
+    """Place a canvas's reset control in an external Qt layout."""
+    controller = getattr(canvas, "_mtpro_interaction_controller", None)
+    if controller is None:
+        return None
+    controller.attach_reset_button(layout)
+    controller.reset_button.setVisible(False)
+    return controller.reset_button
+
+
+def hide_matplotlib_reset_button(canvas) -> None:
+    """Hide a canvas-owned reset button while retaining pan and zoom."""
+    controller = getattr(canvas, "_mtpro_interaction_controller", None)
+    if controller is not None:
+        controller.hide_reset_button()

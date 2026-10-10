@@ -123,6 +123,10 @@ class ChannelManagementDialog(QDialog):
                 raise ValueError("通道改名存在循环依赖，无法应用")
         return applied, len(deleted)
 
+    def channel_changes(self) -> tuple[dict[str, str], set[str]]:
+        """Return the validated rename/delete plan selected by the user."""
+        return dict(self._rename_pairs()), set(self._deleted_names())
+
     # ------------------------------------------------------------------
     # 行状态读取
     # ------------------------------------------------------------------

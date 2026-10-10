@@ -7,11 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PySide6.QtWidgets import QApplication
 
-from ui.data_process_pipeline import (
-    ChannelOverviewWidget,
-    points_to_pixels,
-    ruler_tick_multipliers,
-)
+from core.pipeline_layout import points_to_pixels, ruler_tick_multipliers
+from ui.widgets.pipeline_overview import ChannelOverviewWidget
 from utils.decimate import LODPyramid
 
 

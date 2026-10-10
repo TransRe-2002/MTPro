@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from base.plugin_runtime import run_plugin_process
-from core.algorithms.step import wavelet_multiscale_denoise
+from core.algorithms.wavelet import wavelet_multiscale_denoise
 from plugin_api import ChannelBlock
 from plugins.remove_wavelet_denoise.plugin import WaveletDenoisePlugin
 

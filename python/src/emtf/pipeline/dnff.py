@@ -11,9 +11,9 @@ feeds into ``tranmt`` for transfer function estimation.
 from pathlib import Path
 from collections.abc import Sequence
 
-from emtf._binaries import resolve_binary
-from emtf._config import render_paths, render_decset, render_pwset, render_dnff_stdin
-from emtf._runner import Workspace, run
+from emtf.binaries import resolve_binary
+from emtf.config import render_paths, render_decset, render_pwset, render_dnff_stdin
+from emtf.runner import Workspace, run
 from emtf.types import DecimationLevel
 
 

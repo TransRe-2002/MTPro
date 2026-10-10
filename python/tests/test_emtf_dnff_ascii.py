@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 def test_runner_passes_command_args(monkeypatch, tmp_path):
-    from emtf._runner import Workspace, run
+    from emtf.runner import Workspace, run
 
     calls = []
 
@@ -28,7 +28,7 @@ def test_runner_passes_command_args(monkeypatch, tmp_path):
 
 
 def test_decset_and_pwset_match_fortran_layout():
-    from emtf._config import render_decset, render_pwset
+    from emtf.config import render_decset, render_pwset
     from emtf.types import DecimationLevel
 
     levels = [
@@ -58,7 +58,7 @@ def test_decset_and_pwset_match_fortran_layout():
 def test_decset_rejects_single_level_for_dnff():
     import pytest
 
-    from emtf._config import render_decset
+    from emtf.config import render_decset
     from emtf.types import DecimationLevel
 
     with pytest.raises(ValueError, match="at least two"):
@@ -66,7 +66,7 @@ def test_decset_rejects_single_level_for_dnff():
 
 
 def test_single_tranmt_control_terminates_after_one_run():
-    from emtf._config import render_tranmt_control
+    from emtf.config import render_tranmt_control
 
     text = render_tranmt_control([
         ("TEST", "CF/options_SS.cfg", [(["TEST.f4"], 4)], False),
@@ -83,7 +83,7 @@ def test_single_tranmt_control_terminates_after_one_run():
 
 
 def test_remote_tranmt_control_keeps_both_fc_groups_in_one_run():
-    from emtf._config import render_tranmt_control
+    from emtf.config import render_tranmt_control
 
     text = render_tranmt_control([
         (

@@ -29,6 +29,6 @@ def _shutdown_shared_worker_pools(request):
     if not request.config.getoption("forked", default=False):
         return
 
-    from utils.concurrency import shutdown
+    from base.concurrency import shutdown
 
     shutdown(wait=True)

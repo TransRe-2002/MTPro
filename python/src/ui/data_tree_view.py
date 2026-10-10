@@ -4,6 +4,7 @@ import logging
 import json
 
 import numpy as np
+import pandas as pd
 
 from PySide6.QtWidgets import (
     QApplication, QDialog, QTreeView, QVBoxLayout, QWidget, QSplitter,
@@ -15,21 +16,30 @@ from PySide6.QtGui import QDrag, QFont
 from collections.abc import Callable
 
 from core.em_data import EMData
-from ui.data_process_shared import (
+from core.algorithms.filters import demean_series, detrend_series
+from core.algorithms.kp_selection import (
+    format_kp_condition,
+    normalize_kp_selection_params,
+    select_kp_samples,
+)
+from core.mat_data import MatEMData
+from base.data_restore import load_restore_source, restore_mat_data, station_metadata_differs
+from ui.models.processing_tools import (
     PROCESSING_TOOL_MIME,
     DATA_TREE_SELECTION_MIME,
     PIPELINE_TOOL_MIME,
     create_processing_tool_model,
 )
-from ui.data_tree_model import DataTreeModel
+from ui.models.data_tree import DataTreeModel
 from ui.compare_widget import CompareWidget
 from ui.dialogs.channel_management_dialog import ChannelManagementDialog
 from ui.dialogs.decimate_dialog import DecimateDialog
+from ui.dialogs.kp_selection_dialog import KpSelectionDialog
 from ui.dialogs.rename_channel_dialog import RenameChannelDialog
 from ui.dialogs.station_metadata_dialog import StationMetadataDialog
 from ui.dialogs.trim_dialog import TrimDialog
-from ui.plot_panel import PlotPanel
-from ui.energy_spectrum_widget import EnergySpectrumWidget
+from ui.widgets.plot_panel import PlotPanel
+from ui.widgets.energy_spectrum import EnergySpectrumWidget
 from utils.signal_decimate import decimated_length
 from base.data_manager import DataManager
 
@@ -167,6 +177,15 @@ class DataTreeViewer(QWidget):
         self.data_manager.active_changed.connect(self.on_active_changed)
         self.data_manager.data_removed.connect(self.on_data_removed)
         self.data_manager.data_changed.connect(self._on_data_changed)
+        self.data_manager.data_restored.connect(self._on_data_restored)
+
+    def _on_data_restored(self, key: int, channel: str | None) -> None:
+        if channel is None:
+            return  # 整组还原由 structural 通知关闭过期窗口。
+        for panels in (self._plot_panels, self._spectrum_panels):
+            panel = panels.pop((key, channel), None)
+            if panel is not None:
+                panel.close()
 
     def _on_data_changed(self, key: int, structural: bool):
         """结构变更后关闭该数据集的独立曲线窗口（数据已过期）。"""
@@ -403,7 +422,7 @@ class DataTreeViewer(QWidget):
 
     # ── 右键菜单 ────────────────────────────────────────────────
 
-    def _build_dataset_context_menu(self) -> tuple[QMenu, dict[object, Callable[[int], None]]]:
+    def _build_dataset_context_menu(self, data_id: int | None = None) -> tuple[QMenu, dict[object, Callable[[int], None]]]:
         """构建数据集级右键菜单，返回 (菜单, action→处理器) 映射。"""
         menu = QMenu(self)
         actions: dict[object, Callable[[int], None]] = {}
@@ -417,6 +436,17 @@ class DataTreeViewer(QWidget):
 
         menu.addSeparator()
 
+        preprocess_menu = menu.addMenu("预处理")
+        actions[preprocess_menu.addAction("按 Kp 阈值选取…")] = self._open_kp_selection_dialog
+        undo_action = preprocess_menu.addAction("撤销该数据集全部处理")
+        undo_action.setEnabled(
+            data_id is not None
+            and self.data_manager.has_dataset_processing_baseline(data_id)
+        )
+        actions[undo_action] = self._undo_all_dataset_processing
+
+        menu.addSeparator()
+
         for label, handler in (
             ("编辑台站元数据…", self._open_station_metadata_dialog),
             ("降采样…", self._open_decimate_dialog),
@@ -425,9 +455,16 @@ class DataTreeViewer(QWidget):
         ):
             actions[menu.addAction(label)] = handler
 
+        if isinstance(self.data_manager.get(data_id or 0), MatEMData):
+            menu.addSeparator()
+            actions[menu.addAction("从源文件还原…")] = self._restore_dataset
         return menu, actions
 
-    def _build_channel_context_menu(self) -> tuple[QMenu, dict[object, Callable[[int, str], None]]]:
+    def _build_channel_context_menu(
+        self,
+        data_id: int | None = None,
+        channel: str | None = None,
+    ) -> tuple[QMenu, dict[object, Callable[[int, str], None]]]:
         """构建通道级右键菜单，返回 (菜单, action→处理器) 映射。"""
         menu = QMenu(self)
         actions: dict[object, Callable[[int, str], None]] = {}
@@ -441,6 +478,21 @@ class DataTreeViewer(QWidget):
         ):
             actions[menu.addAction(label)] = handler
 
+        menu.addSeparator()
+        preprocess_menu = menu.addMenu("预处理")
+        actions[preprocess_menu.addAction("去均值")] = self._demean_channel
+        actions[preprocess_menu.addAction("线性去趋势")] = self._detrend_channel
+        undo_action = preprocess_menu.addAction("撤销该通道全部处理")
+        undo_action.setEnabled(
+            data_id is not None
+            and channel is not None
+            and self.data_manager.has_channel_processing_baseline(data_id, channel)
+        )
+        actions[undo_action] = self._undo_all_channel_processing
+
+        if isinstance(self.data_manager.get(data_id or 0), MatEMData):
+            menu.addSeparator()
+            actions[menu.addAction("从源文件还原…")] = self._restore_channel
         return menu, actions
 
     def _open_energy_spectrum(self, key: int, ch_name: str) -> None:
@@ -480,7 +532,7 @@ class DataTreeViewer(QWidget):
             data_id = self.model.dataset_key(index)
             if data_id is None:
                 return
-            menu, actions = self._build_dataset_context_menu()
+            menu, actions = self._build_dataset_context_menu(data_id)
             action = menu.exec(self.tree_view.viewport().mapToGlobal(pos))
             if action is None:
                 return
@@ -493,7 +545,7 @@ class DataTreeViewer(QWidget):
             ch_name = self.model.channel_name(index)
             if key is None or ch_name is None:
                 return
-            menu, actions = self._build_channel_context_menu()
+            menu, actions = self._build_channel_context_menu(key, ch_name)
             action = menu.exec(self.tree_view.viewport().mapToGlobal(pos))
             if action is None:
                 return
@@ -502,6 +554,228 @@ class DataTreeViewer(QWidget):
                 handler(key, ch_name)
 
     # ── 数据集级动作 ───────────────────────────────────────────
+
+    def _restore_dataset(self, data_id: int) -> None:
+        self._restore_from_source(data_id)
+
+    def _restore_channel(self, data_id: int, channel: str) -> None:
+        self._restore_from_source(data_id, channel)
+
+    def _dataset_process_widget(self):
+        return getattr(self.window(), "data_process_widget", None)
+
+    def _dataset_has_pending_blocks(self, data_id: int) -> bool:
+        data = self.data_manager.get(data_id)
+        process_widget = self._dataset_process_widget()
+        if data is None or process_widget is None:
+            return False
+        return any(
+            process_widget.has_blocks_for_channel(data_id, channel)
+            for channel in data.channel_names()
+        )
+
+    def _confirm_discard_pending_dataset_blocks(self, data_id: int) -> bool:
+        if not self._dataset_has_pending_blocks(data_id):
+            return True
+        answer = QMessageBox.question(
+            self,
+            "清空未提交处理",
+            "该数据集存在尚未提交的处理步骤。\n"
+            "立即预处理将清空全部通道的 block 和预览结果，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _open_kp_selection_dialog(self, data_id: int) -> None:
+        data = self.data_manager.get(data_id)
+        if data is None:
+            return
+        kp_data = getattr(data, "kp_data", None)
+        if kp_data is None or kp_data.empty:
+            QMessageBox.warning(self, "无法按 Kp 选取", "当前数据集没有可用的 Kp 数据。")
+            return
+        channels = data.channel_names()
+        if not channels:
+            QMessageBox.warning(self, "无法按 Kp 选取", "当前数据集没有时序通道。")
+            return
+        index = data.get_channel_series(channels[0]).index
+        dialog = KpSelectionDialog(
+            f"#{data_id} {data.name}",
+            index,
+            kp_data,
+            parent=self,
+            mode="immediate",
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not self._confirm_discard_pending_dataset_blocks(data_id):
+            return
+        self._apply_kp_selection_to_dataset(data_id, dialog.params)
+
+    def _apply_kp_selection_to_dataset(
+        self,
+        data_id: int,
+        params: dict[str, object],
+    ) -> bool:
+        data = self.data_manager.get(data_id)
+        if data is None:
+            return False
+        channels = data.channel_names()
+        if not channels:
+            return False
+        try:
+            normalized = normalize_kp_selection_params(params)
+            selection = select_kp_samples(
+                data.get_channel_series(channels[0]).index,
+                getattr(data, "kp_data", None),
+                normalized,
+            )
+            originals = {
+                channel: data.get_channel_series(channel).copy(deep=True)
+                for channel in channels
+            }
+            updated = {}
+            for channel, source in originals.items():
+                values = source.to_numpy(dtype=np.float64, copy=True)
+                if values.size != selection.keep_mask.size:
+                    raise ValueError(f"通道 {channel} 的时间轴与数据集不一致")
+                values[~selection.keep_mask] = np.nan
+                updated[channel] = pd.Series(
+                    values,
+                    index=source.index,
+                    name=source.name,
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Kp 选取失败", str(exc))
+            return False
+
+        changed = [
+            channel for channel in channels
+            if not originals[channel].equals(updated[channel])
+        ]
+        newly_captured: list[str] = []
+        try:
+            for channel in changed:
+                if self.data_manager.capture_channel_processing_baseline(data_id, channel):
+                    newly_captured.append(channel)
+            for channel in changed:
+                data.set_channel_series(channel, updated[channel])
+        except Exception as exc:
+            for channel in changed:
+                data.set_channel_series(channel, originals[channel])
+            for channel in newly_captured:
+                self.data_manager.discard_channel_processing_baseline(data_id, channel)
+            QMessageBox.critical(self, "Kp 选取失败", f"写回失败，已恢复原数据：{exc}")
+            return False
+
+        process_widget = self._dataset_process_widget()
+        if process_widget is not None:
+            process_widget.reset_restored_data(data_id, None)
+        refresh = getattr(self.window(), "on_data_change_finished", None)
+        if callable(refresh):
+            for channel in changed:
+                refresh(data_id, channel)
+        if changed:
+            self.data_manager.notify_changed(data_id, structural=False)
+        self.logger.info(
+            "Dataset #%s Kp selection applied to %d channels: %s; "
+            "retained=%d/%d intervals=%d",
+            data_id,
+            len(changed),
+            format_kp_condition(normalized),
+            selection.selected_samples,
+            selection.keep_mask.size,
+            len(selection.selected_intervals),
+        )
+        return True
+
+    def _undo_all_dataset_processing(self, data_id: int) -> None:
+        if self.data_manager.undo_all_dataset_processing(data_id):
+            self.logger.info("All dataset processing undone: #%s", data_id)
+
+
+    def _confirm_station_restore(self, data: MatEMData, source: MatEMData) -> bool | None:
+        """True 保留当前台站信息，False 恢复源信息，None 取消整个操作。"""
+        detail = (
+            f"源文件：{data.path}\n\n"
+            "将恢复源文件的全部通道及其名称、采样率和完整时间范围，"
+            "并清空该数据集的处理步骤和撤销记录。\n"
+            "读取的是文件当前保存的版本，不会改写源文件。"
+        )
+        if not station_metadata_differs(data, source):
+            answer = QMessageBox.question(
+                self, "从源文件还原", detail + "\n\n是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            return False if answer == QMessageBox.StandardButton.Yes else None
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("从源文件还原")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText("是否同时恢复源文件中的台站信息？")
+        dialog.setInformativeText("台站信息包括名称、经纬度和高程。\n\n" + detail)
+        restore = dialog.addButton("恢复源文件信息", QMessageBox.ButtonRole.AcceptRole)
+        keep = dialog.addButton("保留当前信息", QMessageBox.ButtonRole.AcceptRole)
+        cancel = dialog.addButton("取消还原", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.setEscapeButton(cancel)
+        dialog.exec()
+        if dialog.clickedButton() is restore:
+            return False
+        if dialog.clickedButton() is keep:
+            return True
+        return None
+
+    def _restore_from_source(self, data_id: int, channel: str | None = None) -> None:
+        data = self.data_manager.get(data_id)
+        if not isinstance(data, MatEMData):
+            return
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                source = load_restore_source(data)
+            finally:
+                QApplication.restoreOverrideCursor()
+
+            keep_metadata = False
+            if channel is None:
+                keep_metadata = self._confirm_station_restore(data, source)
+                if keep_metadata is None:
+                    return
+            else:
+                question = (
+                    "采样率和原始数据不匹配，是否进行处理？"
+                    if data.dt != source.dt else f"是否从源文件还原通道「{channel}」？"
+                )
+                detail = (
+                    f"\n\n源文件：{data.path}\n"
+                    "保留当前通道名称、采样率和时间范围；只清空该通道的处理步骤和撤销记录。"
+                )
+                if data.dt != source.dt:
+                    detail += "\n选“是”将读取源数据并降采样，选“否”取消还原。"
+                answer = QMessageBox.question(
+                    self, "从源文件还原", question + detail,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+            if self.data_manager.get(data_id) is not data:
+                return
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                restore_mat_data(
+                    self.data_manager, data_id, source,
+                    channel=channel, keep_station_metadata=keep_metadata,
+                )
+            finally:
+                QApplication.restoreOverrideCursor()
+        except Exception as exc:
+            self.logger.exception("Source restore failed for dataset #%s", data_id)
+            QMessageBox.warning(self, "无法还原", str(exc))
+            return
+        self.logger.info("Restored dataset #%s channel=%s from %s", data_id, channel, data.path)
 
     def _action_save_dataset(self, data_id: int) -> None:
         main_window = self.window()
@@ -586,6 +860,7 @@ class DataTreeViewer(QWidget):
             data_id, factor, max_missing_fraction * 100,
             em_data.npts, em_data.dt.total_seconds(),
         )
+        self.data_manager.discard_channel_processing_baselines(data_id)
         self.data_manager.notify_changed(data_id, structural=True)
 
     def _open_trim_dialog(self, data_id: int) -> None:
@@ -620,6 +895,7 @@ class DataTreeViewer(QWidget):
             "Dataset #%s trimmed: npts=%d range=%s..%s",
             data_id, em_data.npts, em_data.start_time, em_data.end_time,
         )
+        self.data_manager.discard_channel_processing_baselines(data_id)
         self.data_manager.notify_changed(data_id, structural=True)
 
     def _open_channel_management_dialog(self, data_id: int) -> None:
@@ -631,6 +907,7 @@ class DataTreeViewer(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
+        renames, deleted_names = dialog.channel_changes()
         self._close_processor_windows_for(data_id)
         try:
             renamed, deleted = dialog.apply_to(em_data)
@@ -640,6 +917,11 @@ class DataTreeViewer(QWidget):
         self.logger.info(
             "Dataset #%s channels managed: %d renamed, %d deleted",
             data_id, renamed, deleted,
+        )
+        self.data_manager.remap_channel_processing_baselines(
+            data_id,
+            renames,
+            deleted_names,
         )
         self.data_manager.notify_changed(data_id, structural=True)
 
@@ -675,6 +957,7 @@ class DataTreeViewer(QWidget):
         self.logger.info(
             "Dataset #%s channel renamed: %s → %s", key, ch_name, new_name,
         )
+        self.data_manager.rename_channel_processing_baseline(key, ch_name, new_name)
         self.data_manager.notify_changed(key, structural=True)
 
     def _confirm_delete_channel(self, key: int, ch_name: str) -> None:
@@ -703,7 +986,72 @@ class DataTreeViewer(QWidget):
             QMessageBox.warning(self, "删除失败", str(exc))
             return
         self.logger.info("Dataset #%s channel deleted: %s", key, ch_name)
+        self.data_manager.discard_channel_processing_baseline(key, ch_name)
         self.data_manager.notify_changed(key, structural=True)
+
+    def _confirm_discard_pending_channel_blocks(self, key: int, ch_name: str) -> bool:
+        process_widget = getattr(self.window(), "data_process_widget", None)
+        if process_widget is None or not process_widget.has_blocks_for_channel(key, ch_name):
+            return True
+        answer = QMessageBox.question(
+            self,
+            "清空未提交处理",
+            f"通道「{ch_name}」存在尚未提交的处理步骤。\n"
+            "立即预处理将清空这些 block 和预览结果，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _apply_channel_preprocessing(self, key: int, ch_name: str, kind: str) -> None:
+        data = self.data_manager.get(key)
+        if data is None or not data.has_channel(ch_name):
+            return
+        process_widget = getattr(self.window(), "data_process_widget", None)
+        had_pending_blocks = bool(
+            process_widget is not None
+            and process_widget.has_blocks_for_channel(key, ch_name)
+        )
+        if not self._confirm_discard_pending_channel_blocks(key, ch_name):
+            return
+
+        source = data.get_channel_series(ch_name)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            if kind == "demean":
+                result = demean_series(source)
+                label = "去均值"
+            else:
+                result = detrend_series(source, kind="linear")
+                label = "线性去趋势"
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if source.equals(result.cleaned):
+            if had_pending_blocks:
+                process_widget.reset_restored_data(key, ch_name)
+            self.logger.info("Channel #%s %s unchanged after %s", key, ch_name, label)
+            return
+        self.data_manager.capture_channel_processing_baseline(key, ch_name)
+        data.set_channel_series(ch_name, result.cleaned)
+
+        if process_widget is not None:
+            process_widget.reset_restored_data(key, ch_name)
+        refresh = getattr(self.window(), "on_data_change_finished", None)
+        if callable(refresh):
+            refresh(key, ch_name)
+        self.data_manager.notify_changed(key, structural=False)
+        self.logger.info("Channel #%s %s applied: %s", key, ch_name, label)
+
+    def _demean_channel(self, key: int, ch_name: str) -> None:
+        self._apply_channel_preprocessing(key, ch_name, "demean")
+
+    def _detrend_channel(self, key: int, ch_name: str) -> None:
+        self._apply_channel_preprocessing(key, ch_name, "detrend")
+
+    def _undo_all_channel_processing(self, key: int, ch_name: str) -> None:
+        if self.data_manager.undo_all_channel_processing(key, ch_name):
+            self.logger.info("All channel processing undone: #%s %s", key, ch_name)
 
     def get_check_state(self) -> list[tuple[EMData, str]]:
         refs = self.model.checked_channel_refs()

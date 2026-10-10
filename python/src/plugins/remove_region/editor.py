@@ -288,14 +288,8 @@ class RegionPlotWidget(pg.PlotWidget):
         apply_modifier_axis_constraint(self.getViewBox(), modifiers)
 
     def wheelEvent(self, ev: QtGui.QWheelEvent) -> None:
-        modifiers = ev.modifiers()
         vb = self.getViewBox()
-        if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
-            vb.setMouseEnabled(x=True, y=False)
-        elif modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
-            vb.setMouseEnabled(x=False, y=True)
-        else:
-            vb.setMouseEnabled(x=True, y=True)
+        apply_modifier_axis_constraint(vb, ev.modifiers())
         super().wheelEvent(ev)
         vb.setMouseEnabled(x=True, y=True)
 
@@ -496,7 +490,7 @@ class RemoveRegion(QtWidgets.QWidget):
         self.instruction_label = QtWidgets.QLabel(
             "操作说明: 左键双击创建区域 | 拖动区域边界调整范围 | 右键点击区域删除 | "
             "中键移动视图 | Ctrl+Z撤销删除 | Ctrl+S保存 | Delete快捷删除\n"
-            "         Shift+滚轮/中键拖动 → 约束X轴 | Alt+滚轮/中键拖动 → 约束Y轴"
+            "         Ctrl+滚轮/中键拖动 → 仅操作X轴 | Shift+滚轮/中键拖动 → 仅操作Y轴"
         )
 
         self._init_ui()

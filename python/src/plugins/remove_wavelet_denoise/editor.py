@@ -45,7 +45,7 @@ from plugins.common.base_processor import BaseProcessorWidget
 from plugins.common.demo import DemoEMData, run_standalone_demo
 from plugins.common.region import RegionManagementMixin
 from plugins.common.step_algorithms import WaveletDenoiseResult, wavelet_multiscale_denoise
-from plugins.common.plotting import StepPlotWidget
+from plugins.common.plotting import ProcessingPlotWidget, StepPlotWidget
 from utils.series import dti_to_numpy
 from utils.theme import configure_pyqtgraph_theme, pg_background, subtle_pen, transparent_legend_brush
 
@@ -139,7 +139,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.signal_plot_widget = StepPlotWidget()
         self.plot_widget = self.signal_plot_widget
         self.signal_plot_item = self.signal_plot_widget.getPlotItem()
-        self.detail_plot_widget = pg.PlotWidget()
+        self.detail_plot_widget = ProcessingPlotWidget()
         self.detail_plot_item = self.detail_plot_widget.getPlotItem()
         self.region_item: pg.LinearRegionItem | None = None
         self.plot_splitter = None
@@ -205,7 +205,9 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
     def _init_ui(self):
         instruction_label = QLabel(
             "小波多尺度去噪: 先在主图框选局部异常区，再在局部窗口内做小波分解。\n"
-            "自动模式可做阈值收缩，手动模式可像多尺度均衡器一样分别调整 D1~Dn 细节层增益。"
+            "自动模式可做阈值收缩，手动模式可像多尺度均衡器一样分别调整 D1~Dn 细节层增益。\n"
+            "图形操作：Ctrl+滚轮/中键拖动仅操作X轴，Shift+滚轮/中键拖动仅操作Y轴；"
+            "主图双击添加或移动局部区域，细节图双击自适应视图。"
         )
 
         self.signal_plot_widget.getAxis("left").setStyle(tickLength=0)

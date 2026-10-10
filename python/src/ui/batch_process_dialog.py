@@ -26,7 +26,7 @@ from base.batch_runner import BatchRunner, BatchTarget, BatchTargetResult
 from core.recipe import load_recipe
 from plugin_api import ChannelMeta
 from ui.tools import registry as tool_registry
-from utils.qt_bridge import FutureBridge
+from base.qt_bridge import FutureBridge
 
 
 class BatchProcessDialog(QDialog):
@@ -165,6 +165,12 @@ class BatchProcessDialog(QDialog):
         if result.status == "ok":
             data = self.data_manager.get(result.target.data_id)
             if data is not None:
+                current = data.get_channel_series(result.target.channel)
+                if not current.equals(result.series):
+                    self.data_manager.capture_channel_processing_baseline(
+                        result.target.data_id,
+                        result.target.channel,
+                    )
                 data.set_channel_series(result.target.channel, result.series)
                 self.data_manager.notify_changed(result.target.data_id, structural=False)
                 self.result_applied.emit(result.target.data_id, result.target.channel)

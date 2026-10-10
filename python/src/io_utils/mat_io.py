@@ -1,20 +1,17 @@
 import copy
 import logging
-import os
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytz
-from scipy.io import loadmat, savemat
+from scipy.io import loadmat
 from scipy.io.matlab import MatlabObject, MatlabOpaque
 
 from core.em_data import EMData
 from core.mat_data import MatEMData
 
 from io_utils import mcos_reader
-from io_utils import ts_convert
+from io_utils.ts_object_io import read_ts_object, write_ts_object
 from io_utils.em_io import EMDataSaver, EMDataLoader
 from utils.timestamp import pts_to_array
 
@@ -215,7 +212,7 @@ def _contains_ts_object(mat_data: dict) -> bool:
 
     序列化的 MATLAB 类对象（如 TS）经 scipy.io.loadmat 只能得到
     MatlabObject / MatlabOpaque 占位数组，变量名甚至可能丢失为 None，
-    MatEMData 无法解析，必须回退到外部转换器。
+    MatEMData 无法直接解析，需交给 MCOS 对象读取器。
     """
     for key, value in mat_data.items():
         if not isinstance(key, str):
@@ -229,6 +226,8 @@ class MatLoader(EMDataLoader):
     @staticmethod
     def load(path: str, tz: str = 'Asia/Shanghai') -> MatEMData:
         mat_data, load_exc = _load_raw_mat(path)
+        if isinstance(load_exc, FileNotFoundError):
+            raise load_exc
 
         if mat_data is not None and not _contains_ts_object(mat_data):
             try:
@@ -236,7 +235,6 @@ class MatLoader(EMDataLoader):
             except Exception as exc:
                 # 直接解析失败（如 v7.3 保存的 TS 对象），继续走兜底路径
                 logger.warning("直接解析 %s 失败（%s），尝试兜底转换", path, exc)
-                load_exc = exc
 
         # ---- 兜底 1：纯 Python 解析 MCOS 序列化（免 MATLAB Runtime）----
         if mat_data is not None:
@@ -245,20 +243,12 @@ class MatLoader(EMDataLoader):
                 logger.info("纯 Python 解析 TS 对象文件: %s", path)
                 return MatEMData(ts_dict, path, tz=tz)
 
-        # ---- 兜底 2：编译的 MATLAB 转换器（可选，需 MATLAB Runtime）----
-        logger.info("使用 mtpro_ts_convert 转换文件: %s", path)
+        # ---- 兜底 2：mat-io 完整 MCOS 解析（包括 v7.3，免 Runtime）----
+        logger.info("使用 MCOS 读取器解析 TS 对象文件: %s", path)
         try:
-            converted = ts_convert.convert_to_struct(path)
-        except Exception as conv_exc:
-            # 转换器不可用时，优先暴露原始读取错误
-            raise (load_exc or conv_exc) from conv_exc
-        try:
-            mat_data = loadmat(str(converted))
-            return MatEMData(mat_data, path, tz=tz)
+            return MatEMData(read_ts_object(path), path, tz=tz)
         except Exception as exc:
-            raise IOError(f"转换后的文件仍无法解析: {path}") from exc
-        finally:
-            Path(converted).unlink(missing_ok=True)
+            raise IOError(f"无法读取 MAT 文件 {path}: {exc}") from exc
 
 def _save_mat_v73(path: str, mdict: dict) -> None:
     """将 scipy 格式 dict 写入 HDF5 文件（MTPro 内部格式，非 MATLAB 兼容）。"""
@@ -378,32 +368,5 @@ class MatSaver(EMDataSaver):
 
     @staticmethod
     def _write_mat(mdict: dict, path: str):
-        """写 .mat：默认转成 MATLAB TS 对象格式，转换器不可用时回退普通 tsStruct。
-
-        scipy 无法直接写 MATLAB 对象，因此先落盘 tsStruct 临时文件，再经
-        mtpro_ts_convert（struct2ts）生成 TS 对象文件。读取侧两种格式都支持。
-        """
-        try:
-            ts_convert.find_converter()
-        except FileNotFoundError:
-            logger.warning(
-                "未找到 mtpro_ts_convert，无法保存为 TS 对象格式，"
-                "按普通 tsStruct 保存: %s", path,
-            )
-            savemat(path, mdict)
-            return
-
-        fd, tmp_name = tempfile.mkstemp(suffix=".mat", prefix="mtpro_save_")
-        os.close(fd)
-        tmp = Path(tmp_name)
-        try:
-            savemat(str(tmp), mdict)
-            try:
-                ts_convert.convert_to_ts_object(tmp, path)
-                return
-            except Exception as exc:
-                logger.warning("转换为 TS 对象失败（%s），按普通 tsStruct 保存: %s", exc, path)
-            Path(path).unlink(missing_ok=True)  # 清理可能的半成品
-            savemat(path, mdict)
-        finally:
-            tmp.unlink(missing_ok=True)
+        """Atomically save a genuine TS object; never silently downgrade to struct."""
+        write_ts_object(mdict, path)

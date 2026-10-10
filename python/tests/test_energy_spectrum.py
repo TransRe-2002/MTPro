@@ -1,6 +1,6 @@
 import numpy as np
 
-from ui.energy_spectrum_widget import compute_welch_psd
+from ui.widgets.energy_spectrum import compute_welch_psd
 
 
 def test_welch_psd_finds_sine_peak():

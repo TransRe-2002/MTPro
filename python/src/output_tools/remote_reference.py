@@ -17,7 +17,12 @@ from core.em_data import EMData
 from emtf.io.zfile import emtf_phase_deg
 from emtf.time_alignment import matching_remote_slice
 
-from ui.theme import configure_matplotlib_canvas, configure_matplotlib_fonts, configure_pyqtgraph_theme
+from ui.theme import (
+    add_matplotlib_reset_button,
+    configure_matplotlib_canvas,
+    configure_matplotlib_fonts,
+    configure_pyqtgraph_theme,
+)
 
 configure_matplotlib_fonts()
 configure_pyqtgraph_theme()
@@ -30,7 +35,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QDateTime, QTimer
 
-from ui.impedance_plot import draw_impedance_response, draw_tipper_response
+from ui.impedance_plot import draw_impedance_response, draw_tipper_response, draw_c_response
+from output_tools.shared.c_response import c_response_from_bands
 from output_tools.shared.emtf import (
     BACKEND_EMTF_PYWRAP,
     BACKEND_EMTF_RS,
@@ -53,7 +59,7 @@ from output_tools.shared.emtf import (
 from plugins.common.plotting import StepPlotWidget
 from ui.dialogs.figure_export import default_export_name, export_matplotlib_figure_with_dialog
 from utils.decimate import LODPyramid
-from utils.qt_bridge import run as run_in_pool
+from base.qt_bridge import run as run_in_pool
 from utils.time_convert import pts_to_qdt, qdt_to_pts
 from utils.geo import station_distance
 
@@ -62,10 +68,6 @@ logger = logging.getLogger(__name__)
 
 def _estimate_remote_task(backend: str, arrays: tuple, channel_names: tuple, kwargs: dict, generation: int):
     try:
-        if backend == BACKEND_EMTF_RS:
-            import emtf_rs as api
-        else:
-            import emtf as api
         ex, ey, local_hx, local_hy, remote_hx, remote_hy, hz = arrays
         processed = tuple(
             preprocess_channel(values, name)
@@ -76,7 +78,12 @@ def _estimate_remote_task(backend: str, arrays: tuple, channel_names: tuple, kwa
         )
         call_kwargs = dict(kwargs)
         call_kwargs["hz"] = preprocess_channel(hz, str(channel_names[6])) if hz is not None else None
-        result = api.estimate_remote_reference_spectrum(*processed, **call_kwargs)
+        if backend == BACKEND_EMTF_RS:
+            from base.emtf_native import estimate_native_emtf
+            result = estimate_native_emtf(*processed, remote_reference=True, **call_kwargs)
+        else:
+            import emtf
+            result = emtf.estimate_remote_reference_spectrum(*processed, **call_kwargs)
         return generation, result, None
     except BaseException as error:
         return generation, None, error
@@ -407,6 +414,9 @@ class RemoteReferenceWidget(QWidget):
         self.backend_combo = QComboBox()
         self.backend_combo.addItem("EMTF pywrap", BACKEND_EMTF_PYWRAP)
         self.backend_combo.addItem("emtf-rs", BACKEND_EMTF_RS)
+        self.backend_combo.setItemData(1,
+            "已对齐原版降采样、预白化、窗函数和 FC 选带；保留双精度输入。"
+            "稳健误差棒和有效观测数尚未验证与原版等价。", Qt.ItemDataRole.ToolTipRole)
         if not _native_emtf_rs_available():
             self.backend_combo.setItemText(1, "emtf-rs（未安装）")
             self.backend_combo.model().item(1).setEnabled(False)
@@ -543,6 +553,20 @@ class RemoteReferenceWidget(QWidget):
         configure_matplotlib_canvas(self.tipper_canvas, self.tipper_fig, self)
         self._tipper_plot_tab_index: int | None = None
 
+        self.c_response_table = QTableWidget()
+        self.c_response_table.setColumnCount(6)
+        self.c_response_table.setHorizontalHeaderLabels([
+            "freq (Hz)", "period (s)", "Cxx (m)", "Cxy (m)", "Cyx (m)", "Cyy (m)",
+        ])
+        self.c_response_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.c_response_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.c_response_table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self.c_response_table.keyPressEvent = self._table_key_press_event
+        self.c_response_fig = Figure(figsize=(8, 6), tight_layout=True)
+        self.c_response_canvas = FigureCanvas(self.c_response_fig)
+        self.c_response_canvas.setParent(self)
+        configure_matplotlib_canvas(self.c_response_canvas, self.c_response_fig, self)
+
         self.result_tabs = QTabWidget()
         tab_corner = QWidget()
         tab_corner_layout = QHBoxLayout(tab_corner)
@@ -553,9 +577,18 @@ class RemoteReferenceWidget(QWidget):
         self.tipper_mode_combo.addItem("倾子：幅值/相位", "amp_phase")
         self.tipper_mode_combo.currentIndexChanged.connect(self._draw_tipper_plot)
         self.tipper_mode_combo.setVisible(False)
+        self.c_response_mode_combo = QComboBox(self)
+        self.c_response_mode_combo.addItem("C响应：实部/虚部", "re_im")
+        self.c_response_mode_combo.addItem("C响应：幅值/相位", "amp_phase")
+        self.c_response_mode_combo.currentIndexChanged.connect(self._draw_c_response_plot)
+        self.c_response_mode_combo.setVisible(False)
+        tab_corner_layout.addWidget(self.c_response_mode_combo)
         tab_corner_layout.addWidget(self.tipper_mode_combo)
+        self.tipper_reset_button = add_matplotlib_reset_button(self.tipper_canvas, tab_corner_layout)
+        self.c_response_reset_button = add_matplotlib_reset_button(self.c_response_canvas, tab_corner_layout)
         self.result_tabs.setCornerWidget(tab_corner)
         self.result_tabs.currentChanged.connect(self._sync_result_actions)
+        self.result_tabs.currentChanged.connect(self._sync_response_mode_visibility)
         self.result_tabs.addTab(self.table, "阻抗结果")
         self.result_tabs.addTab(self.resistivity_table, "视电阻率与相位")
 
@@ -563,7 +596,10 @@ class RemoteReferenceWidget(QWidget):
         self.mpl_canvas = FigureCanvas(self.mpl_fig)
         self.mpl_canvas.setParent(self)
         configure_matplotlib_canvas(self.mpl_canvas, self.mpl_fig, self)
+        self.mpl_reset_button = add_matplotlib_reset_button(self.mpl_canvas, tab_corner_layout)
         self.result_tabs.addTab(self.mpl_canvas, "视电阻率与相位图")
+        self.result_tabs.addTab(self.c_response_table, "C 响应")
+        self.result_tabs.addTab(self.c_response_canvas, "C 响应图")
 
         self._placeholder = QLabel("此处显示计算结果信息")
         self._placeholder.setObjectName("remotePlaceholder")
@@ -601,7 +637,10 @@ class RemoteReferenceWidget(QWidget):
 
         # ── 控制面板（独立浮窗） ──
         self._control_dialog = RemoteReferenceControlDialog(self)
-        self._control_dialog.show()
+        self._control_dialog_presented = False
+        self._control_present_timer = QTimer(self)
+        self._control_present_timer.setSingleShot(True)
+        self._control_present_timer.timeout.connect(self._present_initial_controls)
 
         # ── 初始填充 ──
         self._populate_stations()
@@ -610,10 +649,25 @@ class RemoteReferenceWidget(QWidget):
             if idx >= 0:
                 self.local_station_combo.setCurrentIndex(idx)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._control_dialog_presented:
+            # Let the host finish showing/maximizing and activating its MDI
+            # window before bringing the parameter dialog to the foreground.
+            self._control_present_timer.start(0)
+
+    def _present_initial_controls(self):
+        if self.isVisible() and not self._control_dialog_presented:
+            self._control_dialog_presented = True
+            self._show_control_dialog()
+
     def _show_control_dialog(self):
         """打开/重新显示调参窗口。"""
         if self._control_dialog is not None:
-            self._control_dialog.show()
+            if self._control_dialog.isMinimized():
+                self._control_dialog.showNormal()
+            else:
+                self._control_dialog.show()
             self._control_dialog.raise_()
             self._control_dialog.activateWindow()
 
@@ -707,6 +761,14 @@ class RemoteReferenceWidget(QWidget):
         elif data_id == remote_id:
             self._remote_pkg = pkg
             self._apply_remote_station_data()
+
+    def on_source_restored(self, data_id: int) -> None:
+        if data_id not in (
+            self.local_station_combo.currentData(), self.remote_station_combo.currentData(),
+        ):
+            return
+        self._cancel_estimation()
+        self.status_label.setText("输入数据已从源文件还原；已有阻抗结果基于还原前的数据，请重新计算。")
 
     def _populate_stations(self):
         prev_local = self.local_station_combo.currentData()
@@ -906,13 +968,11 @@ class RemoteReferenceWidget(QWidget):
         table_index = self.result_tabs.indexOf(self.tipper_table)
         plot_index = self.result_tabs.indexOf(self.tipper_canvas)
         if should_show:
-            self.tipper_mode_combo.setVisible(True)
             if table_index < 0:
                 self._tipper_tab_index = self.result_tabs.addTab(self.tipper_table, "倾子响应")
             if plot_index < 0:
                 self._tipper_plot_tab_index = self.result_tabs.addTab(self.tipper_canvas, "倾子响应图")
         else:
-            self.tipper_mode_combo.setVisible(False)
             if plot_index >= 0:
                 self.result_tabs.removeTab(plot_index)
                 self._tipper_plot_tab_index = None
@@ -924,16 +984,30 @@ class RemoteReferenceWidget(QWidget):
             self.tipper_fig.clear()
             self.tipper_canvas.draw()
         self._sync_result_actions()
+        self._sync_response_mode_visibility()
 
     def _current_matplotlib_export_target(self):
         current = self.result_tabs.currentWidget()
         mpl_canvas = getattr(self, "mpl_canvas", None)
         tipper_canvas = getattr(self, "tipper_canvas", None)
+        c_response_canvas = getattr(self, "c_response_canvas", None)
         if current is mpl_canvas:
             return self.mpl_fig, self.mpl_canvas, "resistivity_phase"
         if current is tipper_canvas:
             return self.tipper_fig, self.tipper_canvas, "tipper"
+        if current is c_response_canvas:
+            return self.c_response_fig, self.c_response_canvas, "c_response"
         return None
+
+    def _sync_response_mode_visibility(self, _index: int = -1) -> None:
+        current = self.result_tabs.currentWidget()
+        self.c_response_mode_combo.setVisible(current is self.c_response_canvas)
+        self.tipper_mode_combo.setVisible(current is self.tipper_canvas and self._hz_channel_selected())
+        self.c_response_reset_button.setVisible(current is self.c_response_canvas)
+        self.tipper_reset_button.setVisible(current is self.tipper_canvas)
+        mpl_reset_button = getattr(self, "mpl_reset_button", None)
+        if mpl_reset_button is not None:
+            mpl_reset_button.setVisible(current is getattr(self, "mpl_canvas", None))
 
     def _sync_result_actions(self, _index: int = -1) -> None:
         pass
@@ -1285,18 +1359,17 @@ class RemoteReferenceWidget(QWidget):
         self.range_info.setText(f"选中 {n} 样点 ({start}:{end}), 时长 {duration:.0f}s")
 
     def _update_warning(self):
-        if self._current_backend() == BACKEND_EMTF_PYWRAP:
-            self.warning_label.setText("")
+        if not hasattr(self, "fft_window_combo"):
             return
-        window_size = self.window_combo.currentData()
+        window_size = self.fft_window_combo.currentData()
         min_required = 26 * window_size
         start = self.start_spin.value()
         end = self.end_spin.value()
         n = end - start
         if n < min_required:
             self.warning_label.setText(
-                f"警告: 选中 {n} 样点 < 26×窗口={min_required}，"
-                f"建议增加数据长度或减小窗口"
+                f"提示: 选中 {n} 样点 < 26×FFT短窗={min_required}，"
+                f"低频有效时间窗可能偏少"
             )
         else:
             self.warning_label.setText("")
@@ -1305,16 +1378,12 @@ class RemoteReferenceWidget(QWidget):
         return str(self.backend_combo.currentData())
 
     def _on_backend_changed(self):
-        backend = self._current_backend()
         self._set_window_values(WINDOW_VALUES)
-        rs_visible = backend == BACKEND_EMTF_RS
         for field in self._rs_only_fields:
-            _set_form_row_visible(self._param_form, field, rs_visible)
-        _set_form_row_visible(self._param_form, self.fft_window_combo, not rs_visible)
-        if backend == BACKEND_EMTF_PYWRAP:
-            self.warning_label.setText("")
-        else:
-            self.bands_spin.setToolTip("对数均分频带数量，影响视电阻率/相位图的频点密度")
+            _set_form_row_visible(self._param_form, field, False)
+        _set_form_row_visible(self._param_form, self.fft_window_combo, True)
+        self.warning_label.setText("")
+        self.bands_spin.setToolTip("两个后端共用 EMTF 降采样层和 FC 选带；更改后需重新计算")
 
     def _set_window_values(self, values: list[int]) -> None:
         current = self.window_combo.currentData()
@@ -1408,7 +1477,7 @@ class RemoteReferenceWidget(QWidget):
             if ch_hz is not None:
                 hz_arr = local.get_channel_series(ch_hz).to_numpy()[start:end]
 
-            # 远参考回归必须逐样点同步，不能仅按长度截断后配对。
+            # 当前后端按数组位置配对 FFT 窗口，先确认两站对应同一时间网格。
             remote_start, remote_end = matching_remote_slice(
                 local.datetime_index,
                 remote.datetime_index,
@@ -1443,7 +1512,7 @@ class RemoteReferenceWidget(QWidget):
                 tolerance=self.tol_spin.value(),
                 hz_arr=hz_arr,
                 backend=backend,
-                fft_window_size=self.fft_window_combo.currentData() if backend == BACKEND_EMTF_PYWRAP else None,
+                fft_window_size=self.fft_window_combo.currentData(),
                 n_bands=self.bands_spin.value(),
                 station_name=local.name,
             )
@@ -1467,6 +1536,9 @@ class RemoteReferenceWidget(QWidget):
                 "parameters": {
                     "start": start, "end": end, "backend": backend, "window_size": window_size,
                     "fft_window_size": self.fft_window_combo.currentData(),
+                    "processing_scheme": "emtf_fc_bands_v1",
+                    "ar_filter_length": 3,
+                    "solver_settings": {"huber_threshold": 1.5, "max_iterations": 50, "tolerance": 0.002},
                     "local_station_id": self.local_station_combo.currentData(),
                     "remote_station_id": self.remote_station_combo.currentData(),
                     "step_pct": self.step_pct_spin.value(), "bands": self.bands_spin.value(),
@@ -1544,7 +1616,7 @@ class RemoteReferenceWidget(QWidget):
             self._bands = None
             return
         backend = backend or self._current_backend()
-        if backend == BACKEND_EMTF_PYWRAP:
+        if backend == BACKEND_EMTF_PYWRAP or getattr(self._spectrum, "processing_scheme", "") == "emtf_fc_bands_v1":
             from emtf.io import from_result
 
             self._bands = from_result(self._spectrum, station_name=self._spectrum.station_name, mode="rr")
@@ -1644,6 +1716,36 @@ class RemoteReferenceWidget(QWidget):
         mode = self.tipper_mode_combo.currentData() if hasattr(self, "tipper_mode_combo") else "re_im"
         draw_tipper_response(self.tipper_fig, self.tipper_canvas, result, str(mode), self)
 
+    def _display_c_response_result(self) -> None:
+        bands = self._bands
+        if bands is None:
+            self.c_response_table.setRowCount(0)
+            self._draw_c_response_plot()
+            return
+        components = c_response_from_bands(bands)
+        periods = np.asarray(getattr(bands, "periods", []), dtype=float)
+        freqs = np.asarray(getattr(bands, "center_frequencies_hz", []), dtype=float)
+        if not components:
+            self.c_response_table.setRowCount(0)
+            self._draw_c_response_plot()
+            return
+        count = min([len(periods), len(freqs), *(len(values) for values in components.values())])
+        valid = np.isfinite(periods[:count]) & (periods[:count] > 0) & np.isfinite(freqs[:count])
+        self.c_response_table.setRowCount(int(valid.sum()))
+        for row, index in enumerate(np.flatnonzero(valid)):
+            self.c_response_table.setItem(row, 0, QTableWidgetItem(f"{freqs[index]:.6f}"))
+            self.c_response_table.setItem(row, 1, QTableWidgetItem(f"{periods[index]:.3f}"))
+            for column, name in enumerate(("cxx", "cxy", "cyx", "cyy"), start=2):
+                value = components[name][index]
+                self.c_response_table.setItem(
+                    row, column, QTableWidgetItem(f"{value.real:.4e}{value.imag:+.4e}j")
+                )
+        self._draw_c_response_plot()
+
+    def _draw_c_response_plot(self):
+        mode = self.c_response_mode_combo.currentData() if hasattr(self, "c_response_mode_combo") else "re_im"
+        draw_c_response(self.c_response_fig, self.c_response_canvas, self._bands, str(mode), self)
+
     def _display_result(self, result):
         """将 SpectrumResult 填充到表格中，并用 to_bands 后的 BandedResult 画图。"""
         self._result_stack.setCurrentIndex(1)
@@ -1686,6 +1788,7 @@ class RemoteReferenceWidget(QWidget):
             self.resistivity_table.setItem(i, 9, QTableWidgetItem(f"{result.phi_yx_se[i]:.4f}"))
 
         self._display_tipper_result()
+        self._display_c_response_result()
 
         self._draw_comparison_plot()
 

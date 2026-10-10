@@ -15,10 +15,9 @@ class DecimationLevel:
     Attributes
     ----------
     nwin:
-        FFT window length in samples.  Also controls output frequency count
-        (nwin // 2 + 1).
+        FFT window length in samples.
     window_length:
-        Window length in seconds.
+        Overlap between adjacent windows, in samples (legacy field name).
     decimation_factor:
         Factor relative to the previous level (1 = no decimation for level 1).
     nfilt:
@@ -26,7 +25,7 @@ class DecimationLevel:
     fil_1 - fil_4:
         Filter coefficients (ignored if nfilt=0).
     nfft:
-        FFT length in samples.
+        Number of positive Fourier coefficients saved (nfuse, legacy name).
     decimation_offset:
         Offset parameter (typically 0).
     """

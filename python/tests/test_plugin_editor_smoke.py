@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from PySide6.QtWidgets import QApplication
 
-from ui.data_process_pipeline import PreviewChannelSlice
+from core.pipeline_model import PreviewChannelSlice
 from ui.tools import registry
 
 

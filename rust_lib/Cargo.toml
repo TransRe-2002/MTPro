@@ -8,6 +8,7 @@ name = "rust_lib"
 crate-type = ["cdylib"]
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 pyo3 = { version = "0.28.0", features = ["extension-module"] }
 numpy = "0.28"
 rayon = "1.10"
@@ -16,3 +17,4 @@ nalgebra = "0.33"
 quick-xml = "0.36"
 rustfft = "6.2"
 zip = { version = "4.0", default-features = false, features = ["deflate"] }
+thiserror = "2"

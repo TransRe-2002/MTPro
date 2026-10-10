@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from PySide6.QtWidgets import QApplication
 
-from ui.plot_panel import PlotPanel
+from ui.widgets.plot_panel import PlotPanel
 
 
 def _app():

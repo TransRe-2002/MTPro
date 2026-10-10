@@ -5,7 +5,7 @@ import random
 
 import pytest
 
-from ui.brief_plot import BriefPlot, STACK_LABEL_BASELINE_OFFSET
+from ui.widgets.brief_plot import BriefPlot, STACK_LABEL_BASELINE_OFFSET
 
 
 def test_stacked_channel_labels_are_near_their_baselines(qtbot):

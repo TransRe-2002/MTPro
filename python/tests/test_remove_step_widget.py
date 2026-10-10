@@ -152,10 +152,10 @@ def test_remove_step_plot_widget_uses_strong_focus_and_axis_constraints(qtbot):
     assert plot.focusPolicy() == Qt.FocusPolicy.StrongFocus
 
     view_box = plot.getViewBox()
-    apply_modifier_axis_constraint(view_box, Qt.KeyboardModifier.ShiftModifier)
+    apply_modifier_axis_constraint(view_box, Qt.KeyboardModifier.ControlModifier)
     assert tuple(view_box.state["mouseEnabled"]) == (True, False)
 
-    apply_modifier_axis_constraint(view_box, Qt.KeyboardModifier.AltModifier)
+    apply_modifier_axis_constraint(view_box, Qt.KeyboardModifier.ShiftModifier)
     assert tuple(view_box.state["mouseEnabled"]) == (False, True)
 
     apply_modifier_axis_constraint(view_box, Qt.KeyboardModifier.NoModifier)

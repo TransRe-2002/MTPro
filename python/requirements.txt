@@ -5,6 +5,7 @@ scipy==1.17.1   # 已验证的桌面构建组合；升级前需同时复测 Nuit
 PyWavelets>=1.9
 numpy>=2.4
 h5py>=3.13
+mat-io==1.0.0  # MCOS TS object read/write without MATLAB Runtime
 pytz>=2026.1
 xarray>=2026.4
 pyqtgraph>=0.14

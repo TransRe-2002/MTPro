@@ -12,7 +12,7 @@ import pandas as pd
 from core.recipe import Recipe, RecipeStep
 from base.plugin_runtime import run_plugin_process
 from plugin_api import ChannelBlock, ChannelMeta
-from utils.concurrency import compute_pool
+from base.concurrency import compute_pool
 
 
 POINT_INDEX_PARAM_NAMES = frozenset({"indices"})

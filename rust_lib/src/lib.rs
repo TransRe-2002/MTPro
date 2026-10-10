@@ -2,6 +2,7 @@ mod decimate;
 mod diurnal;
 mod emd;
 mod mat_loader;
+mod mt_text;
 mod step;
 mod vmd;
 mod xlsx;
@@ -28,6 +29,9 @@ mod rust_lib {
 
     #[pymodule_export]
     use super::mat_loader::probe_mat_v73;
+
+    #[pymodule_export]
+    use super::mt_text::read_mt_txt_rs;
 
     #[pymodule_export]
     use super::step::detect_step_indices_rs;

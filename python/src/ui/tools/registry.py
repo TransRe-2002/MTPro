@@ -40,7 +40,7 @@ def register(spec: ToolSpec) -> None:
 def toolspec_from_plugin(loaded_plugin) -> ToolSpec:
     """Adapt a validated plugin instance to the existing tool registry."""
 
-    from ui.plugin_adapter import create_pipeline_plugin_editor
+    from ui.widgets.plugin_editor import create_pipeline_plugin_editor
 
     info = loaded_plugin.info
     has_editor = (
@@ -150,7 +150,7 @@ def create_pipeline_editor(
     return widget
 
 
-import ui.tools._registrations  # noqa: F401,E402  registers built-in tools
+import ui.tools.registrations  # noqa: F401,E402  registers built-in tools
 
 # Keep direct DataProcessWidget/test construction useful outside MainWindow.
 from base.plugin_loader import load_all_plugins  # noqa: E402

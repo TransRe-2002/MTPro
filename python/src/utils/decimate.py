@@ -45,7 +45,14 @@ def minmax_decimate(
     """
     if _HAS_RUST:
         try:
-            return rust_lib.minmax_decimate_rs(x, y, target_bins)
+            # MATLAB channel rows can be strided views of a Fortran-order
+            # matrix. PyO3 as_slice requires contiguous, aligned f64 input;
+            # normalize only the native-call buffers, not the retained data.
+            return rust_lib.minmax_decimate_rs(
+                np.require(x, dtype=np.float64, requirements=["C", "A"]),
+                np.require(y, dtype=np.float64, requirements=["C", "A"]),
+                target_bins,
+            )
         except Exception:
             logger.debug(
                 "Rust minmax_decimate failed, falling back to Python",
@@ -104,7 +111,11 @@ def build_lod_pyramid(
     """
     if _HAS_RUST:
         try:
-            return list(rust_lib.build_lod_pyramid_rs(x, y, max_finest_points))
+            return list(rust_lib.build_lod_pyramid_rs(
+                np.require(x, dtype=np.float64, requirements=["C", "A"]),
+                np.require(y, dtype=np.float64, requirements=["C", "A"]),
+                max_finest_points,
+            ))
         except Exception:
             logger.debug(
                 "Rust build_lod_pyramid failed, falling back to Python",

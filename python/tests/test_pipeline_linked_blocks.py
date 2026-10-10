@@ -23,8 +23,8 @@ from base.data_manager import DataManager
 from core.em_data import EMData
 from core.pipeline_model import PipelineBlock
 from ui.data_process_pipeline import DataProcessPipelineWidget
-from ui.data_process_shared import create_processing_tool_model
-from ui.plugin_adapter import (
+from ui.models.processing_tools import create_processing_tool_model
+from ui.dialogs.plugin_parameters import (
     PIPELINE_LINK_ALL_TEXT,
     PluginParamDialog,
     create_pipeline_link_all_checkbox,
@@ -247,12 +247,13 @@ def test_plugin_param_dialog_exposes_pipeline_link_checkbox(qtbot):
 def test_automatic_pipeline_tools_share_the_all_channel_control(qtbot):
     _app()
     model = create_processing_tool_model()
-    automatic_category = model.item(1)
-    assert automatic_category is not None
+    automatic_categories = [model.item(1), model.item(2)]
+    assert all(category is not None for category in automatic_categories)
 
     tool_ids = [
-        automatic_category.child(row).data(Qt.ItemDataRole.UserRole + 1)
-        for row in range(automatic_category.rowCount())
+        category.child(row).data(Qt.ItemDataRole.UserRole + 1)
+        for category in automatic_categories
+        for row in range(category.rowCount())
     ]
     assert tool_ids
     assert all(tool_registry.get_plugin(tool_id) is not None for tool_id in tool_ids)

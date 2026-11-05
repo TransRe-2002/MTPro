@@ -121,7 +121,7 @@ jobs:
             --standalone `
             --follow-imports `
             --enable-plugin=pyside6 `
-            --mingw64 `
+            --msvc=latest `
             --include-package=ui `
             --include-package=core `
             --include-package=base `

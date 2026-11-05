@@ -108,6 +108,31 @@ def test_linked_editor_uses_clicked_channel_series_and_switches_member(qtbot):
     widget.close()
 
 
+def test_plugin_failure_reason_is_shown_for_selected_block(qtbot):
+    _app, widget, data_id = _widget(qtbot)
+    pipeline = widget._find_pipeline(data_id, "Ex")
+    assert pipeline is not None
+    block = PipelineBlock(
+        tool_id="remove_wavelet_denoise",
+        start=1,
+        end=10,
+        params=widget._default_params_for_tool("remove_wavelet_denoise"),
+        status="configured",
+    )
+    pipeline.layers[0].blocks.append(block)
+    widget.selected_block_id = block.block_id
+    widget._plugin_tasks[block.block_id] = 7
+
+    widget._on_plugin_task_failed(
+        ((block.block_id, 7, None, None), ValueError("local window is too short"))
+    )
+
+    assert block.status == "error"
+    assert block.last_summary == "local window is too short"
+    assert "失败原因：local window is too short" in widget.pipeline_hint.text()
+    widget.close()
+
+
 def test_middle_click_requests_block_removal(qtbot):
     _app, widget, data_id = _widget(qtbot)
     pipeline = widget._find_pipeline(data_id, "Ex")

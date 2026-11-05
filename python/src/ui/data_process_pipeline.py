@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import logging
 import math
 
 import numpy as np
@@ -80,6 +81,9 @@ from ui.widgets.pipeline_overview import (
 )
 from ui.tools import registry as tool_registry
 from base.qt_bridge import run as run_in_pool
+
+
+logger = logging.getLogger(__name__)
 
 
 HEADER_W = 120
@@ -2926,9 +2930,20 @@ class DataProcessPipelineWidget(QWidget):
         self._plugin_bridges.pop(block_id, None)
         located = self._find_block(block_id)
         if located is None:
+            logger.error("Pipeline plugin failed after its block was removed: %s: %r", block_id, exc)
             return
-        located[2].status = "error"
-        located[2].last_summary = repr(exc)
+        pipeline, _layer, block = located
+        logger.error(
+            "Pipeline plugin failed: tool=%s data=%s channel=%s block=%s: %r",
+            block.tool_id,
+            pipeline.data_id,
+            pipeline.channel,
+            block_id,
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        block.status = "error"
+        block.last_summary = str(exc).strip() or repr(exc)
         self._refresh_selection()
         for lane in self._lane_widgets:
             lane.refresh()
@@ -3264,6 +3279,10 @@ class DataProcessPipelineWidget(QWidget):
             self.pipeline_hint.setText(
                 f"#{pipeline.data_id} {pipeline.channel} / {layer.label} / "
                 f"{meta.get('name', block.tool_id)} / {block.status}{group_text}"
+                + (
+                    f"\n失败原因：{block.last_summary}"
+                    if block.status == "error" and block.last_summary else ""
+                )
             )
 
     def _find_block(

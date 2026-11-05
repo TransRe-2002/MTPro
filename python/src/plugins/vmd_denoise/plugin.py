@@ -18,6 +18,8 @@ class VMDDenoisePlugin:
         description=(
             "以变分模态分解将连续有效数据分成窄带模态，并仅重构指定模态。"
             "模态按中心频率从低到高编号；默认 all 仅分解并重构，不自动丢弃信号。"
+            "建议先运行 all 查看中心频率，再只排除明确属于干扰的模态；长周期 MT 应谨慎保留最低频模态。"
+            "VMD 模态可能混合有效场与噪声，编号本身不代表噪声类别。"
         ),
         params_schema=(
             ParamSpec("mode_count", "模态数 K", int, 4, minimum=1, maximum=32),

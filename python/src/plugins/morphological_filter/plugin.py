@@ -12,7 +12,12 @@ class MorphologicalFilterPlugin:
         display_name="形态滤波",
         version="1.0.0",
         category="auto",
-        description="以平坦结构元素的开/闭运算压制短时正负突变；窗口大小决定时间尺度。",
+        description=(
+            "以平坦结构元素的开/闭运算压制短时正负突变；窗口大小决定时间尺度。"
+            "窗口应略宽于要压制的突变、窄于需要保留的有效变化；开闭与闭开对正负脉冲的影响不同，"
+            "先预览对照再应用。它不适合直接消除长周期漂移。"
+            "NaN 在运算前插值、运算后恢复；长缺口附近请检查边缘结果。"
+        ),
         params_schema=(
             ParamSpec("window_points", "结构元素点数（奇数）", int, 21, minimum=3),
             ParamSpec(

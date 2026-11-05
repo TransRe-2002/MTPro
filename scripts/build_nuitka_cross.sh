@@ -3,12 +3,12 @@
 #
 # 原理: Nuitka 4.x 没有 Linux→Windows 的 --target 交叉模式,必须在
 # Windows 目标解释器下运行才能产出 PE。这里用 Wine 跑 python-build-standalone
-# 的 Windows CPython 3.14(默认 ~/.cross/python,可用 WIN_PY 覆盖),Nuitka
+# 的 Windows CPython(默认 ~/.cross/python,可用 WIN_PY 覆盖),Nuitka
 # 的 C 编译器用 winlibs gcc(Nuitka --assume-yes-for-downloads 自动下载,
 # 在 Wine 内原生运行)。
 #
 # 前置(与 build_nuitka.ps1 相同的依赖集合):
-#   - wine + ~/.cross/python 下的 Windows CPython 3.14
+#   - wine + ~/.cross/python 下的 Windows CPython，扩展必须匹配其 ABI
 #   - Windows wheels 已装入该 Python(scripts 依赖 + nuitka 4.2.x)
 #   - rust_lib.pyd 已放入其 site-packages(用 maturin --target
 #     x86_64-pc-windows-gnu 的产物改名,或 cargo 同样目标构建)
@@ -23,14 +23,20 @@ cd "$ROOT_DIR"
 
 WIN_PY="${WIN_PY:-$HOME/.cross/python/python.exe}"
 OUTPUT_DIR="$ROOT_DIR/outputs"
-BUILD_DIR="python/build/nuitka-cross"
+BUILD_DIR="${BUILD_DIR:-python/build/nuitka-cross}"
 DIST_NAME="mtpro-windows-x86_64"
+APP_VERSION="$(PYTHONPATH=python/src python/.venv/bin/python -c 'from base.app_state import APP_VERSION; print(APP_VERSION)')"
 
 if [[ ! -f "$WIN_PY" ]]; then
   echo "Missing Windows target Python: $WIN_PY" >&2
-  echo "Set WIN_PY to a Windows CPython 3.14 python.exe" >&2
+  echo "Set WIN_PY to a Windows CPython python.exe" >&2
   exit 1
 fi
+
+WINEDEBUG=-all wine "$WIN_PY" -c "from matio import load_from_mat, save_to_mat; from matio.utils import MatlabOpaque; import rust_lib; assert callable(rust_lib.read_mt_txt_rs)"
+for binary in dnff.exe tranmt.exe; do
+  test -f "python/src/bin/win64/$binary" || { echo "Missing $binary" >&2; exit 1; }
+done
 
 # 当前桌面构建组合固定使用 SciPy 1.17.1；升级时需同时复测 Nuitka 和 scipy.signal。
 # 环境必须钉 scipy==1.17.1,否则编出来的 exe 启动即崩。
@@ -59,11 +65,15 @@ if [[ "${RUST_REBUILD:-0}" == "1" ]]; then
   cp rust_lib/target/x86_64-pc-windows-gnu/release/rust_lib.dll "$SITE_PY/rust_lib.pyd"
 fi
 
-PKGS=(ui core base processor io_utils utils emtf)
+PKGS=(ui core base processor io_utils utils emtf builtin_plugins plugins output_tools)
 INCLUDE_PACKAGES=()
 for p in "${PKGS[@]}"; do
   INCLUDE_PACKAGES+=(--include-package="$p")
 done
+if [[ "${INCLUDE_EMTF_RS:-0}" == "1" ]]; then
+  WINEDEBUG=-all wine "$WIN_PY" -c "import emtf_rs; assert callable(emtf_rs.estimate_emtf_bands)"
+  INCLUDE_PACKAGES+=(--include-package=emtf_rs)
+fi
 
 # 排除开发环境里有、MTPro 不用的包(与 build_nuitka.sh / ps1 一致)
 EXCLUDED_UNUSED_PACKAGES=(
@@ -94,16 +104,23 @@ wine "$WIN_PY" -m nuitka \
   --static-libpython=no \
   "${INCLUDE_PACKAGES[@]}" \
   --include-module=rust_lib \
+  --include-module=plugin_api \
   --include-package=matio \
   --include-data-dir=python/src/bin=bin \
   --mingw64 \
+  --product-name=MTPro \
+  --file-description="MTPro time-series processing" \
+  --file-version="$APP_VERSION" \
+  --product-version="$APP_VERSION" \
+  --report="$BUILD_DIR/compilation-report.xml" \
+  --show-progress \
   --experimental=force-mingw64 \
   --experimental=force-dependencies-pefile \
   --low-memory \
   --jobs="$JOBS" \
   --noinclude-pytest-mode=warning \
   --noinclude-unittest-mode=warning \
-  --noinclude-pydoc-mode=warning \
+  --include-module=pydoc \
   --noinclude-IPython-mode=warning \
   --noinclude-setuptools-mode=warning \
   "${EXCLUDE_FLAGS[@]}" \
@@ -118,16 +135,17 @@ if [[ ! -f "$DIST_SRC/main.exe" ]]; then
   exit 1
 fi
 
-rm -rf "$OUTPUT_DIR/$DIST_NAME"
+if [[ -e "$OUTPUT_DIR/$DIST_NAME" ]]; then
+  mv "$OUTPUT_DIR/$DIST_NAME" "$OUTPUT_DIR/${DIST_NAME}-previous-$(date +%Y%m%d-%H%M%S)"
+fi
 mkdir -p "$OUTPUT_DIR/$DIST_NAME"
 # -l 硬链接装配:800M dist 到 outputs 从"整盘拷贝"变成"瞬时", build 目录
 # 本身不被改动,硬链接安全(需要与 build 同分区,实际都在 /home)。
 cp -rl "$DIST_SRC"/. "$OUTPUT_DIR/$DIST_NAME/"
 mv "$OUTPUT_DIR/$DIST_NAME/main.exe" "$OUTPUT_DIR/$DIST_NAME/MTPro.exe"
 # Nuitka 的 --include-data-dir 会滤掉 .exe 数据文件,win64 转换器显式补拷
-mkdir -p "$OUTPUT_DIR/$DIST_NAME/bin"
-cp -rl python/src/bin/win64/. "$OUTPUT_DIR/$DIST_NAME/bin/" 2>/dev/null || true
-rm -rf "$OUTPUT_DIR/$DIST_NAME/bin/linux"   # Linux 版转换器是 Windows 包的死重
+mkdir -p "$OUTPUT_DIR/$DIST_NAME/bin/win64"
+cp -r python/src/bin/win64/. "$OUTPUT_DIR/$DIST_NAME/bin/win64/"
 cp python/requirements.txt "$OUTPUT_DIR/$DIST_NAME/" 2>/dev/null || true
 
 echo "Output: $OUTPUT_DIR/$DIST_NAME/MTPro.exe"

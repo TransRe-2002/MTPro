@@ -234,9 +234,6 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         correction_legend.setPen(subtle_pen(self))
         self.correction_plot_item.showGrid(x=True, y=True, alpha=0.7)
         self.correction_plot_item.addItem(self.correction_line)
-        self.correction_plot_item.addItem(
-            pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen(color=(80, 80, 80), style=Qt.PenStyle.DotLine))
-        )
 
     # ------------------------------------------------------------------
     # BaseProcessorWidget 接口

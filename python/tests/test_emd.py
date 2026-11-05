@@ -52,7 +52,7 @@ def test_emd_denoise_preserves_index_and_missing_runs():
 
     assert result.cleaned.index.equals(index)
     assert np.isnan(result.cleaned.iloc[180:185]).all()
-    assert len(result.processed_segments) == 2
+    assert [(item.start, item.stop) for item in result.processed_segments] == [(0, 512)]
     assert all(item.reconstruction_residual_rms < 1.0e-10 for item in result.processed_segments)
 
 
@@ -71,5 +71,5 @@ def test_emd_plugin_produces_json_safe_diagnostics():
     assert result.series.index.equals(index)
     assert np.isnan(result.series.iloc[200:205]).all()
     assert params["keep_residue"] is True
-    assert len(result.diagnostics["processed_segments"]) == 2
+    assert len(result.diagnostics["processed_segments"]) == 1
     json.dumps(result.diagnostics)

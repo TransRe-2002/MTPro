@@ -12,6 +12,7 @@ from plugins.common.base_processor import build_pkg_from_series
 from plugins.common.display import decimate_for_display
 from plugins.common.plotting import ProcessingPlotWidget
 from base.qt_bridge import run as run_in_pool
+from core.algorithms.missing import interpolate_nonfinite
 from utils.theme import configure_pyqtgraph_theme, pg_background
 
 
@@ -37,6 +38,7 @@ class AutoSpikeFilter(QtWidgets.QWidget):
         self._detection: AutoSpikeDetection | None = None
         self._preview_params: dict[str, float | int] | None = None
         self._curve = None
+        self._interpolation_curve = None
         self._candidates = None
         self._protected = None
         self._preview_generation = 0
@@ -77,6 +79,13 @@ class AutoSpikeFilter(QtWidgets.QWidget):
         self.width_spin = QtWidgets.QSpinBox(self)
         self.width_spin.setRange(1, 1000)
         self.width_spin.setValue(5)
+        self.remove_orange_checkbox = QtWidgets.QCheckBox(
+            "同时删除橙色标记点",
+            self,
+        )
+        self.remove_orange_checkbox.setToolTip(
+            "勾选后，长异常段、潜在台阶和边界候选也会在确认时置为 NaN。"
+        )
 
         form = QtWidgets.QFormLayout()
         form.addRow("窗口点数:", self.window_spin)
@@ -85,7 +94,7 @@ class AutoSpikeFilter(QtWidgets.QWidget):
         form.addRow("最大脉冲宽度:", self.width_spin)
 
         self.preview_button = QtWidgets.QPushButton("重新筛选并预览", self)
-        self.apply_button = QtWidgets.QPushButton("确认：将短脉冲置为 NaN", self)
+        self.apply_button = QtWidgets.QPushButton("确认：将红色短脉冲置为 NaN", self)
         self.apply_button.setEnabled(False)
         self.status_label = QtWidgets.QLabel("等待加载数据…", self)
         self.status_label.setWordWrap(True)
@@ -101,12 +110,14 @@ class AutoSpikeFilter(QtWidgets.QWidget):
         controls.addLayout(form)
         controls.addStretch(1)
         controls.addWidget(self.preview_button)
+        controls.addWidget(self.remove_orange_checkbox)
         controls.addWidget(self.apply_button)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(
             QtWidgets.QLabel(
-                "红点为将自动置为 NaN 的短脉冲；橙点为长异常段或潜在台阶，仅标记不删除。\n"
+                "红点为将自动置为 NaN 的短脉冲；橙点为长异常段或潜在台阶，"
+                "默认仅标记，勾选后也会删除。短 NaN 插值段以蓝色曲线的反色显示。\n"
                 "图形操作：滚轮缩放；Ctrl+滚轮/中键拖动仅操作X轴；"
                 "Shift+滚轮/中键拖动仅操作Y轴；双击自适应视图。",
                 self,
@@ -119,15 +130,22 @@ class AutoSpikeFilter(QtWidgets.QWidget):
     def _connect_signals(self) -> None:
         self.preview_button.clicked.connect(self._start_preview)
         self.apply_button.clicked.connect(self._apply_detection)
+        self.remove_orange_checkbox.toggled.connect(self._update_delete_mode)
         for control in (self.window_spin, self.overlap_spin, self.threshold_spin, self.width_spin):
             control.valueChanged.connect(self._invalidate_preview)
 
-    def _params(self) -> dict[str, float | int]:
+    def _detection_params(self) -> dict[str, float | int]:
         return {
             "window_points": int(self.window_spin.value()),
             "overlap_percent": float(self.overlap_spin.value()),
             "threshold_sigma": float(self.threshold_spin.value()),
             "max_pulse_width": int(self.width_spin.value()),
+        }
+
+    def _params(self) -> dict[str, float | int | bool]:
+        return {
+            **self._detection_params(),
+            "remove_orange_points": self.remove_orange_checkbox.isChecked(),
         }
 
     def _invalidate_preview(self, _value=None) -> None:
@@ -136,7 +154,7 @@ class AutoSpikeFilter(QtWidgets.QWidget):
     def _start_preview(self) -> None:
         if self._source is None:
             return
-        params = self._params()
+        params = self._detection_params()
         self._preview_generation += 1
         generation = self._preview_generation
         self.preview_button.setEnabled(False)
@@ -164,11 +182,7 @@ class AutoSpikeFilter(QtWidgets.QWidget):
         self.preview_button.setEnabled(True)
         self.apply_button.setEnabled(True)
         self._draw_preview(detection)
-        self.status_label.setText(
-            f"扫描 {detection.window_count} 个窗口：候选 {detection.candidate_indices.size} 点，"
-            f"自动删除 {detection.removed_indices.size} 点；"
-            f"保留长异常段 {len(detection.long_runs)} 个、潜在台阶/边界段 {len(detection.protected_runs)} 个。"
-        )
+        self._update_delete_mode()
 
     def apply_plugin_params(self, params: dict) -> None:
         """Restore a Pipeline block's settings before presenting its preview."""
@@ -179,17 +193,54 @@ class AutoSpikeFilter(QtWidgets.QWidget):
             (self.threshold_spin, "threshold_sigma"),
             (self.width_spin, "max_pulse_width"),
         )
-        changed = False
+        detection_changed = False
         for control, name in controls:
             if name in params and control.value() != params[name]:
                 blocker = QtCore.QSignalBlocker(control)
                 control.setValue(params[name])
                 del blocker
-                changed = True
-        if changed:
+                detection_changed = True
+        remove_orange = bool(params.get("remove_orange_points", False))
+        if self.remove_orange_checkbox.isChecked() != remove_orange:
+            blocker = QtCore.QSignalBlocker(self.remove_orange_checkbox)
+            self.remove_orange_checkbox.setChecked(remove_orange)
+            del blocker
+        self._update_delete_mode()
+        if detection_changed:
             self._invalidate_preview()
-        if changed and self._source is not None:
+        if detection_changed and self._source is not None:
             self._start_preview()
+
+    def _update_delete_mode(self, _checked=None) -> None:
+        remove_orange = self.remove_orange_checkbox.isChecked()
+        self.apply_button.setText(
+            "确认：将红点和橙点置为 NaN"
+            if remove_orange
+            else "确认：将红色短脉冲置为 NaN"
+        )
+        detection = self._detection
+        if detection is None:
+            return
+        orange_count = max(
+            0,
+            int(detection.candidate_indices.size - detection.removed_indices.size),
+        )
+        if remove_orange:
+            action = (
+                f"将删除 {detection.candidate_indices.size} 点"
+                f"（红点 {detection.removed_indices.size}、橙点 {orange_count}）"
+            )
+        else:
+            action = (
+                f"自动删除红点 {detection.removed_indices.size} 个；"
+                f"保留橙点 {orange_count} 个"
+            )
+        self.status_label.setText(
+            f"扫描 {detection.window_count} 个窗口：候选 "
+            f"{detection.candidate_indices.size} 点，{action}；"
+            f"长异常段 {len(detection.long_runs)} 个、潜在台阶/边界段 "
+            f"{len(detection.protected_runs)} 个。"
+        )
 
     def _on_preview_failed(self, exc: BaseException) -> None:
         self.preview_button.setEnabled(True)
@@ -206,6 +257,25 @@ class AutoSpikeFilter(QtWidgets.QWidget):
             pen=pg.mkPen("#4a90d9", width=1),
             connect="finite",
         )
+        dense, _finite_mask = interpolate_nonfinite(self._source)
+        interpolated_mask = np.isfinite(dense) & ~np.isfinite(self._source)
+        interpolated_indices = np.flatnonzero(interpolated_mask)
+        if interpolated_indices.size:
+            overlay_mask = interpolated_mask.copy()
+            overlay_mask[np.maximum(interpolated_indices - 1, 0)] = True
+            overlay_mask[np.minimum(interpolated_indices + 1, overlay_mask.size - 1)] = True
+            overlay = np.full(dense.shape, np.nan, dtype=np.float64)
+            overlay[overlay_mask] = dense[overlay_mask]
+            overlay_x, overlay_y = decimate_for_display(self._x_data, overlay)
+            self._interpolation_curve = self.plot_widget.plot(
+                overlay_x,
+                overlay_y,
+                pen=pg.mkPen("#b56f26", width=2.5),
+                connect="finite",
+                name="短缺口插值（高亮）",
+            )
+        else:
+            self._interpolation_curve = None
         if detection.removed_indices.size:
             indices = detection.removed_indices
             self._candidates = pg.ScatterPlotItem(
@@ -226,12 +296,17 @@ class AutoSpikeFilter(QtWidgets.QWidget):
     def _apply_detection(self) -> None:
         if self._source is None or self._detection is None:
             return
-        if self._preview_params != self._params():
+        if self._preview_params != self._detection_params():
             self.status_label.setText("参数已经变更，请先重新筛选并预览。")
             self.apply_button.setEnabled(False)
             return
         result = self._source.copy()
-        result[self._detection.removed_indices] = np.nan
+        indices = (
+            self._detection.candidate_indices
+            if self.remove_orange_checkbox.isChecked()
+            else self._detection.removed_indices
+        )
+        result[indices] = np.nan
         self.result_submitted.emit(self.data_id, self.ch_name, result)
         self.result_signal.emit(self.ch_name, result)
 

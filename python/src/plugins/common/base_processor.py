@@ -12,6 +12,7 @@ import pandas as pd
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import QProgressDialog, QSizePolicy, QWidget
 
+from core.algorithms.missing import interpolate_nonfinite
 from utils.series import dti_to_numpy
 
 
@@ -167,10 +168,9 @@ class BaseProcessorWidget(QWidget):
             return
         self._pkg = pkg
         self.x_data = pkg['x']
-        raw_y = pkg['y']
-        self._nan_mask = np.asarray(pd.isna(raw_y), dtype=bool)
-        interpolated = pd.Series(raw_y).interpolate(method="linear")
-        self.y_data = interpolated.to_numpy(dtype=np.float64)
+        raw_y = np.asarray(pkg['y'], dtype=np.float64)
+        self._nan_mask = ~np.isfinite(raw_y)
+        self.y_data, _finite_mask = interpolate_nonfinite(raw_y)
         self.origin_y_data = self.y_data.copy()
         self.history.clear()
 
@@ -234,6 +234,18 @@ class BaseProcessorWidget(QWidget):
         self._log(f"确认修改，返回 {len(result)} 个数据点")
         self.result_submitted.emit(self.data_id, self.ch_name, result)
         self.result_signal.emit(self.ch_name, result)
+
+    def closeEvent(self, event) -> None:
+        # RegionManagementMixin stores a LinearRegionItem in the PlotItem's
+        # ViewBox scene. Detach it before QWidget tears down the graphics scene;
+        # otherwise queued Qt paint events can ask a deleted graphics item for
+        # its bounds during window destruction.
+        region_item = getattr(self, "region_item", None)
+        plot_item = getattr(self, "signal_plot_item", None)
+        if region_item is not None and plot_item is not None:
+            plot_item.removeItem(region_item)
+            self.region_item = None
+        super().closeEvent(event)
 
     def _update_plot(self) -> None:
         raise NotImplementedError

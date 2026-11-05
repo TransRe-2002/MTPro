@@ -50,10 +50,17 @@ class FutureBridge(QObject):
             exc = future.exception()
         except CancelledError as cancelled:
             exc = cancelled
-        if exc is not None:
-            self.failed.emit(exc)
-        else:
-            self.done.emit(future.result())
+        try:
+            if exc is not None:
+                self.failed.emit(exc)
+            else:
+                self.done.emit(future.result())
+        except RuntimeError as emit_error:
+            # The QObject may have been deleted with its owning dialog while
+            # the worker was still running.  A completed future must not turn
+            # that normal teardown race into an unhandled executor callback.
+            if "Signal source has been deleted" not in str(emit_error):
+                raise
 
 
 def run(

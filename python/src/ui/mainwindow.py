@@ -48,6 +48,7 @@ from io_utils import file_ops
 from base.concurrency import io_pool
 from base.qt_bridge import run as run_in_pool
 from base.app_state import (
+    APP_VERSION,
     AppState,
     load_app_state,
     remember_recent_file,
@@ -561,7 +562,7 @@ class MainWindow(QMainWindow):
             self,
             "关于 MTPro",
             "<b>MTPro</b> — 大地电磁时间序列处理工作台<br><br>"
-            "版本：0.1.0<br>"
+            f"版本：{APP_VERSION}<br>"
             "支持 MAT 格式数据的波形浏览、人工清洗与处理流程。<br><br>"
             "本软件基于 PySide6 / PyQtGraph 构建。",
         )
@@ -726,6 +727,7 @@ class MainWindow(QMainWindow):
 
         self._batch_progress = progress
         self._batch_failed = []
+        self._batch_loaded_count = 0
         signals = _BatchOpenSignals(self)
         signals.file_loaded.connect(self._on_batch_file_loaded)
         signals.failed.connect(self._on_batch_file_failed)
@@ -769,8 +771,9 @@ class MainWindow(QMainWindow):
         if cancel_flag[0]:
             self.logger.info(
                 "Batch open cancelled by user (%d/%d files loaded)",
-                progress.value(), total,
+                self._batch_loaded_count, total,
             )
+        self._batch_loaded_count = 0
         if failed:
             QMessageBox.warning(
                 self,
@@ -788,6 +791,7 @@ class MainWindow(QMainWindow):
                 f"正在打开 {done}/{total} 个文件...\n{name}")
 
     def _on_batch_file_loaded(self, normalized: str, em_data) -> None:
+        self._batch_loaded_count += 1
         key = self.data_manager.add(em_data)
         self.app_state = remember_recent_file(self.app_state, normalized)
         self._persist_app_state()

@@ -10,7 +10,12 @@ class SVDDenoisePlugin:
         display_name="Hankel-SVD 去噪",
         version="0.1.0",
         category="auto",
-        description="构造 Hankel 轨迹矩阵，保留指定低秩分量并沿反对角线平均重构。",
+        description=(
+            "构造 Hankel 轨迹矩阵，保留指定低秩分量并沿反对角线平均重构。"
+            "嵌入窗口控制可表达的时间尺度，保留秩越低平滑越强；建议先用较高秩作温和处理，"
+            "再逐步降低并比较。周期信号也可能被判为可舍弃成分，避免盲目追求平滑。"
+            "NaN 在分解前插值、重构后恢复；长缺口两侧可能受插值影响。"
+        ),
         params_schema=(
             ParamSpec("embedding_points", "嵌入窗口点数", int, 101, minimum=2, maximum=10000),
             ParamSpec("rank", "保留秩", int, 8, minimum=1, maximum=10000),

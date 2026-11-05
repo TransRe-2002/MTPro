@@ -13,17 +13,18 @@ class AutoSpikeFilterPlugin:
     info = PluginInfo(
         plugin_id="auto_spike_filter",
         display_name="auto spike filter",
-        version="1.0.0",
+        version="1.1.0",
         category="auto",
         description=(
             "以重叠窗口的中位数/MAD 为局部基线，自动将不超过最大宽度的"
-            "极端脉冲飞点标记为 NaN；长异常段和潜在台阶不自动删除。"
+            "极端脉冲飞点标记为 NaN；可选将长异常段和潜在台阶一并删除。"
         ),
         params_schema=(
             ParamSpec("window_points", "窗口点数", int, 101, minimum=3),
             ParamSpec("overlap_percent", "窗口重叠 (%)", float, 50.0, minimum=0.0, maximum=90.0),
             ParamSpec("threshold_sigma", "鲁棒阈值 (σ)", float, 10.0, minimum=0.001),
             ParamSpec("max_pulse_width", "最大脉冲宽度", int, 5, minimum=1),
+            ParamSpec("remove_orange_points", "同时删除橙色标记点", bool, False),
         ),
     )
 
@@ -36,11 +37,21 @@ class AutoSpikeFilterPlugin:
             threshold_sigma=float(params["threshold_sigma"]),
             max_pulse_width=int(params["max_pulse_width"]),
         )
-        values[detection.removed_indices] = np.nan
+        remove_orange_points = bool(params["remove_orange_points"])
+        removed_indices = (
+            detection.candidate_indices
+            if remove_orange_points
+            else detection.removed_indices
+        )
+        values[removed_indices] = np.nan
         diagnostics = {
             "windows": detection.window_count,
             "candidates": int(detection.candidate_indices.size),
-            "removed": int(detection.removed_indices.size),
+            "removed": int(removed_indices.size),
+            "short_removed": int(detection.removed_indices.size),
+            "orange_removed": int(
+                removed_indices.size - detection.removed_indices.size
+            ),
             "long_runs": [list(item) for item in detection.long_runs],
             "protected_runs": [list(item) for item in detection.protected_runs],
         }

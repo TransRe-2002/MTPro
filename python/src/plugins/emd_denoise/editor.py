@@ -34,7 +34,7 @@ class EMDDenoiseEditor(QtWidgets.QWidget):
         note = QtWidgets.QLabel(
             "IMF 0 是最先提取的高频分量。保留 IMF 可填 all 或 1,2,3；"
             "如按 LMT 的高频 IMF 抑制思路，可保留 1,2,... 并保留低频残差。"
-            "含 NaN 的数据按连续有效段分别处理。",
+            "两端 NaN 会裁掉；最多插值 10 个连续 NaN，较长缺口会分段处理；结果恢复原缺失位置。",
             self,
         )
         note.setWordWrap(True)

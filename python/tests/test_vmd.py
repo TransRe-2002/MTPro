@@ -55,7 +55,7 @@ def test_vmd_denoise_preserves_index_nans_and_short_finite_runs():
     assert np.isnan(result.cleaned.iloc[180:185]).all()
     assert np.isnan(result.cleaned.iloc[400:410]).all()
     assert result.selected_modes == (0,)
-    assert len(result.processed_segments) == 3
+    assert [(item.start, item.stop) for item in result.processed_segments] == [(0, 512)]
     assert all(len(item.center_frequencies_hz) == 2 for item in result.processed_segments)
     assert all(item.reconstruction_residual_rms < 0.2 for item in result.processed_segments)
 
@@ -85,5 +85,5 @@ def test_vmd_plugin_returns_json_diagnostics_and_keeps_series_contract():
     assert np.isnan(result.series.iloc[200:205]).all()
     assert params["keep_modes"] == "0"
     assert result.diagnostics["selected_modes"] == [0]
-    assert len(result.diagnostics["processed_segments"]) == 2
+    assert len(result.diagnostics["processed_segments"]) == 1
     json.dumps(result.diagnostics)

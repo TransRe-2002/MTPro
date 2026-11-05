@@ -48,7 +48,7 @@ class VMDDenoiseEditor(QtWidgets.QWidget):
         note = QtWidgets.QLabel(
             "模态按中心频率由低到高编号。保留模态可填 all 或 0,1,3；"
             "默认 all 不会自动丢弃任何模态。VMD 的约束重构仍可能存在小残差；"
-            "含 NaN 的数据按连续有效段分别处理。",
+            "两端 NaN 会裁掉；最多插值 10 个连续 NaN，较长缺口会分段处理；结果恢复原缺失位置。",
             self,
         )
         note.setWordWrap(True)

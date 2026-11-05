@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 from core.em_data import EMData
+from core.algorithms.missing import interpolate_nonfinite
 from plugins.common.base_processor import BaseProcessorWidget
 from plugins.common.diurnal import (
     PeriodicSubtractionResult,
@@ -76,6 +77,7 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         ("5阶: 加 4.8h (17280s)", (1, 2, 3, 4, 5)),
         ("6阶: 加 4h (14400s)", (1, 2, 3, 4, 5, 6)),
     ]
+    _PLOT_POINT_LIMIT = 120_000
 
     def __init__(self, source, channel_name: str, parent=None):
         # 日变工具使用 time+linear 双重插值（在 _on_data_loaded 中覆写）
@@ -166,17 +168,14 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
 
 
     def _on_data_loaded(self):
-        # 日变工具使用 time+linear 双重插值（覆写基类的 linear-only）
+        # Keep interpolation policy consistent with the other processors:
+        # interpolate only short interior gaps and leave edges/long gaps as NaN.
         index = self._pkg.get('datetime_index')
         if isinstance(index, pd.DatetimeIndex) and len(index) == len(self._pkg['y']):
             self.datetime_index = index
-            series = pd.Series(self._pkg['y'], index=index, name=self.ch_name)
-            interpolated = series.interpolate(method="time").interpolate(method="linear")
         else:
             self.datetime_index = None
-            series = pd.Series(self._pkg['y'], name=self.ch_name)
-            interpolated = series.interpolate(method="linear")
-        self.y_data = interpolated.to_numpy(dtype=np.float64)
+        self.y_data, _finite_mask = interpolate_nonfinite(self._pkg['y'])
         self.origin_y_data = self.y_data.copy()
         self._init_plot()
         self._log_initial_summary()
@@ -268,12 +267,12 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
             clipToView=True, useOpenGL=True, connect='finite',
         )
         self.origin_line = StepPlotWidget.make_curve(
-            self.x_data, self._display_values(self.origin_y_data),
+            *self._plot_data(self._display_values(self.origin_y_data)),
             pen=pg.mkPen(120, 120, 120, width=1, style=Qt.PenStyle.DashLine),
             name="原始序列", **curve_opts,
         )
         self.current_line = StepPlotWidget.make_curve(
-            self.x_data, self._display_values(self.y_data),
+            *self._plot_data(self._display_values(self.y_data)),
             pen=pg.mkPen(215, 48, 39, width=1),
             name="当前序列", **curve_opts,
         )
@@ -371,13 +370,45 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         mean_value = float(np.nanmean(arr)) if arr.size else 0.0
         return arr - mean_value
 
+    def _plot_data(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return a peak-preserving display sample for large time series.
+
+        Processing and confirmation keep using the full-resolution arrays;
+        only the points sent to pyqtgraph are reduced. Keeping each bucket's
+        minimum and maximum preserves narrow spikes without building a path
+        containing millions of vertices on the UI thread.
+        """
+        y = np.asarray(values, dtype=np.float64)
+        x = np.asarray(self.x_data)
+        if y.size <= self._PLOT_POINT_LIMIT:
+            return x, y
+
+        bucket_size = int(np.ceil(y.size / (self._PLOT_POINT_LIMIT // 2)))
+        bucket_count = int(np.ceil(y.size / bucket_size))
+        padded_size = bucket_count * bucket_size
+        padded = np.full(padded_size, np.nan, dtype=np.float64)
+        padded[:y.size] = y
+        buckets = padded.reshape(bucket_count, bucket_size)
+        finite = np.isfinite(buckets)
+        min_pos = np.argmin(np.where(finite, buckets, np.inf), axis=1)
+        max_pos = np.argmax(np.where(finite, buckets, -np.inf), axis=1)
+        offsets = np.arange(bucket_count, dtype=np.int64) * bucket_size
+        indices = np.stack((offsets + min_pos, offsets + max_pos), axis=1)
+        indices.sort(axis=1)
+        indices = indices.reshape(-1)
+        indices = indices[indices < y.size]
+        return x[indices], y[indices]
+
     def _refresh_signal_plot(self):
-        self.origin_line.setData(self.x_data, self._display_values(self.origin_y_data))
-        self.current_line.setData(self.x_data, self._display_values(self.y_data))
+        self.origin_line.setData(*self._plot_data(self._display_values(self.origin_y_data)))
+        self.current_line.setData(*self._plot_data(self._display_values(self.y_data)))
         if self.preview_result is not None:
             self.preview_line.setData(
-                self.x_data,
-                self._display_values(self.preview_result.cleaned.to_numpy(dtype=np.float64)),
+                *self._plot_data(
+                    self._display_values(
+                        self.preview_result.cleaned.to_numpy(dtype=np.float64)
+                    )
+                ),
             )
         else:
             self.preview_line.setData([], [])
@@ -391,11 +422,11 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         if current_noise is None:
             self.current_noise_line.setData([], [])
         else:
-            self.current_noise_line.setData(self.x_data, current_noise)
+            self.current_noise_line.setData(*self._plot_data(current_noise))
         if preview_noise is None:
             self.preview_noise_line.setData([], [])
         else:
-            self.preview_noise_line.setData(self.x_data, preview_noise)
+            self.preview_noise_line.setData(*self._plot_data(preview_noise))
 
     # ------------------------------------------------------------------
     # 业务逻辑
@@ -479,8 +510,9 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
             return
         self.preview_result = result
         self.preview_line.setData(
-            self.x_data,
-            self._display_values(result.cleaned.to_numpy(dtype=np.float64)),
+            *self._plot_data(
+                self._display_values(result.cleaned.to_numpy(dtype=np.float64))
+            ),
         )
         self._update_noise_plot(None, result.estimated_noise.to_numpy(dtype=np.float64))
         self._apply_shared_x_range(self.signal_plot_widget, self.noise_plot_widget)
@@ -514,7 +546,9 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
         self._save_history()
         self.y_data = self.preview_result.cleaned.to_numpy(dtype=np.float64)
         applied_noise = self.preview_result.estimated_noise.to_numpy(dtype=np.float64)
-        self.current_line.setData(self.x_data, self._display_values(self.y_data))
+        self.current_line.setData(
+            *self._plot_data(self._display_values(self.y_data))
+        )
         self.preview_line.setData([], [])
         self._update_noise_plot(applied_noise, None)
         self._log(f"已应用正弦相减 | 样本数={len(self.y_data)}")

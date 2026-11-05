@@ -5,13 +5,13 @@
 ;
 ; 用法:
 ;   iscc /DMyAppVersion=1.2.3 scripts\mtpro_windows.iss
-; version 缺省为 1.0.0,可由 build_nuitka.ps1 -Installer 或 CI 自动注入。
+; version 缺省为 0.1.1,可由 build_nuitka.ps1 -Installer 或 CI 自动注入。
 
 #ifndef MyAppName
   #define MyAppName "MTPro"
 #endif
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "0.1.1"
 #endif
 #ifndef MyAppPublisher
   #define MyAppPublisher "TransRe"

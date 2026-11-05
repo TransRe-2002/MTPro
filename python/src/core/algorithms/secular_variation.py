@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline
 
+from core.algorithms.missing import finite_runs, interpolate_nonfinite, restore_nonfinite
+
 
 _ANCHOR_SMOOTHING_KERNEL = np.array(
     [0.0705, 0.1307, 0.1911, 0.2154, 0.1911, 0.1307, 0.0705],
@@ -55,7 +57,57 @@ def remove_secular_variation_series(
         min_valid_fraction,
     )
     values = series.to_numpy(dtype=np.float64, copy=True)
-    size = values.size
+    dense, original_finite = interpolate_nonfinite(values)
+    dense_segments = finite_runs(np.isfinite(dense))
+    if len(dense_segments) != 1 or dense_segments[0] != (0, values.size):
+        cleaned = values.copy()
+        baseline = np.full(values.size, np.nan, dtype=np.float64)
+        anchor_values: list[pd.Series] = []
+        anchor_count = 0
+        valid_anchor_count = 0
+        for start, stop in dense_segments:
+            segment = series.iloc[start:stop].copy()
+            segment.iloc[:] = dense[start:stop]
+            result = remove_secular_variation_series(
+                segment,
+                smoothing_window_points=smoothing_window_points,
+                anchor_spacing_points=anchor_spacing_points,
+                min_valid_fraction=min_valid_fraction,
+            )
+            cleaned[start:stop] = result.cleaned.to_numpy(dtype=np.float64)
+            baseline[start:stop] = result.estimated_baseline.to_numpy(dtype=np.float64)
+            anchor_values.append(result.anchor_estimates)
+            anchor_count += result.anchor_count
+            valid_anchor_count += result.valid_anchor_count
+        cleaned = restore_nonfinite(cleaned, values, original_finite)
+        anchors = (
+            pd.concat(anchor_values)
+            if anchor_values
+            else pd.Series(dtype=np.float64, index=series.index[:0], name=f"{series.name}_sv_anchors")
+        )
+        return SecularVariationResult(
+            cleaned=pd.Series(cleaned, index=series.index, name=series.name),
+            estimated_baseline=pd.Series(baseline, index=series.index, name=f"{series.name}_sv"),
+            anchor_estimates=anchors,
+            anchor_count=anchor_count,
+            valid_anchor_count=valid_anchor_count,
+            status="applied" if valid_anchor_count >= 2 else "insufficient_anchor_estimates",
+        )
+    finite_indices = np.flatnonzero(original_finite)
+    if finite_indices.size == 0:
+        empty_baseline = np.full(values.size, np.nan, dtype=np.float64)
+        return SecularVariationResult(
+            cleaned=series.copy(),
+            estimated_baseline=pd.Series(empty_baseline, index=series.index, name=f"{series.name}_sv"),
+            anchor_estimates=pd.Series(dtype=np.float64, index=series.index[:0], name=f"{series.name}_sv_anchors"),
+            anchor_count=0,
+            valid_anchor_count=0,
+            status="insufficient_anchor_estimates",
+        )
+    first = int(finite_indices[0])
+    stop = int(finite_indices[-1]) + 1
+    dense = dense[first:stop]
+    size = dense.size
     anchor_positions = _anchor_positions(size, anchor_spacing_points)
     anchors = np.full(anchor_positions.size, np.nan, dtype=np.float64)
 
@@ -64,29 +116,32 @@ def remove_secular_variation_series(
     for anchor_id, position in enumerate(anchor_positions):
         start = max(0, int(position) - half_window)
         stop = min(size, int(position) + half_window + 1)
-        local = values[start:stop]
-        finite = local[np.isfinite(local)]
+        local = dense[start:stop]
+        local_finite = local[np.isfinite(local)]
         is_edge = anchor_id == 0 or anchor_id == anchor_positions.size - 1
-        if finite.size and (is_edge or finite.size > required_samples):
-            anchors[anchor_id] = float(np.mean(finite))
+        if local_finite.size and (is_edge or local_finite.size > required_samples):
+            anchors[anchor_id] = float(np.mean(local_finite))
 
     smoothed_anchors = _smooth_anchor_estimates(anchors)
     valid = np.isfinite(smoothed_anchors)
-    baseline = np.full(size, np.nan, dtype=np.float64)
+    baseline_span = np.full(size, np.nan, dtype=np.float64)
     if int(valid.sum()) >= 2:
-        baseline = _interpolate_baseline(
+        baseline_span = _interpolate_baseline(
             anchor_positions[valid],
             smoothed_anchors[valid],
             size,
         )
-        cleaned = values - baseline
-        cleaned[~np.isfinite(values)] = np.nan
+        cleaned = values.copy()
+        cleaned[first:stop] = dense - baseline_span
+        cleaned = restore_nonfinite(cleaned, values, original_finite)
         status = "applied"
     else:
         cleaned = values.copy()
         status = "insufficient_anchor_estimates"
 
-    anchor_index = series.index.take(anchor_positions)
+    baseline = np.full(values.size, np.nan, dtype=np.float64)
+    baseline[first:stop] = baseline_span
+    anchor_index = series.index.take(anchor_positions + first)
     return SecularVariationResult(
         cleaned=pd.Series(cleaned, index=series.index, name=series.name),
         estimated_baseline=pd.Series(baseline, index=series.index, name=f"{series.name}_sv"),

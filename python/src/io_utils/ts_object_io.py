@@ -67,13 +67,79 @@ def _datevec(value: datetime) -> np.ndarray:
                       value.second + value.microsecond / 1e6]], dtype=np.float64)
 
 
+def _decode_matlab_bytes(value: bytes | np.bytes_) -> str:
+    """Convert byte strings from older MAT readers into ordinary Python text."""
+    raw = bytes(value)
+    try:
+        return raw.decode('utf-8')
+    except UnicodeDecodeError:
+        # Older MATLAB/scipy paths may expose one-byte character data rather
+        # than UTF-8. Latin-1 is lossless for those raw byte values.
+        return raw.decode('latin1')
+
+
+def _normalize_text_values(value):
+    """Recursively remove NumPy/Python byte scalars before mat-io encoding.
+
+    ``matio.save_to_mat`` expects character values to provide ``str.encode``.
+    NumPy's ``bytes_`` inherits from ``bytes`` and therefore has no ``encode``
+    method, which used to make Save As fail for otherwise valid legacy files.
+    """
+    if isinstance(value, (bytes, np.bytes_)):
+        return _decode_matlab_bytes(value)
+    if isinstance(value, np.str_):
+        return str(value)
+    if isinstance(value, np.void) and value.dtype.names:
+        return {
+            name: _normalize_text_values(value[name])
+            for name in value.dtype.names
+        }
+    if isinstance(value, np.ndarray):
+        if value.dtype.names:
+            # Structured metadata may contain fixed-width byte fields several
+            # levels below the TS property. Rebuild it with object fields so
+            # decoded Python strings are not coerced back to ``np.bytes_``.
+            normalized = np.empty(
+                value.shape,
+                dtype=[(name, object) for name in value.dtype.names],
+            )
+            for name in value.dtype.names:
+                for index in np.ndindex(value.shape):
+                    normalized[name][index] = _normalize_text_values(
+                        value[name][index]
+                    )
+            return normalized
+        if value.dtype.kind == 'S':
+            normalized = np.empty(value.shape, dtype=object)
+            for index in np.ndindex(value.shape):
+                normalized[index] = _decode_matlab_bytes(value[index])
+            return normalized
+        if value.dtype == object:
+            normalized = np.empty(value.shape, dtype=object)
+            for index in np.ndindex(value.shape):
+                normalized[index] = _normalize_text_values(value[index])
+            return normalized
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _normalize_text_values(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_text_values(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_text_values(item) for item in value)
+    return value
+
+
 def ts_properties(mdict: dict) -> dict:
     """Match struct_to_ts's defaults and MATLAB numeric date semantics."""
     source = _struct_properties(mdict)
     for field in ('data', 'startTime', 'dt'):
         if field not in source:
             raise ValueError(f'tsStruct is missing required field {field!r}')
-    properties = {key: val if val is not None else np.empty((0, 0))
+    properties = {key: _normalize_text_values(
+                      val if val is not None else np.empty((0, 0)))
                   for key, val in source.items() if key in _TS_FIELDS}
     data = np.asarray(properties['data'])
     if data.ndim != 2:

@@ -49,6 +49,33 @@ def test_hankel_svd_plugin_preserves_nan_runs_and_serializes_diagnostics():
     json.dumps(result.diagnostics)
 
 
+def test_hankel_svd_processes_long_nan_separated_runs_independently():
+    samples = np.arange(320, dtype=np.float64)
+    values = np.sin(samples / 9.0) + 0.2 * np.cos(samples / 3.0)
+    values[150:170] = np.nan
+    series = _series(values)
+
+    result = svd_denoise_series(
+        series,
+        embedding_points=24,
+        rank=4,
+        min_segment_points=64,
+    )
+    left = svd_denoise_series(
+        series.iloc[:150], embedding_points=24, rank=4, min_segment_points=64
+    )
+    right = svd_denoise_series(
+        series.iloc[170:], embedding_points=24, rank=4, min_segment_points=64
+    )
+
+    assert [(item.start, item.stop) for item in result.processed_segments] == [
+        (0, 150), (170, 320)
+    ]
+    np.testing.assert_allclose(result.cleaned.iloc[:150], left.cleaned, equal_nan=True)
+    np.testing.assert_allclose(result.cleaned.iloc[170:], right.cleaned, equal_nan=True)
+    assert result.cleaned.iloc[150:170].isna().all()
+
+
 def test_chunked_hankel_svd_matches_full_matrix_reference():
     values = (
         np.sin(np.arange(96, dtype=np.float64) / 7.0)

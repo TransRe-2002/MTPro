@@ -1,4 +1,4 @@
-"""NaN-safe Variational Mode Decomposition helpers.
+"""Variational Mode Decomposition helpers with gap interpolation.
 
 The numerical ADMM kernel lives in ``rust_lib`` when the PyO3 extension is
 available.  A NumPy implementation remains as a deterministic development and
@@ -12,6 +12,8 @@ from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
+
+from core.algorithms.missing import finite_runs, interpolate_nonfinite, restore_nonfinite
 
 
 logger = logging.getLogger(__name__)
@@ -137,10 +139,11 @@ def vmd_denoise_series(
     keep_modes: str = "all",
     sample_rate_hz: float | None = None,
 ) -> VMDDenoiseResult:
-    """VMD-decompose every finite run and reconstruct selected modes only."""
+    """Interpolate gaps, decompose the dense series, then restore missing values."""
 
     actual = config or VMDConfig()
     values = series.to_numpy(dtype=np.float64, copy=True)
+    dense, finite = interpolate_nonfinite(values)
     selected = _parse_keep_modes(keep_modes, actual.mode_count)
     sample_rate = _infer_sample_rate(series.index) if sample_rate_hz is None else float(sample_rate_hz)
     if not np.isfinite(sample_rate) or sample_rate <= 0.0:
@@ -149,15 +152,16 @@ def vmd_denoise_series(
     cleaned = values.copy()
     diagnostics: list[VMDSegmentDiagnostic] = []
     skipped: list[tuple[int, int]] = []
-    for start, stop in _finite_runs(np.isfinite(values)):
+    for start, stop in finite_runs(np.isfinite(dense)):
         if stop - start < actual.min_segment_points:
             skipped.append((start, stop))
             continue
-        decomposition = vmd_decompose(values[start:stop], actual)
+        dense_span = dense[start:stop]
+        decomposition = vmd_decompose(dense_span, actual)
         cleaned[start:stop] = decomposition.modes[list(selected)].sum(axis=0)
         frequencies_hz = decomposition.center_frequencies * sample_rate
         energies = np.mean(np.square(decomposition.modes), axis=1)
-        reconstruction_residual = values[start:stop] - decomposition.modes.sum(axis=0)
+        reconstruction_residual = dense_span - decomposition.modes.sum(axis=0)
         diagnostics.append(
             VMDSegmentDiagnostic(
                 start=start,
@@ -170,6 +174,7 @@ def vmd_denoise_series(
                 used_rust=decomposition.used_rust,
             )
         )
+    cleaned = restore_nonfinite(cleaned, values, finite)
 
     return VMDDenoiseResult(
         cleaned=pd.Series(cleaned, index=series.index, name=series.name),

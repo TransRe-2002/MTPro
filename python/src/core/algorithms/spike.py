@@ -17,6 +17,8 @@ import math
 
 import numpy as np
 
+from core.algorithms.missing import interpolate_nonfinite
+
 
 MAD_TO_SIGMA = 1.4826
 
@@ -54,9 +56,10 @@ def detect_auto_spikes(
     基线计算，也不会被返回为候选。
     """
 
-    values = np.asarray(samples, dtype=np.float64)
-    if values.ndim != 1:
+    source = np.asarray(samples, dtype=np.float64)
+    if source.ndim != 1:
         raise ValueError("samples must be one-dimensional")
+    dense, original_finite = interpolate_nonfinite(source)
     if window_points < 3:
         raise ValueError("window_points must be >= 3")
     if not 0.0 <= overlap_percent <= 90.0:
@@ -66,9 +69,14 @@ def detect_auto_spikes(
     if max_pulse_width < 1:
         raise ValueError("max_pulse_width must be >= 1")
 
-    size = values.size
-    if size == 0:
+    finite_indices = np.flatnonzero(original_finite)
+    if finite_indices.size == 0:
         return _empty_detection()
+    offset = int(finite_indices[0])
+    stop = int(finite_indices[-1]) + 1
+    values = dense[offset:stop]
+    original_finite = original_finite[offset:stop]
+    size = values.size
 
     actual_window = min(int(window_points), size)
     hop = max(1, int(round(actual_window * (1.0 - overlap_percent / 100.0))))
@@ -105,7 +113,7 @@ def detect_auto_spikes(
         local_scores[~finite] = -np.inf
         best_scores[start:stop] = np.maximum(best_scores[start:stop], local_scores)
 
-    candidate_indices = np.flatnonzero(best_scores > threshold_sigma)
+    candidate_indices = np.flatnonzero((best_scores > threshold_sigma) & original_finite)
     if candidate_indices.size == 0:
         return AutoSpikeDetection(
             candidate_indices=np.array([], dtype=np.intp),
@@ -132,11 +140,11 @@ def detect_auto_spikes(
             protected_runs.append((start, stop))
 
     return AutoSpikeDetection(
-        candidate_indices=candidate_indices.astype(np.intp, copy=False),
+        candidate_indices=(candidate_indices + offset).astype(np.intp, copy=False),
         candidate_scores=best_scores[candidate_indices],
-        removed_indices=np.asarray(removed, dtype=np.intp),
-        long_runs=tuple(long_runs),
-        protected_runs=tuple(protected_runs),
+        removed_indices=np.asarray(removed, dtype=np.intp) + offset,
+        long_runs=tuple((start + offset, end + offset) for start, end in long_runs),
+        protected_runs=tuple((start + offset, end + offset) for start, end in protected_runs),
         window_count=len(starts),
     )
 

@@ -20,10 +20,11 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -46,6 +48,7 @@ from plugins.common.demo import DemoEMData, run_standalone_demo
 from plugins.common.region import RegionManagementMixin
 from plugins.common.step_algorithms import WaveletDenoiseResult, wavelet_multiscale_denoise
 from plugins.common.plotting import ProcessingPlotWidget, StepPlotWidget
+from ui.widgets.gain_curve_editor import GainCurveEditor
 from utils.series import dti_to_numpy
 from utils.theme import configure_pyqtgraph_theme, pg_background, subtle_pen, transparent_legend_brush
 
@@ -71,6 +74,24 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
             "threshold_method": "sure", "threshold": 1.0,
             "level_policy": "auto_by_period", "protect_period_seconds": 900.0,
             "padding_unit": "seconds", "padding_seconds": 120.0,
+        },
+        "LMT：保守去噪（优先保长周期）": {
+            "transform": "SWT（平移稳定）", "wavelet": "sym6", "mode": "soft",
+            "threshold_method": "sure", "threshold": 0.70,
+            "level_policy": "auto_by_period", "protect_period_seconds": 3600.0,
+            "padding_unit": "seconds", "padding_seconds": 600.0,
+        },
+        "LMT：抑制高频粗噪声": {
+            "transform": "DWT", "wavelet": "sym6", "mode": "soft",
+            "threshold_method": "sure", "threshold": 1.20,
+            "level_policy": "auto_by_period", "protect_period_seconds": 1800.0,
+            "padding_unit": "seconds", "padding_seconds": 300.0,
+        },
+        "LMT：局部脉冲轻度压制": {
+            "transform": "SWT（平移稳定）", "wavelet": "sym6", "mode": "soft",
+            "threshold_method": "sure", "threshold": 1.35,
+            "level_policy": "auto_by_period", "protect_period_seconds": 1800.0,
+            "padding_unit": "seconds", "padding_seconds": 300.0,
         },
         "脉冲（旧版固定）": {
             "mode": "soft", "threshold_method": "universal", "threshold": 1.20,
@@ -141,6 +162,14 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.signal_plot_item = self.signal_plot_widget.getPlotItem()
         self.detail_plot_widget = ProcessingPlotWidget()
         self.detail_plot_item = self.detail_plot_widget.getPlotItem()
+        self.gain_curve_editor = GainCurveEditor(self)
+        self.auto_eq_preview_checkbox = QCheckBox("松手后自动预览")
+        self.auto_eq_preview_checkbox.setChecked(True)
+        self.analysis_tabs = QTabWidget(self)
+        self.eq_panel = QWidget(self)
+        self.eq_preview_timer = QTimer(self)
+        self.eq_preview_timer.setSingleShot(True)
+        self.eq_preview_timer.setInterval(250)
         self.region_item: pg.LinearRegionItem | None = None
         self.plot_splitter = None
 
@@ -205,7 +234,8 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
     def _init_ui(self):
         instruction_label = QLabel(
             "小波多尺度去噪: 先在主图框选局部异常区，再在局部窗口内做小波分解。\n"
-            "自动模式可做阈值收缩，手动模式可像多尺度均衡器一样分别调整 D1~Dn 细节层增益。\n"
+            "自动模式可做阈值收缩；频带 EQ 中可像调曲线一样拖动节点，分别调整各层增益。\n"
+            "窗口两端 NaN 会裁掉；最多插值 10 个连续 NaN，较长缺口请分段框选；运算后恢复 NaN。\n"
             "图形操作：Ctrl+滚轮/中键拖动仅操作X轴，Shift+滚轮/中键拖动仅操作Y轴；"
             "主图双击添加或移动局部区域，细节图双击自适应视图。"
         )
@@ -233,6 +263,27 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.scope_combo.setCurrentText("局部选区")
         self.preset_combo.addItems(list(self.AUTO_PRESETS.keys()))
         self.preset_combo.setCurrentText("自定义")
+        preset_notes = {
+            "LMT：保守去噪（优先保长周期）": (
+                "低阈值、SWT 平移稳定，并保留保护周期以上的近似项。建议先框选短段预览，"
+                "重点检查长周期趋势和阶跃边缘。低频 MT 文献指出常规时序编辑可能损失 1 Hz 以下慢变有效信号，"
+                "因此这组参数采用偏保守设置（Li et al., 2020, doi:10.1016/j.jappgeo.2019.103919）。"
+            ),
+            "LMT：抑制高频粗噪声": (
+                "逐层 SureShrink，较强地压制细节系数，同时保留长周期近似项。适用于宽带高频粗噪声的试探；"
+                "若有效高频信号也被削弱，请降低阈值。MT 研究验证了小波分层阈值对尖脉冲和噪声段的用途，"
+                "但阈值需随数据调整（Trad & Travassos, 2000, doi:10.1190/1.1444742）。"
+            ),
+            "LMT：局部脉冲轻度压制": (
+                "适用于已框选的局部脉冲附近，采用 SWT 减少平移敏感性并保留慢变化成分。"
+                "长周期 MT 常见噪声还包括尖峰和阶跃（Mair, 2003）；2026 年 LMT 研究使用噪声区段识别、"
+                "Hampel 和阶跃补偿。此预设只做小波阈值处理，并不包含这些识别/补偿算法。"
+            ),
+        }
+        for index in range(self.preset_combo.count()):
+            preset_name = self.preset_combo.itemText(index)
+            if preset_name in preset_notes:
+                self.preset_combo.setItemData(index, preset_notes[preset_name], Qt.ItemDataRole.ToolTipRole)
         self.mode_combo.addItems(["soft", "hard", "zero", "manual"])
         self.mode_combo.setCurrentText("soft")
         self.threshold_method_combo.addItem("SureShrink（逐层自适应）", "sure")
@@ -305,10 +356,10 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         strategy_layout.addStretch(1)
 
         self.gain_frame = QFrame(self)
-        self.gain_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self.gain_frame.setFrameShape(QFrame.Shape.NoFrame)
         self.gain_layout = QHBoxLayout(self.gain_frame)
         self.gain_layout.setContentsMargins(8, 6, 8, 6)
-        self.gain_layout.addWidget(QLabel("细节层增益"))
+        self.gain_layout.addWidget(QLabel("EQ 操作"))
         self.gain_layout.addSpacing(8)
         self.gain_layout.addWidget(QLabel("统一系数"))
         self.gain_layout.addWidget(self.global_gain_spin)
@@ -328,7 +379,11 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.dynamic_gain_layout = QHBoxLayout(self.dynamic_gain_widget)
         self.dynamic_gain_layout.setContentsMargins(0, 0, 0, 0)
         self.dynamic_gain_layout.setSpacing(6)
-        self.gain_layout.addWidget(self.dynamic_gain_widget, 1)
+        # Per-band spin boxes remain as the compatible parameter store for
+        # recipes and presets, but the EQ curve is now their only visible
+        # editor.  Keeping the widgets internal avoids changing the existing
+        # detail_gains serialization contract.
+        self.dynamic_gain_widget.hide()
         self.gain_layout.addStretch(1)
 
         self.region_frame = QFrame(self)
@@ -354,11 +409,30 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         action_layout.addWidget(self.confirm_btn)
         action_layout.addStretch(1)
 
+        eq_layout = QVBoxLayout(self.eq_panel)
+        eq_layout.setContentsMargins(6, 4, 6, 4)
+        eq_header_layout = QHBoxLayout()
+        eq_header_layout.setContentsMargins(0, 0, 0, 0)
+        eq_hint = QLabel("从低频到高频拖动节点；1.00 为原始幅度，0 表示移除该频带。")
+        eq_hint.setWordWrap(True)
+        self.auto_eq_preview_checkbox.setToolTip(
+            "拖动结束后自动按当前增益重新计算预览；数据较大时可取消勾选。"
+        )
+        eq_header_layout.addWidget(eq_hint, 1)
+        eq_header_layout.addWidget(self.auto_eq_preview_checkbox)
+        eq_layout.addLayout(eq_header_layout)
+        eq_layout.addWidget(self.gain_frame)
+        eq_layout.addWidget(self.gain_curve_editor, 1)
+
+        self.analysis_tabs.addTab(self.eq_panel, "频带 EQ")
+        self.analysis_tabs.addTab(self.detail_plot_widget, "能量对比")
+        self.analysis_tabs.setCurrentWidget(self.eq_panel)
+
         self.plot_splitter = QSplitter(Qt.Orientation.Vertical, self)
         self.plot_splitter.setChildrenCollapsible(False)
         self.plot_splitter.setOpaqueResize(False)
         self.plot_splitter.addWidget(self.signal_plot_widget)
-        self.plot_splitter.addWidget(self.detail_plot_widget)
+        self.plot_splitter.addWidget(self.analysis_tabs)
         self.plot_splitter.setStretchFactor(0, 4)
         self.plot_splitter.setStretchFactor(1, 2)
         self.plot_splitter.setSizes([620, 260])
@@ -366,7 +440,6 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         control_layout = QVBoxLayout()
         control_layout.addWidget(self.param_frame)
         control_layout.addWidget(self.strategy_frame)
-        control_layout.addWidget(self.gain_frame)
         control_layout.addWidget(self.region_frame)
         control_layout.addWidget(self.action_frame)
 
@@ -403,6 +476,9 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.undo_shortcut.activated.connect(self._undo)
         self.revert_btn.clicked.connect(self._revert)
         self.confirm_btn.clicked.connect(self._confirm_and_close)
+        self.gain_curve_editor.gain_changed.connect(self._on_eq_gain_changed)
+        self.gain_curve_editor.editing_finished.connect(self._schedule_eq_preview)
+        self.eq_preview_timer.timeout.connect(self._preview_fit)
         self.signal_plot_widget.double_click_callback = self._add_or_move_region_from_x
         self.signal_plot_widget.right_click_callback = self._handle_plot_right_click
 
@@ -480,10 +556,14 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
             spin.setEnabled(self.mode_combo.currentText() == "manual")
             self.dynamic_gain_layout.addWidget(label)
             self.dynamic_gain_layout.addWidget(spin)
-            spin.valueChanged.connect(self._on_manual_gain_changed)
+            spin.valueChanged.connect(
+                lambda value, index=level - 1: self._on_manual_gain_changed(index, value)
+            )
+            spin.editingFinished.connect(self._schedule_eq_preview)
             self.gain_spins.append(spin)
         self._sync_mode_controls()
         self._update_wp_group_labels()
+        self._sync_gain_curve()
 
     def _current_band_count(self) -> int:
         if self.transform_combo.currentText() == "Wavelet Packet":
@@ -520,6 +600,53 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
             else:
                 widget.setText(base)
 
+    @staticmethod
+    def _format_eq_frequency(value: float) -> str:
+        value = float(value)
+        if value == 0.0:
+            return "0"
+        if abs(value) >= 1000.0:
+            return f"{value / 1000.0:.4g}k"
+        return f"{value:.4g}"
+
+    def _gain_band_descriptors(self) -> tuple[list[str], list[int]]:
+        """Return display labels and gain indices ordered from low to high."""
+        band_count = len(self.gain_spins)
+        if band_count == 0:
+            return [], []
+        nyquist = 0.5 * self._sample_rate_hz()
+        if self._transform_kind() == "wp":
+            band_width = nyquist / float(band_count)
+            logical_indices = list(range(band_count))
+            ranges = [
+                (index * band_width, (index + 1) * band_width)
+                for index in logical_indices
+            ]
+            prefix = "B"
+        else:
+            logical_indices = list(reversed(range(band_count)))
+            ranges = [
+                (
+                    nyquist / (2 ** (logical_index + 1)),
+                    nyquist / (2 ** logical_index),
+                )
+                for logical_index in logical_indices
+            ]
+            prefix = "D"
+        labels = [
+            (
+                f"{prefix}{logical_index + 1}\n"
+                f"{self._format_eq_frequency(low)}–{self._format_eq_frequency(high)} Hz"
+            )
+            for logical_index, (low, high) in zip(logical_indices, ranges)
+        ]
+        return labels, logical_indices
+
+    def _sync_gain_curve(self) -> None:
+        labels, logical_indices = self._gain_band_descriptors()
+        gains = [float(self.gain_spins[index].value()) for index in logical_indices]
+        self.gain_curve_editor.set_bands(labels, gains, logical_indices)
+
     def _sync_mode_controls(self):
         is_manual = self.mode_combo.currentText() == "manual"
         is_wp = self.transform_combo.currentText() == "Wavelet Packet"
@@ -529,10 +656,17 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.global_gain_spin.setEnabled(True)
         self.scale_gains_btn.setEnabled(True)
         self.propagate_gains_btn.setEnabled(True)
-        self.wp_low_gain_spin.setEnabled(is_wp)
-        self.wp_mid_gain_spin.setEnabled(is_wp)
-        self.wp_high_gain_spin.setEnabled(is_wp)
-        self.apply_wp_groups_btn.setEnabled(is_wp)
+        for widget in (
+            self.wp_low_label,
+            self.wp_low_gain_spin,
+            self.wp_mid_label,
+            self.wp_mid_gain_spin,
+            self.wp_high_label,
+            self.wp_high_gain_spin,
+            self.apply_wp_groups_btn,
+        ):
+            widget.setVisible(is_wp)
+            widget.setEnabled(is_wp)
         for spin in self.gain_spins:
             spin.setEnabled(True)
         if is_manual:
@@ -602,12 +736,37 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         if self.mode_combo.currentText() != "manual":
             self.mode_combo.setCurrentText("manual")
 
-    def _on_manual_gain_changed(self, value: float):
-        del value
+    def _on_manual_gain_changed(self, logical_index: int, value: float):
+        self.gain_curve_editor.set_gain(logical_index, value)
         if self.mode_combo.currentText() != "manual":
             current_values = [spin.value() for spin in self.gain_spins]
             if any(abs(v - 1.0) > 1e-9 for v in current_values):
                 self._ensure_manual_mode()
+
+    def _on_eq_gain_changed(self, logical_index: int, value: float) -> None:
+        if not 0 <= logical_index < len(self.gain_spins):
+            return
+        spin = self.gain_spins[logical_index]
+        spin.blockSignals(True)
+        try:
+            spin.setValue(value)
+        finally:
+            spin.blockSignals(False)
+        actual_value = float(spin.value())
+        if abs(actual_value - float(value)) > 1e-12:
+            self.gain_curve_editor.set_gain(logical_index, actual_value)
+        self._ensure_manual_mode()
+
+    def _schedule_eq_preview(self) -> None:
+        if not self.auto_eq_preview_checkbox.isChecked():
+            return
+        if not getattr(self, "y_data", np.array([])).size:
+            return
+        if self.scope_combo.currentText() == "局部选区" and not self.selected_indices:
+            return
+        if getattr(self, "_busy_dialog", None) is not None:
+            return
+        self.eq_preview_timer.start()
 
     def _apply_preset(self, preset_name: str):
         preset = self.AUTO_PRESETS.get(preset_name)

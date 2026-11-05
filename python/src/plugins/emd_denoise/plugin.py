@@ -18,6 +18,8 @@ class EMDDenoisePlugin:
         description=(
             "以经验模态分解将连续有效数据提取为 IMF 和残差。"
             "IMF 按提取顺序从高频到低频编号；默认保留全部 IMF 与残差。"
+            "初次使用先保留全部作对照，再逐步移除最前面的高频 IMF；LMT 慢变信号应保留低频残差。"
+            "IMF 选择属于人工判断，应用前请检查重构结果。"
         ),
         params_schema=(
             ParamSpec("max_imfs", "最大 IMF 数", int, 8, minimum=1, maximum=32),

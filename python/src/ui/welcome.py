@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from base.app_state import APP_VERSION
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
@@ -51,7 +53,7 @@ class Welcome(QWidget):
         app_subtitle.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         app_subtitle.setWordWrap(True)
 
-        version_label = QLabel("Version 0.1.0", left_panel)
+        version_label = QLabel(f"Version {APP_VERSION}", left_panel)
         version_label.setFont(QFont("Arial", 8))
         version_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
 

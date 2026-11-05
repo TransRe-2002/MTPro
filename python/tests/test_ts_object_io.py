@@ -76,6 +76,36 @@ def test_failed_write_preserves_existing_destination(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == [target]
 
 
+def test_write_ts_object_normalizes_numpy_byte_metadata(tmp_path):
+    source = _source()
+    source['tsStruct']['name'] = np.bytes_(b'byte-station')
+    source['tsStruct']['chid'] = np.array(
+        [[np.bytes_(b'Hx'), np.bytes_(b'Hy')]],
+        dtype=object,
+    )
+    source['tsStruct']['timeStampType'] = np.bytes_(b'years')
+    metadata = np.empty(
+        (1, 1),
+        dtype=[('source', 'S20'), ('detail', object)],
+    )
+    metadata['source'][0, 0] = np.bytes_(b'legacy-reader')
+    metadata['detail'][0, 0] = {
+        'format': np.bytes_(b'old-mat'),
+    }
+    source['tsStruct']['metadata'] = metadata
+
+    target = tmp_path / 'byte_metadata.mat'
+    ts_object_io.write_ts_object(source, target)
+
+    obj = load_from_mat(str(target), raw_data=True)['tsObj']
+    assert obj.properties['name'] == 'byte-station'
+    assert np.asarray(obj.properties['chid']).reshape(-1).tolist() == ['Hx', 'Hy']
+    assert obj.properties['timeStampType'] == 'years'
+    saved_metadata = np.asarray(obj.properties['metadata']).reshape(-1)[0]
+    assert saved_metadata['source'] == 'legacy-reader'
+    assert saved_metadata['detail']['format'] == 'old-mat'
+
+
 def test_missing_fields_fail_without_downgrading_to_struct(tmp_path):
     with pytest.raises(ValueError, match='startTime'):
         MatSaver._write_mat({'tsStruct': {'data': np.ones((2, 4)), 'dt': 1}}, str(tmp_path / 'bad.mat'))

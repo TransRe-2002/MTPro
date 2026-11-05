@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tomllib
 
 import base.app_state as app_state_module
 from base.app_state import (
@@ -13,6 +14,12 @@ from base.app_state import (
     remove_recent_file,
     save_app_state,
 )
+
+
+def test_app_version_matches_package_metadata():
+    metadata_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with metadata_path.open("rb") as source:
+        assert tomllib.load(source)["project"]["version"] == APP_VERSION
 
 
 def test_app_state_roundtrip_toml(tmp_path):

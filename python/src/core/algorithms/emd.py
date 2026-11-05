@@ -1,9 +1,9 @@
-"""NaN-safe empirical mode decomposition helpers.
+"""Empirical mode decomposition helpers with gap interpolation.
 
 The Rust kernel performs extrema detection, spline envelopes, and sifting.
-This module adds the application-level rules: preserve missing samples, run
-each finite segment independently, and reconstruct only explicitly selected
-IMFs.
+This module adds the application-level rules: interpolate missing samples for
+the decomposition, restore the original missing mask, and reconstruct only
+explicitly selected IMFs.
 """
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
+
+from core.algorithms.missing import finite_runs, interpolate_nonfinite, restore_nonfinite
 
 
 logger = logging.getLogger(__name__)
@@ -116,14 +118,15 @@ def emd_denoise_series(
 
     actual = config or EMDConfig()
     values = series.to_numpy(dtype=np.float64, copy=True)
+    dense, finite = interpolate_nonfinite(values)
     cleaned = values.copy()
     diagnostics: list[EMDSegmentDiagnostic] = []
     skipped: list[tuple[int, int]] = []
-    for start, stop in _finite_runs(np.isfinite(values)):
+    for start, stop in finite_runs(np.isfinite(dense)):
         if stop - start < actual.min_segment_points:
             skipped.append((start, stop))
             continue
-        source = values[start:stop]
+        source = dense[start:stop]
         decomposition = emd_decompose(source, actual)
         selected = _parse_keep_imfs(keep_imfs, decomposition.imfs.shape[0])
         reconstructed = np.zeros_like(source)
@@ -148,6 +151,7 @@ def emd_denoise_series(
                 used_rust=decomposition.used_rust,
             )
         )
+    cleaned = restore_nonfinite(cleaned, values, finite)
 
     return EMDDenoiseResult(
         cleaned=pd.Series(cleaned, index=series.index, name=series.name),

@@ -1,4 +1,4 @@
-"""Small, deterministic finite-run filters used by processing plugins."""
+"""Small deterministic filters with interpolation and NaN restoration."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,6 +7,8 @@ from collections.abc import Callable
 import numpy as np
 import pandas as pd
 from scipy import ndimage, signal
+
+from core.algorithms.missing import finite_runs, interpolate_nonfinite, restore_nonfinite
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,7 @@ def detrend_series(
             skipped_segments=finite_runs,
         )
 
-    dense = _interpolate_nonfinite(values, finite)
+    dense, _ = interpolate_nonfinite(values)
     if kind == "constant":
         trend = np.full(values.size, float(np.mean(values[finite])), dtype=np.float64)
     else:
@@ -53,7 +55,7 @@ def detrend_series(
         slope, intercept = np.linalg.lstsq(design, values[finite], rcond=None)[0]
         trend = slope * x_axis + intercept
     cleaned = dense - trend
-    cleaned[~finite] = values[~finite]
+    cleaned = restore_nonfinite(cleaned, values, finite)
     return FiniteRunFilterResult(
         cleaned=pd.Series(cleaned, index=series.index, name=series.name),
         processed_segments=finite_runs,
@@ -70,11 +72,11 @@ def demean_series(series: pd.Series) -> FiniteRunFilterResult:
         return FiniteRunFilterResult(
             cleaned=pd.Series(values, index=series.index, name=series.name),
             processed_segments=(),
-            skipped_segments=(),
+            skipped_segments=finite_runs,
         )
-    dense = _interpolate_nonfinite(values, finite)
+    dense, _ = interpolate_nonfinite(values)
     cleaned = dense - float(np.mean(values[finite]))
-    cleaned[~finite] = values[~finite]
+    cleaned = restore_nonfinite(cleaned, values, finite)
     return FiniteRunFilterResult(
         cleaned=pd.Series(cleaned, index=series.index, name=series.name),
         processed_segments=finite_runs,
@@ -206,19 +208,30 @@ def _filter_finite_runs(
     if min_segment_points < 2:
         raise ValueError("min_segment_points must be at least two")
     values = series.to_numpy(dtype=np.float64, copy=True)
+    dense, _original_finite = interpolate_nonfinite(values)
+    finite = np.isfinite(dense)
+    if not finite.any():
+        return FiniteRunFilterResult(
+            cleaned=pd.Series(values, index=series.index, name=series.name),
+            processed_segments=(),
+            skipped_segments=((0, values.size),) if values.size else (),
+        )
     cleaned = values.copy()
-    processed: list[tuple[int, int]] = []
-    skipped: list[tuple[int, int]] = []
-    for start, stop in _finite_runs(np.isfinite(values)):
-        if stop - start < min_segment_points:
-            skipped.append((start, stop))
+    processed_list: list[tuple[int, int]] = []
+    skipped_list: list[tuple[int, int]] = []
+    for first, stop in finite_runs(finite):
+        if stop - first < min_segment_points:
+            skipped_list.append((first, stop))
             continue
-        cleaned[start:stop] = transform(values[start:stop])
-        processed.append((start, stop))
+        cleaned[first:stop] = transform(dense[first:stop])
+        processed_list.append((first, stop))
+    cleaned = restore_nonfinite(cleaned, values, np.isfinite(values))
+    processed = tuple(processed_list)
+    skipped = tuple(skipped_list)
     return FiniteRunFilterResult(
         cleaned=pd.Series(cleaned, index=series.index, name=series.name),
-        processed_segments=tuple(processed),
-        skipped_segments=tuple(skipped),
+        processed_segments=processed,
+        skipped_segments=skipped,
     )
 
 

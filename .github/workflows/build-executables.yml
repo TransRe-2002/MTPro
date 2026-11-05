@@ -57,7 +57,13 @@ jobs:
             --include-package=io_utils \
             --include-package=matio \
             --include-package=utils \
+            --include-package=emtf \
+            --include-package=builtin_plugins \
+            --include-package=plugins \
+            --include-package=output_tools \
             --include-module=rust_lib \
+            --include-module=plugin_api \
+            --include-module=pydoc \
             --include-data-dir=python/src/bin=bin \
             --output-dir=python/build/nuitka \
             --assume-yes-for-downloads \
@@ -123,7 +129,13 @@ jobs:
             --include-package=io_utils `
             --include-package=matio `
             --include-package=utils `
+            --include-package=emtf `
+            --include-package=builtin_plugins `
+            --include-package=plugins `
+            --include-package=output_tools `
             --include-module=rust_lib `
+            --include-module=plugin_api `
+            --include-module=pydoc `
             --include-data-dir=python/src/bin=bin `
             --output-dir=python/build/nuitka-windows `
             --assume-yes-for-downloads `
@@ -152,8 +164,7 @@ jobs:
 
       - name: Build Windows installer
         run: |
-          $v = git describe --tags 2>$null
-          if ($v -match '\d+\.\d+\.\d+') { $ver = $Matches[0] } else { $ver = '1.0.0' }
+          $ver = python -c "import tomllib; print(tomllib.load(open('python/pyproject.toml', 'rb'))['project']['version'])"
           Write-Host "Installer version: $ver"
           iscc "/DMyAppVersion=$ver" scripts\mtpro_windows.iss
 

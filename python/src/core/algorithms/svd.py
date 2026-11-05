@@ -1,10 +1,12 @@
-"""Hankel low-rank SVD denoising for finite time-series segments."""
+"""Hankel low-rank SVD denoising with gap interpolation."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+from core.algorithms.missing import finite_runs, interpolate_nonfinite, restore_nonfinite
 
 
 HANKEL_CHUNK_BYTES = 32 * 1024 * 1024
@@ -33,7 +35,7 @@ def svd_denoise_series(
     rank: int = 8,
     min_segment_points: int = 128,
 ) -> SVDDenoiseResult:
-    """Denoise finite runs through Hankel rank truncation and diagonal averaging."""
+    """Interpolate gaps, denoise the dense series, then restore missing values."""
 
     if embedding_points < 2:
         raise ValueError("embedding_points must be at least two")
@@ -43,29 +45,33 @@ def svd_denoise_series(
         raise ValueError("min_segment_points must be at least four")
 
     values = series.to_numpy(dtype=np.float64, copy=True)
+    dense, finite = interpolate_nonfinite(values)
     cleaned = values.copy()
     diagnostics: list[SVDSegmentDiagnostic] = []
     skipped: list[tuple[int, int]] = []
-    for start, stop in _finite_runs(np.isfinite(values)):
-        size = stop - start
-        if size < min_segment_points:
+    for start, stop in finite_runs(np.isfinite(dense)):
+        if stop - start < min_segment_points:
             skipped.append((start, stop))
             continue
+        size = stop - start
         actual_embedding = min(int(embedding_points), size // 2)
         if actual_embedding < 2:
             skipped.append((start, stop))
-            continue
-        denoised, actual_rank, singular_values = _hankel_svd(values[start:stop], actual_embedding, rank)
-        cleaned[start:stop] = denoised
-        diagnostics.append(
-            SVDSegmentDiagnostic(
-                start=start,
-                stop=stop,
-                embedding_points=actual_embedding,
-                rank=actual_rank,
-                singular_values=tuple(float(value) for value in singular_values[:16]),
+        else:
+            denoised, actual_rank, singular_values = _hankel_svd(
+                dense[start:stop], actual_embedding, rank
             )
-        )
+            cleaned[start:stop] = denoised
+            diagnostics.append(
+                SVDSegmentDiagnostic(
+                    start=start,
+                    stop=stop,
+                    embedding_points=actual_embedding,
+                    rank=actual_rank,
+                    singular_values=tuple(float(value) for value in singular_values[:16]),
+                )
+            )
+    cleaned = restore_nonfinite(cleaned, values, finite)
     return SVDDenoiseResult(
         cleaned=pd.Series(cleaned, index=series.index, name=series.name),
         processed_segments=tuple(diagnostics),

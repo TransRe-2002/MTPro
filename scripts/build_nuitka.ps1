@@ -39,6 +39,10 @@ Create the Windows venv first, then install dependencies, for example:
 
 # Resolve while still in the caller's directory; Rust builds change location.
 $PythonExe = (Resolve-Path -LiteralPath $PythonExe).Path
+$AppVersion = & $PythonExe -c "import tomllib; print(tomllib.load(open(r'$PythonDir\pyproject.toml', 'rb'))['project']['version'])"
+if ($LASTEXITCODE -ne 0) {
+    throw "Cannot read application version from python/pyproject.toml"
+}
 
 if (-not (Test-Path $SrcMain)) {
     Write-Error "Missing application entry point: $SrcMain"
@@ -144,8 +148,12 @@ $NuitkaArgs = @(
     "--include-package=matio",
     "--include-package=utils",
     "--include-package=emtf",
+    "--include-package=builtin_plugins",
+    "--include-package=plugins",
+    "--include-package=output_tools",
     "--include-data-dir=$SrcBin=bin",
     "--include-module=rust_lib",
+    "--include-module=plugin_api",
     "--remove-output",
     "--lto=yes",
     "--noinclude-pytest-mode=nofollow",
@@ -155,6 +163,9 @@ $NuitkaArgs = @(
     "--noinclude-IPython-mode=nofollow",
     "--noinclude-setuptools-mode=nofollow",
     "--msvc=latest",
+    "--product-name=MTPro",
+    "--file-version=$AppVersion",
+    "--product-version=$AppVersion",
     "--output-dir=$BuildDir",
     "--assume-yes-for-downloads",
     "--show-progress"
@@ -240,16 +251,10 @@ if ($Installer) {
         Write-Error "未找到 Inno Setup (iscc)。请先安装: winget install JRSoftware.InnoSetup"
     }
 
-    # 版本号优先级: MTPRO_VERSION 环境变量 → git describe --tags → 1.0.0
+    # 安装器默认与应用源码版本一致，仍允许显式覆盖。
     $Version = $env:MTPRO_VERSION
-    if ([string]::IsNullOrWhiteSpace($Version) -and (Get-Command git -ErrorAction SilentlyContinue)) {
-        $Describe = & git describe --tags 2>$null
-        if ($Describe -match '\d+\.\d+\.\d+') {
-            $Version = $Matches[0]
-        }
-    }
     if ([string]::IsNullOrWhiteSpace($Version)) {
-        $Version = "1.0.0"
+        $Version = $AppVersion
     }
 
     $IssFile = Join-Path $ScriptDir "mtpro_windows.iss"

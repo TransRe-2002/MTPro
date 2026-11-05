@@ -494,6 +494,19 @@ def test_remove_step_baseline_widget_adds_single_region_on_main_plot(qtbot):
     assert len(widget.selected_indices) > 0
 
 
+def test_remove_step_baseline_close_detaches_region_item(qtbot):
+    widget = RemoveStepByBaseline(StepDemoData(), "Ex1")
+    qtbot.addWidget(widget)
+    widget._add_region()
+    region_item = widget.region_item
+
+    widget.close()
+
+    assert region_item is not None
+    assert widget.region_item is None
+    assert region_item.scene() is None
+
+
 def test_remove_step_baseline_right_click_handler_removes_region(qtbot):
     data = StepDemoData()
     widget = RemoveStepByBaseline(data, "Ex1")
@@ -568,7 +581,11 @@ def test_remove_pulse_wavelet_widget_uses_region_selection_and_two_plots(qtbot):
     assert widget.plot_splitter.opaqueResize() is False
     assert widget.plot_splitter.orientation() == Qt.Orientation.Vertical
     assert widget.plot_splitter.widget(0) is widget.signal_plot_widget
-    assert widget.plot_splitter.widget(1) is widget.detail_plot_widget
+    assert widget.plot_splitter.widget(1) is widget.analysis_tabs
+    assert widget.analysis_tabs.widget(0) is widget.eq_panel
+    assert widget.analysis_tabs.widget(1) is widget.detail_plot_widget
+    assert widget.analysis_tabs.currentWidget() is widget.eq_panel
+    assert widget.dynamic_gain_widget.isHidden()
     assert widget.region_item is None
 
 
@@ -934,6 +951,40 @@ def test_remove_wavelet_denoise_gain_change_switches_to_manual(qtbot):
     widget.gain_spins[0].setValue(0.8)
 
     assert widget.mode_combo.currentText() == "manual"
+
+
+def test_remove_wavelet_denoise_eq_curve_tracks_frequency_order_and_spins(qtbot):
+    data = PulseDemoData()
+    widget = RemoveWaveletDenoise(data, "Ex1")
+    qtbot.addWidget(widget)
+
+    band_count = len(widget.gain_spins)
+    assert widget.gain_curve_editor.display_indices == tuple(reversed(range(band_count)))
+    assert widget.gain_curve_editor._band_names[0].startswith(f"D{band_count}")
+    assert "Hz" in widget.gain_curve_editor._band_names[0]
+
+    widget.gain_spins[1].setValue(0.72)
+    assert widget.gain_curve_editor.gains()[1] == pytest.approx(0.72)
+
+    display_index = widget.gain_curve_editor.display_indices.index(0)
+    target = widget.gain_curve_editor._targets[display_index]
+    target.setPos(float(display_index), 0.37)
+
+    assert widget.gain_spins[0].value() == pytest.approx(0.37)
+    assert widget.mode_combo.currentText() == "manual"
+
+
+def test_remove_wavelet_denoise_wavelet_packet_eq_runs_low_to_high(qtbot):
+    data = PulseDemoData()
+    widget = RemoveWaveletDenoise(data, "Ex1")
+    qtbot.addWidget(widget)
+
+    widget.transform_combo.setCurrentText("Wavelet Packet")
+    widget.level_spin.setValue(3)
+
+    assert widget.gain_curve_editor.display_indices == tuple(range(8))
+    assert widget.gain_curve_editor._band_names[0].startswith("B1")
+    assert widget.gain_curve_editor._band_names[-1].startswith("B8")
 
 
 def test_remove_wavelet_denoise_wavelet_packet_group_gains_apply(qtbot):

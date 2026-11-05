@@ -83,8 +83,12 @@ COMMON_FLAGS=(
   --include-package=matio
   --include-package=utils
   --include-package=emtf
+  --include-package=builtin_plugins
+  --include-package=plugins
+  --include-package=output_tools
   --include-data-dir="$PY_DIR/src/bin=bin"
   --include-module=rust_lib
+  --include-module=plugin_api
   --remove-output
   --lto=yes
   --noinclude-pytest-mode=nofollow

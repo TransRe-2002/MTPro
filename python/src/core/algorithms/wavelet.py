@@ -8,6 +8,8 @@ from collections.abc import Iterable
 
 import numpy as np
 
+from core.algorithms.missing import interpolate_nonfinite
+
 
 @dataclass(frozen=True)
 class WaveletDenoiseResult:
@@ -216,15 +218,20 @@ def wavelet_multiscale_denoise(
         raise ValueError("local window is too short for wavelet processing")
 
     finite_mask = np.isfinite(original_local_segment)
-    local_segment = np.array(original_local_segment, copy=True)
-    if not np.all(finite_mask):
-        finite_indices = np.flatnonzero(finite_mask)
-        if finite_indices.size < 2:
-            raise ValueError("not enough finite samples in local window")
-        local_segment = np.interp(
-            np.arange(local_segment.size, dtype=np.float64),
-            finite_indices.astype(np.float64),
-            local_segment[finite_mask],
+    finite_indices = np.flatnonzero(finite_mask)
+    if finite_indices.size < 2:
+        raise ValueError("local window needs at least two finite samples")
+    trim_left = int(finite_indices[0])
+    trim_stop = int(finite_indices[-1]) + 1
+    original_local_segment = original_local_segment[trim_left:trim_stop]
+    local_start += trim_left
+    local_stop = local_start + original_local_segment.size
+    finite_mask = np.isfinite(original_local_segment)
+    local_segment, _local_finite = interpolate_nonfinite(original_local_segment)
+    if not np.isfinite(local_segment).all():
+        raise ValueError(
+            "local window contains a NaN gap longer than the interpolation limit; "
+            "split the selection into shorter regions"
         )
 
     wavelet = pywt.Wavelet(wavelet_name)
@@ -241,8 +248,10 @@ def wavelet_multiscale_denoise(
     level = max(1, min(int(level), int(max_level)))
 
     changed_coefficients = 0
-    local_left = left - local_start
-    local_right = right - local_start
+    local_left = max(0, left - local_start)
+    local_right = min(local_segment.size - 1, right - local_start)
+    if local_right < local_left:
+        raise ValueError("selected region does not overlap the trimmed finite data")
 
     if transform_kind == "dwt":
         coeffs = pywt.wavedec(local_segment, wavelet, mode="symmetric", level=level)

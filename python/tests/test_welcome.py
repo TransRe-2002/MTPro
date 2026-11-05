@@ -1,7 +1,14 @@
 from PySide6.QtCore import QItemSelectionModel, Qt
-from PySide6.QtWidgets import QAbstractItemView
+from PySide6.QtWidgets import QAbstractItemView, QLabel
 
+from base.app_state import APP_VERSION
 from ui.welcome import Welcome
+
+
+def test_welcome_displays_current_version(qtbot):
+    widget = Welcome()
+    qtbot.addWidget(widget)
+    assert f"Version {APP_VERSION}" in [label.text() for label in widget.findChildren(QLabel)]
 
 
 def test_welcome_recent_files_use_tree_view(qtbot, tmp_path):

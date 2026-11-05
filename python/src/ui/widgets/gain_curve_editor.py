@@ -79,6 +79,10 @@ class GainCurveEditor(QWidget):
         for display_index, (name, gain) in enumerate(
             zip(self._band_names, gains[:count])
         ):
+            label = (
+                (lambda _x, y, band_name=name: self._target_label(band_name, y))
+                if show_target_labels else None
+            )
             target = pg.TargetItem(
                 pos=(float(display_index), self._clamp(gain)),
                 size=12,
@@ -88,7 +92,7 @@ class GainCurveEditor(QWidget):
                 brush=pg.mkBrush(85, 155, 245, 210),
                 hoverBrush=pg.mkBrush(255, 190, 70, 230),
                 movable=True,
-                label=self._target_label(name, gain) if show_target_labels else None,
+                label=label,
                 labelOpts={"offset": (0, -20)},
             )
             target.sigPositionChanged.connect(
@@ -119,11 +123,6 @@ class GainCurveEditor(QWidget):
         self._updating = True
         try:
             target.setPos(float(display_index), self._clamp(value))
-            if len(self._targets) <= 12:
-                target.setLabel(
-                    self._target_label(self._band_names[display_index], value),
-                    {"offset": (0, -20)},
-                )
         finally:
             self._updating = False
         self._update_curve()
@@ -141,11 +140,6 @@ class GainCurveEditor(QWidget):
         self._updating = True
         try:
             target.setPos(float(display_index), gain)
-            if len(self._targets) <= 12:
-                target.setLabel(
-                    self._target_label(self._band_names[display_index], gain),
-                    {"offset": (0, -20)},
-                )
         finally:
             self._updating = False
         self._update_curve()

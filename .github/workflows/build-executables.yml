@@ -94,8 +94,6 @@ jobs:
     name: Windows standalone (Nuitka)
     runs-on: windows-latest
     timeout-minutes: 90
-    env:
-      NUITKA_CACHE_DIR: ${{ runner.temp }}\mtpro-nuitka-cache
 
     steps:
       - uses: actions/checkout@v6
@@ -103,6 +101,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set Windows cache directory
+        run: '"NUITKA_CACHE_DIR=$env:RUNNER_TEMP\mtpro-nuitka-cache" >> $env:GITHUB_ENV'
 
       - name: Restore Windows build caches
         uses: actions/cache@v4

@@ -94,6 +94,8 @@ jobs:
     name: Windows standalone (Nuitka)
     runs-on: windows-latest
     timeout-minutes: 90
+    env:
+      NUITKA_CACHE_DIR: ${{ runner.temp }}\mtpro-nuitka-cache
 
     steps:
       - uses: actions/checkout@v6
@@ -101,6 +103,19 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Restore Windows build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}\mtpro-nuitka-cache
+            rust_lib/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: windows-msvc-py314-${{ hashFiles('rust_lib/Cargo.lock', 'python/requirements.txt') }}-${{ github.run_id }}
+          restore-keys: |
+            windows-msvc-py314-${{ hashFiles('rust_lib/Cargo.lock', 'python/requirements.txt') }}-
+            windows-msvc-py314-
 
       - name: Install Python dependencies
         run: |
@@ -148,6 +163,8 @@ jobs:
           Copy-Item -Recurse python/build/nuitka-windows/main.dist outputs/mtpro-windows-x86_64
           Copy-Item python/requirements.txt outputs/mtpro-windows-x86_64/
           Rename-Item outputs/mtpro-windows-x86_64/main.exe MTPro.exe
+          New-Item -ItemType Directory -Force -Path outputs/mtpro-windows-x86_64/bin/win64 | Out-Null
+          Copy-Item python/src/bin/win64/dnff.exe,python/src/bin/win64/tranmt.exe outputs/mtpro-windows-x86_64/bin/win64/
 
       - name: Package artifact
         run: |
@@ -172,4 +189,12 @@ jobs:
         with:
           name: MTPro-Setup
           path: outputs/MTPro-Setup-*.exe
+          retention-days: 90
+
+      - name: Retain MSVC intermediate build files
+        uses: actions/upload-artifact@v5
+        with:
+          name: mtpro-windows-msvc-build
+          path: python/build/nuitka-windows/main.build/
+          if-no-files-found: error
           retention-days: 90

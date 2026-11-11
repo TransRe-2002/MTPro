@@ -2,13 +2,13 @@ from __future__ import annotations
 
 """纯数值小波去噪算法，与阶跃检测和 Qt 编辑器解耦。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from collections.abc import Iterable
 
 import numpy as np
 
-from core.algorithms.missing import interpolate_nonfinite
+from core.algorithms.missing import finite_runs, interpolate_nonfinite
 
 
 @dataclass(frozen=True)
@@ -474,6 +474,55 @@ def wavelet_multiscale_denoise(
         changed_coefficients=changed_coefficients,
         success=True,
         message="wavelet multiscale denoise finished",
+    )
+
+
+def wavelet_full_channel_denoise(samples: np.ndarray, **kwargs) -> WaveletDenoiseResult:
+    """Process finite runs separately across long gaps, retaining missing samples."""
+    data = np.asarray(samples, dtype=np.float64)
+    if data.ndim != 1:
+        raise ValueError("samples must be a 1D array")
+    dense, finite = interpolate_nonfinite(data)
+    runs = finite_runs(np.isfinite(dense))
+    corrected = data.copy()
+    correction = np.zeros_like(data)
+    completed: list[tuple[int, int, WaveletDenoiseResult]] = []
+    skipped: list[tuple[int, int]] = []
+    for start, stop in runs:
+        if stop - start < 16:
+            skipped.append((start, stop))
+            continue
+        try:
+            result = wavelet_multiscale_denoise(
+                data[start:stop], (0, stop - start - 1), **kwargs,
+            )
+        except ValueError as exc:
+            if str(exc) != "local window is too short for the requested wavelet":
+                raise
+            skipped.append((start, stop))
+            continue
+        corrected[start:stop] = result.corrected
+        correction[start:stop] = result.correction
+        completed.append((start, stop, result))
+    if not completed:
+        raise ValueError("没有足够长的有效数据段，无法进行小波分解。")
+    corrected[~finite] = data[~finite]
+    representative = max(completed, key=lambda item: item[1] - item[0])[2]
+    message = f"已处理 {len(completed)} 个有效数据段"
+    if skipped:
+        message += f"；{len(skipped)} 个过短片段（{sum(end - start for start, end in skipped)} 点）保持原样"
+    if len(completed) > 1:
+        message += "；能量对比显示最长有效段"
+    return replace(
+        representative,
+        corrected=corrected,
+        correction=correction,
+        local_window=(0, data.size - 1),
+        region=(0, data.size - 1),
+        local_original=data.copy(),
+        local_reconstructed=corrected.copy(),
+        changed_coefficients=sum(item.changed_coefficients for _, _, item in completed),
+        message=message,
     )
 
 

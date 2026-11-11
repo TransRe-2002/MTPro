@@ -56,6 +56,23 @@ def _widget(qtbot):
     return app, widget, data_id
 
 
+def test_new_pipeline_builds_one_overview_per_channel(qtbot, monkeypatch):
+    import ui.widgets.pipeline_overview as overview
+
+    real_pyramid = overview.LODPyramid
+    builds = []
+
+    def build(*args, **kwargs):
+        builds.append(1)
+        return real_pyramid(*args, **kwargs)
+
+    monkeypatch.setattr(overview, "LODPyramid", build)
+    _app, widget, _data_id = _widget(qtbot)
+    assert len(builds) == 3
+    widget._refresh_all_pipeline_statuses()
+    assert len(builds) == 3
+
+
 def test_linked_editor_uses_clicked_channel_series_and_switches_member(qtbot):
     _app, widget, data_id = _widget(qtbot)
     source = widget._find_pipeline(data_id, "Ex")
@@ -223,7 +240,7 @@ def test_context_menu_and_independent_copy_paste(qtbot):
     pasted = target.layers[0].blocks[0]
     assert pasted.block_id != source_block.block_id
     assert pasted.tool_id == source_block.tool_id
-    assert pasted.end - pasted.start == 4
+    assert (pasted.start, pasted.end) == (0, 12)
     assert pasted.settings_group_id == ""
     assert pasted.input_slice is None
     assert pasted.output_slice is None
@@ -232,6 +249,7 @@ def test_context_menu_and_independent_copy_paste(qtbot):
     assert not pasted.params.get("region")
     assert not pasted.params.get("operations")
     assert not pasted.params.get("time_ranges")
+    app.clipboard().clear()
     widget.close()
 
 
@@ -254,4 +272,5 @@ def test_cut_copies_then_removes_the_source_block(qtbot):
 
     assert widget._find_block(block.block_id) is None
     assert app.clipboard().mimeData().hasFormat(PIPELINE_BLOCK_CLIPBOARD_MIME)
+    app.clipboard().clear()
     widget.close()

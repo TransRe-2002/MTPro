@@ -37,7 +37,7 @@ class VMDDenoisePlugin:
     def create_editor(self, host, block, params):
         from plugins.vmd_denoise.editor import VMDDenoiseEditor
 
-        return VMDDenoiseEditor(host, params)
+        return VMDDenoiseEditor(host, params, block=block)
 
     def process(self, block, params, ctx):
         if ctx.is_cancelled():

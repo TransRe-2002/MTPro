@@ -453,6 +453,29 @@ class RemoveRegion(QtWidgets.QWidget):
     channel_sync_requested = QtCore.Signal(int, str, object)
     region_sync_requested = QtCore.Signal(object)
 
+    def apply_plugin_params(self, params: dict) -> None:
+        plot = self.plot_widget
+        if plot is None or plot.y_data is None or self._series_source is None:
+            return
+        index = self._series_source.index
+        for raw_start, raw_end in params.get("time_ranges", []):
+            start, end = pd.Timestamp(raw_start), pd.Timestamp(raw_end)
+            if index.tz is not None:
+                start = start.tz_localize(index.tz) if start.tzinfo is None else start.tz_convert(index.tz)
+                end = end.tz_localize(index.tz) if end.tzinfo is None else end.tz_convert(index.tz)
+            selected = np.flatnonzero(
+                (index >= min(start, end))
+                & (index <= max(start, end))
+                & np.isfinite(plot.y_data)
+            )
+            if selected.size:
+                plot.y_data[selected] = np.nan
+                plot.deletion_history.append(selected)
+                plot.deletion_history_ranges.append([
+                    (float(plot.x_data[selected[0]]), float(plot.x_data[selected[-1]]))
+                ])
+        plot._refresh_display_data()
+
     def __init__(
         self,
         source: int | pd.Series,

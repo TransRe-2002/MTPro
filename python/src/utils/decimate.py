@@ -14,7 +14,10 @@ logger = logging.getLogger(__name__)
 
 try:
     import rust_lib
-    _HAS_RUST = True
+    _HAS_RUST = all(
+        callable(getattr(rust_lib, name, None))
+        for name in ("minmax_decimate_rs", "build_lod_pyramid_rs")
+    )
 except ImportError:
     _HAS_RUST = False
 
@@ -64,32 +67,33 @@ def minmax_decimate(
         return x, y
 
     bins = max(1, min(target_bins, n // 2))
-    x_chunks = np.array_split(x, bins)
-    y_chunks = np.array_split(y, bins)
-
-    rx_parts, ry_parts = [], []
-    for xc, yc in zip(x_chunks, y_chunks):
-        if len(xc) <= 1:
-            rx_parts.append(xc)
-            ry_parts.append(yc)
-            continue
-        try:
-            imin = int(np.nanargmin(yc))
-            imax = int(np.nanargmax(yc))
-        except ValueError:
-            # All-NaN bin: retain one NaN sample so gaps survive coarser LODs.
-            imin = imax = 0
-        if imin < imax:
-            rx_parts.append(np.array([xc[imin], xc[imax]]))
-            ry_parts.append(np.array([yc[imin], yc[imax]]))
-        elif imax < imin:
-            rx_parts.append(np.array([xc[imax], xc[imin]]))
-            ry_parts.append(np.array([yc[imax], yc[imin]]))
-        else:
-            rx_parts.append(xc[imin:imin + 1])
-            ry_parts.append(yc[imin:imin + 1])
-
-    return np.concatenate(rx_parts), np.concatenate(ry_parts)
+    # Match np.array_split's uneven bins while computing all extrema in NumPy.
+    # Per-bin Python loops are prohibitively slow for long channels when the
+    # optional native extension is not installed.
+    quotient, remainder = divmod(n, bins)
+    starts = np.arange(bins, dtype=np.int64) * quotient
+    starts += np.minimum(np.arange(bins, dtype=np.int64), remainder)
+    values = np.asarray(y)
+    valid = ~np.isnan(values)
+    minima = np.minimum.reduceat(np.where(valid, values, np.inf), starts)
+    maxima = np.maximum.reduceat(np.where(valid, values, -np.inf), starts)
+    lengths = np.diff(np.r_[starts, n])
+    positions = np.arange(n, dtype=np.int64)
+    min_indices = np.minimum.reduceat(
+        np.where(valid & (values == np.repeat(minima, lengths)), positions, n), starts
+    )
+    max_indices = np.minimum.reduceat(
+        np.where(valid & (values == np.repeat(maxima, lengths)), positions, n), starts
+    )
+    # An all-NaN bin retains its first NaN, as in the original implementation.
+    min_indices = np.where(min_indices == n, starts, min_indices)
+    max_indices = np.where(max_indices == n, starts, max_indices)
+    first = np.minimum(min_indices, max_indices)
+    second = np.maximum(min_indices, max_indices)
+    indices = np.column_stack((first, second)).ravel()
+    keep = np.column_stack((np.ones(bins, dtype=bool), first != second)).ravel()
+    indices = indices[keep]
+    return x[indices], y[indices]
 
 
 def build_lod_pyramid(

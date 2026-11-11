@@ -34,7 +34,7 @@ class EMDDenoisePlugin:
     def create_editor(self, host, block, params):
         from plugins.emd_denoise.editor import EMDDenoiseEditor
 
-        return EMDDenoiseEditor(host, params)
+        return EMDDenoiseEditor(host, params, block=block)
 
     def process(self, block, params, ctx):
         if ctx.is_cancelled():

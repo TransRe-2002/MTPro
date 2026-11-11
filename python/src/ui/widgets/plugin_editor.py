@@ -51,6 +51,20 @@ class PluginEditorHost(QWidget):
     def _relay_process_failed(self, exc) -> None:
         self.failed.emit(exc)
 
+    def accept_preview(self, result: TransformResult, params: Mapping[str, Any]) -> None:
+        """Accept an already computed preview for this host's input block."""
+        try:
+            values = complete_params(self.plugin.info, params)
+            json.dumps(values)
+            if not isinstance(result, TransformResult) or not isinstance(result.series, pd.Series):
+                raise TypeError("preview must contain a pandas Series")
+            if not result.series.index.equals(self.block.series.index):
+                raise ValueError("preview index differs from input block")
+        except (TypeError, ValueError) as exc:
+            self.failed.emit(exc)
+            return
+        self.result_ready.emit(result, values, frozenset())
+
     def apply_params(
         self,
         params: Mapping[str, Any],

@@ -94,8 +94,8 @@ def test_linked_group_creates_one_independent_block_per_channel(qtbot):
     })
     source_block = PipelineBlock(
         tool_id="remove_wavelet_denoise",
-        start=2,
-        end=9,
+        start=0,
+        end=12,
         params=params,
         status="configured",
     )
@@ -116,7 +116,7 @@ def test_linked_group_creates_one_independent_block_per_channel(qtbot):
     assert "operations" not in group.shared_params
 
     for pipeline, _layer, block in members:
-        assert (block.start, block.end) == (2, 9)
+        assert (block.start, block.end) == (0, 12)
         assert block.input_slice is None
         assert block.output_slice is None
         if pipeline.channel == "Ex":
@@ -316,7 +316,7 @@ def test_linked_groups_get_distinct_badges_and_group_selection(qtbot):
     ("tool_id", "confirmation_text"),
     (
         ("auto_spike_filter", "确认："),
-        ("emd_denoise", "运行 EMD 并应用重构"),
+        ("emd_denoise", "确认应用"),
         ("median_filter", "确认应用"),
     ),
 )

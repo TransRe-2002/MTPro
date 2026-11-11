@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 from concurrent.futures import as_completed
@@ -299,7 +300,11 @@ class MainWindow(QMainWindow):
         open_tb_action.triggered.connect(self.open_file)
         toolbar.addAction(open_tb_action)
 
-        open_folder_tb_action = QAction(QIcon.fromTheme("folder-open"), "批量", self)
+        open_folder_tb_action = QAction(
+            QIcon.fromTheme("folder-documents", QIcon.fromTheme("folder-open")),
+            "批量打开",
+            self,
+        )
         open_folder_tb_action.setToolTip("批量打开文件夹下所有 MAT 文件 (Ctrl+Shift+O)")
         open_folder_tb_action.triggered.connect(self.open_folder)
         toolbar.addAction(open_folder_tb_action)
@@ -491,7 +496,7 @@ class MainWindow(QMainWindow):
             "读取 MT Portable 格式的空白分隔 TXT 时序文件"
         )
         import_txt_action.triggered.connect(self.import_txt)
-        open_folder_action = QAction("批量打开文件夹(&B)...", self)
+        open_folder_action = QAction("批量打开(&B)...", self)
         open_folder_action.setShortcut("Ctrl+Shift+O")
         open_folder_action.setStatusTip("打开指定文件夹下所有 MAT 文件")
         open_folder_action.triggered.connect(self.open_folder)
@@ -544,6 +549,11 @@ class MainWindow(QMainWindow):
         plugin_manager_action.setStatusTip("查看插件、管理扫描路径并安装本地插件")
         plugin_manager_action.triggered.connect(self._show_plugin_manager)
         tools_menu.addAction(plugin_manager_action)
+        if os.environ.get("MTPRO_DEV_RELOAD") == "1":
+            reload_action = QAction("重新加载数据处理页（开发）", self)
+            reload_action.setShortcut("Ctrl+Shift+R")
+            reload_action.triggered.connect(self._reload_data_process_page)
+            tools_menu.addAction(reload_action)
 
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -551,6 +561,90 @@ class MainWindow(QMainWindow):
         about_action.setStatusTip("查看软件版本与版权信息")
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+    def _reload_data_process_page(self) -> None:
+        """Rebuild the processing page from source during development."""
+        import ui.data_process as process_module
+        import ui.data_process_pipeline as pipeline_module
+        import ui.widgets.pipeline_overview as overview_module
+
+        old_page = self.data_process_widget
+        panel = old_page.pipeline_panel
+        workspaces = panel.workspaces()
+        snapshots = []
+        has_blocks = False
+        for workspace in workspaces:
+            windows = []
+            for window in workspace.subWindowList():
+                widget = window.widget()
+                if widget._plugin_tasks or widget._editor_dialogs:
+                    QMessageBox.information(self, "无法重新加载", "请先等待处理完成并关闭处理编辑窗口。")
+                    return
+                has_blocks |= any(layer.blocks for pipeline in widget.pipelines for layer in pipeline.layers)
+                windows.append(widget.channel_refs())
+            snapshots.append((panel.workspace_tabs.tabText(panel.workspace_tabs.indexOf(workspace)), windows))
+
+        if has_blocks and QMessageBox.question(
+            self, "重新加载数据处理页", "重新加载会丢弃所有工作区中未提交的处理步骤。\n继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        modules = (overview_module, pipeline_module, process_module)
+        try:
+            # Catch syntax errors before closing any existing windows.
+            for module in modules:
+                source = Path(module.__file__).read_bytes()
+                compile(source, module.__file__, "exec")
+        except Exception as exc:
+            self.logger.exception("Processing page source validation failed")
+            QMessageBox.critical(self, "重新加载失败", str(exc))
+            return
+
+        current_workspace = workspaces.index(panel.current_workspace()) if panel.current_workspace() in workspaces else 0
+        old_page.close()
+        try:
+            importlib.invalidate_caches()
+            for module in modules:
+                # Avoid stale timestamp-based bytecode after rapid edits.
+                cached = getattr(module, "__cached__", None)
+                if cached:
+                    Path(cached).unlink(missing_ok=True)
+                importlib.reload(module)
+            new_page = process_module.DataProcessWidget(self.data_manager, self)
+            new_page.set_context_resolver(self._resolve_processing_target)
+            new_page.set_selection_payload_resolver(self.data_tree_viewer.current_drag_payload)
+            new_page.set_clear_checked_channels(self.data_tree_viewer.clear_checked_channels)
+            new_page.change_finished_signal.connect(self.on_data_change_finished)
+            new_page.init_data(self.data_manager.get(self.activate_id), self.activate_id)
+            new_panel = new_page.pipeline_panel
+            for index, (title, windows) in enumerate(snapshots):
+                workspace = new_panel.workspaces()[0] if index == 0 else new_panel._create_workspace()
+                new_panel.workspace_tabs.setTabText(new_panel.workspace_tabs.indexOf(workspace), title)
+                for refs in windows:
+                    workspace.create_pipeline_window(refs)
+            if snapshots:
+                new_panel.workspace_tabs.setCurrentWidget(new_panel.workspaces()[current_workspace])
+        except Exception as exc:
+            self.logger.exception("Processing page reload failed")
+            QMessageBox.critical(self, "重新加载失败", f"{exc}\n\n请重启应用以恢复页面。")
+            return
+
+        index = self.tab_widget.indexOf(old_page)
+        was_current = self.tab_widget.currentWidget() is old_page
+        self.tab_widget.blockSignals(True)
+        try:
+            self.tab_widget.removeTab(index)
+            self.data_process_widget = new_page
+            self.tab_widget.insertTab(index, new_page, "数据处理")
+            if was_current:
+                self.tab_widget.setCurrentWidget(new_page)
+        finally:
+            self.tab_widget.blockSignals(False)
+        old_page.deleteLater()
+        self.logger.info("Processing page reloaded")
+        self.statusBar().showMessage("数据处理页已重新加载", 5000)
 
     def _show_plugin_manager(self) -> None:
         dialog = PluginManagerDialog(self.app_state, self.plugin_report, self)

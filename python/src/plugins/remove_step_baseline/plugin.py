@@ -21,16 +21,23 @@ class StepBaselinePlugin:
             ParamSpec("context_points", "上下文点数", int, 200, minimum=1),
             ParamSpec("loss", "鲁棒损失", str, "soft_l1", options=("soft_l1", "huber", "linear", "cauchy", "arctan")),
             ParamSpec("operations", "确认的编辑", list, []),
+            ParamSpec("effect_to_end", "校正延续至通道末尾", bool, False),
         ),
     )
 
     def process(self, block, params, ctx):
         source = block.series.to_numpy(dtype=np.float64)
-        if params["operations"]:
+        if params["operations"] and not params["effect_to_end"]:
             corrected = apply_operations(source, params["operations"])
             diagnostics = {"mode": "replay"}
         else:
             region = params["region"]
+            if params["effect_to_end"] and (not isinstance(region, (list, tuple)) or len(region) != 2):
+                raise ValueError("全通道阶跃校正需要指定有效的 Block 过渡范围")
+            if params["effect_to_end"]:
+                left, right = (int(value) for value in region)
+                if left < 2 or right <= left or right >= source.size - 1:
+                    raise ValueError("Block 过渡范围两侧必须留有有效数据")
             if not region:
                 finite = source[np.isfinite(source)]
                 index = int(np.argmax(np.abs(np.diff(finite)))) if finite.size > 1 else 0
@@ -59,7 +66,11 @@ class StepBaselinePlugin:
                 "transition_degree": int(editor.transition_degree_spin.value()),
                 "context_points": int(editor.context_spin.value()),
                 "loss": editor.loss_combo.currentText(),
-                "operations": [encode_edit(source_block.series.to_numpy(dtype=np.float64), result)],
+                "operations": (
+                    [] if editor.pipeline_region is not None else
+                    [encode_edit(source_block.series.to_numpy(dtype=np.float64), result)]
+                ),
+                "effect_to_end": editor.pipeline_region is not None,
             }
 
         return slice_processor_editor(RemoveStepByBaseline, host, block, params, extract)

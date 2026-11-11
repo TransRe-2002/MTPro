@@ -39,6 +39,8 @@ class SecularVariationPlugin:
             anchor_spacing_points=int(params["anchor_spacing_points"]),
             min_valid_fraction=float(params["min_valid_fraction"]),
         )
+        if result.status != "applied":
+            raise ValueError("没有可处理的有效数据段，请调整平滑窗口或锚点间隔")
         if ctx.is_cancelled():
             raise RuntimeError("secular-variation subtraction was cancelled")
         baseline = result.estimated_baseline.to_numpy(dtype=np.float64)
@@ -50,6 +52,8 @@ class SecularVariationPlugin:
                 "status": result.status,
                 "anchor_count": result.anchor_count,
                 "valid_anchor_count": result.valid_anchor_count,
+                "processed_segments": result.processed_segments,
+                "skipped_segments": result.skipped_segments,
                 "baseline_mean": float(np.mean(finite)) if finite.size else None,
                 "baseline_rms": float(np.sqrt(np.mean(np.square(finite)))) if finite.size else None,
             },

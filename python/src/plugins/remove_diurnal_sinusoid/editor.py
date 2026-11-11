@@ -79,6 +79,24 @@ class RemoveDiurnalSinusoid(BaseProcessorWidget):
     ]
     _PLOT_POINT_LIMIT = 120_000
 
+    def apply_plugin_params(self, params: dict) -> None:
+        harmonics = params.get("harmonics")
+        if harmonics is not None:
+            for index in range(self.harmonics_combo.count()):
+                if tuple(self.harmonics_combo.itemData(index)) == tuple(harmonics):
+                    self.harmonics_combo.setCurrentIndex(index)
+                    break
+        controls = (
+            ("window_days", self.window_days_edit),
+            ("step_days", self.step_days_edit),
+            ("trend_degree", self.trend_degree_edit),
+            ("min_valid_fraction", self.min_valid_fraction_edit),
+            ("min_valid_samples", self.min_valid_samples_edit),
+        )
+        for name, control in controls:
+            if name in params:
+                control.setText(str(params[name]))
+
     def __init__(self, source, channel_name: str, parent=None):
         # 日变工具使用 time+linear 双重插值（在 _on_data_loaded 中覆写）
         super().__init__(source, channel_name, parent)

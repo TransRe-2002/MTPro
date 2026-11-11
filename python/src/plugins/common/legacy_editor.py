@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
+import pandas as pd
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from plugin_api import TransformResult, default_params
 
 class SlicePluginEditor(QWidget):
     """Connect a visual editor fed by a Pipeline slice to ``EditorHost``.
@@ -35,7 +37,14 @@ class SlicePluginEditor(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        if any(value not in (None, [], {}, "") for value in self.params.values()):
+        info = getattr(getattr(host, "plugin", None), "info", None)
+        defaults = default_params(info) if info is not None else {}
+        internal = (
+            {"_pipeline_step_range", "region", "effect_to_end"}
+            if "_pipeline_step_range" in self.params else set()
+        )
+        if any(key not in internal and value != defaults.get(key)
+               for key, value in self.params.items()):
             note = QLabel("已保存参数将在确认后由处理器确定性重放。", self)
             layout.addWidget(note)
         layout.addWidget(editor)
@@ -51,6 +60,17 @@ class SlicePluginEditor(QWidget):
             all_data_checkbox = getattr(self.editor, "all_data_checkbox", None)
             if all_data_checkbox is not None and all_data_checkbox.isChecked():
                 broadcast.add("region_sync")
+            accept_preview = getattr(self.host, "accept_preview", None)
+            last = getattr(self.editor, "last_result", None)
+            info = getattr(getattr(self.host, "plugin", None), "info", None)
+            if (getattr(info, "plugin_id", "") == "remove_step_baseline"
+                    and values.get("effect_to_end") and last is not None
+                    and callable(accept_preview) and not broadcast):
+                series = pd.Series(result, index=self.block.series.index, name=self.block.series.name)
+                accept_preview(TransformResult(series, {
+                    "mode": "preview", "step_height": last.step_height, "cost": last.cost,
+                }), values)
+                return
             self.host.apply_params(values, frozenset(broadcast))
         except Exception as exc:
             failed = getattr(self.host, "failed", None)

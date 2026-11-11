@@ -92,7 +92,13 @@ HANDLE_W = 7
 MIN_BLOCK_SPAN = 100
 PIPELINE_BLOCK_CLIPBOARD_MIME = "application/x-mtpro-pipeline-block"
 READY_BY_DEFAULT_INTERACTIVE_TOOLS = frozenset({"remove_spike", "remove_region"})
-GLOBAL_TIME_TOOL_IDS = frozenset({"demean", "detrend", "kp_selection"})
+GLOBAL_TIME_TOOL_IDS = frozenset({
+    "demean", "detrend", "kp_selection", "remove_wavelet_denoise",
+    "remove_secular_variation",
+})
+GLOBAL_RANGE_ERROR = "公共时间范围未覆盖整个通道，请将该通道放在独立的 Pipeline 中处理。"
+LEGACY_WAVELET_RANGE_ERROR = "旧小波 Block 的范围不是整个通道，请删除后重新创建。"
+LEGACY_SV_RANGE_ERROR = "旧缓慢背景 Block 的范围不是整个通道，请删除后重新创建。"
 LOCAL_SETTING_KEYS = frozenset({"indices", "operations", "region", "time_ranges"})
 TIMESTAMP_INDEX_TOOLS = frozenset({"remove_spike", "remove_step_diff"})
 POINT_SETTING_KEYS = frozenset({
@@ -189,6 +195,14 @@ def pipeline_tool_id_from_mime(mime_data) -> str | None:
 
 def is_global_time_tool(tool_id: str) -> bool:
     return tool_registry.canonical_id(tool_id) in GLOBAL_TIME_TOOL_IDS
+
+
+def is_suffix_effect_tool(tool_id: str) -> bool:
+    return tool_registry.canonical_id(tool_id) == "remove_step_baseline"
+
+
+def requires_full_channel(tool_id: str) -> bool:
+    return is_global_time_tool(tool_id) or is_suffix_effect_tool(tool_id)
 
 
 class PipelineTrackWidget(QWidget):
@@ -1070,7 +1084,9 @@ class DataProcessPipelineWidget(QWidget):
             if em_data is None or not em_data.has_channel(channel_name):
                 failed.append((data_id, channel_name))
                 continue
-            if not self._has_common_time_overlap(self._channel_refs + [(data_id, channel_name)]):
+            proposed_refs = self._channel_refs + [(data_id, channel_name)]
+            if (not self._has_common_time_overlap(proposed_refs)
+                    or not self._existing_global_blocks_fit(proposed_refs)):
                 failed.append((data_id, channel_name))
                 continue
             self._channel_refs.append((data_id, channel_name))
@@ -1248,6 +1264,19 @@ class DataProcessPipelineWidget(QWidget):
     def _has_common_time_overlap(self, refs: list[tuple[int, str]]) -> bool:
         return self._common_time_range(refs) is not None
 
+    def _existing_global_blocks_fit(self, refs: list[tuple[int, str]]) -> bool:
+        common = self._common_time_range(refs)
+        if common is None:
+            return False
+        for pipeline in self.pipelines:
+            if not any(requires_full_channel(block.tool_id)
+                       for layer in pipeline.layers for block in layer.blocks):
+                continue
+            series = self._channel_series(pipeline.data_id, pipeline.channel)
+            if series is None or not series.loc[common[0]:common[1]].index.equals(series.index):
+                return False
+        return True
+
     def _channel_slice(self, data_id: int, channel_name: str) -> pd.Series:
         series = self._channel_series(data_id, channel_name)
         if series is None:
@@ -1319,7 +1348,38 @@ class DataProcessPipelineWidget(QWidget):
                     if data_len <= 0:
                         self._invalidate_block_cache(block, "channel has no samples in the common time window")
                         continue
+                    if is_suffix_effect_tool(block.tool_id):
+                        full_series = self._channel_series(pipeline.data_id, pipeline.channel)
+                        current_series = self._channel_slice(pipeline.data_id, pipeline.channel)
+                        if full_series is None or not current_series.index.equals(full_series.index):
+                            self._invalidate_block_cache(block, GLOBAL_RANGE_ERROR)
+                            block.status = "error"
+                            normalized_blocks.append(block)
+                            continue
+                        if block.last_summary == GLOBAL_RANGE_ERROR:
+                            self._invalidate_block_cache(block, "全通道范围已恢复，请重新确认处理结果。")
                     if is_global_time_tool(block.tool_id):
+                        full_series = self._channel_series(pipeline.data_id, pipeline.channel)
+                        current_series = self._channel_slice(pipeline.data_id, pipeline.channel)
+                        if full_series is None or not current_series.index.equals(full_series.index):
+                            self._invalidate_block_cache(block, GLOBAL_RANGE_ERROR)
+                            block.status = "error"
+                            normalized_blocks.append(block)
+                            continue
+                        if (self._canonical_tool_id(block.tool_id) == "remove_wavelet_denoise"
+                                and (block.start != 0 or block.end != data_len)):
+                            self._invalidate_block_cache(block, LEGACY_WAVELET_RANGE_ERROR)
+                            block.status = "error"
+                            normalized_blocks.append(block)
+                            continue
+                        if (self._canonical_tool_id(block.tool_id) == "remove_secular_variation"
+                                and (block.start != 0 or block.end != data_len)):
+                            self._invalidate_block_cache(block, LEGACY_SV_RANGE_ERROR)
+                            block.status = "error"
+                            normalized_blocks.append(block)
+                            continue
+                        if block.last_summary == GLOBAL_RANGE_ERROR:
+                            self._invalidate_block_cache(block, "全通道范围已恢复，请重新确认处理结果。")
                         if block.start != 0 or block.end != data_len:
                             block.start = 0
                             block.end = data_len
@@ -1383,9 +1443,17 @@ class DataProcessPipelineWidget(QWidget):
 
         for pipeline in visible_pipelines:
             data_len = self._pipeline_data_len(pipeline)
+            has_blocks = any(layer.blocks for layer in pipeline.layers)
+            samples = (
+                self._pipeline_baseline(pipeline)
+                if has_blocks else
+                self._compose_channel_preview(
+                    pipeline.data_id, pipeline.channel, update_status=True,
+                )
+            )
             lane = ChannelPipelineWidget(
                 pipeline,
-                self._pipeline_baseline(pipeline),
+                samples,
                 data_len,
                 self._snap,
                 show_baseline=self._overview_baseline_visible,
@@ -1552,7 +1620,7 @@ class DataProcessPipelineWidget(QWidget):
             return
 
         global_time = is_global_time_tool(tool_id)
-        if global_time:
+        if requires_full_channel(tool_id):
             full_series = self._channel_series(data_id, channel_name)
             common_series = self._channel_slice(data_id, channel_name)
             if (
@@ -1726,7 +1794,7 @@ class DataProcessPipelineWidget(QWidget):
         if data_len <= 0:
             return
         global_time = is_global_time_tool(tool_id)
-        if global_time:
+        if requires_full_channel(tool_id):
             full_series = self._channel_series(data_id, channel_name)
             common_series = self._channel_slice(data_id, channel_name)
             if (
@@ -1810,7 +1878,9 @@ class DataProcessPipelineWidget(QWidget):
         self._plugin_tasks.pop(block.block_id, None)
         block.input_slice = None
         block.output_slice = None
-        if tool_registry.get_plugin(block.tool_id) is not None and block.params:
+        if is_suffix_effect_tool(block.tool_id) and not block.params.get("effect_to_end"):
+            block.status = "empty"
+        elif tool_registry.get_plugin(block.tool_id) is not None and block.params:
             block.status = "stale"
         elif TOOL_META.get(block.tool_id, {}).get("kind") == "interactive":
             block.status = "empty"
@@ -2335,6 +2405,13 @@ class DataProcessPipelineWidget(QWidget):
         layer: PipelineLayer,
         block: PipelineBlock,
     ):
+        if block.last_summary in (GLOBAL_RANGE_ERROR, LEGACY_WAVELET_RANGE_ERROR, LEGACY_SV_RANGE_ERROR):
+            QMessageBox.warning(self, "无法打开处理工具", block.last_summary)
+            return
+        if (self._canonical_tool_id(block.tool_id) == "remove_secular_variation"
+                and (block.start != 0 or block.end != self._pipeline_data_len(pipeline))):
+            QMessageBox.warning(self, "无法打开处理工具", LEGACY_SV_RANGE_ERROR)
+            return
         existing_dialog = self._group_editor_dialogs.get(block.settings_group_id)
         if existing_dialog is not None:
             existing_block_id = existing_dialog.property("pipeline_block_id")
@@ -2356,6 +2433,14 @@ class DataProcessPipelineWidget(QWidget):
         )
         range_start = max(0, min(input_snapshot.size, block.start))
         range_end = max(range_start, min(input_snapshot.size, block.end))
+        selected_range = (block.start, block.end)
+        editor_params = self._editor_params(block)
+        if is_suffix_effect_tool(block.tool_id):
+            editor_params["_pipeline_step_range"] = [range_start, max(range_start, range_end - 1)]
+            editor_params["region"] = editor_params["_pipeline_step_range"]
+            editor_params["operations"] = []
+            editor_params["effect_to_end"] = True
+            range_start, range_end = 0, input_snapshot.size
         preview_channel = self._make_preview_channel(
             pipeline.data_id,
             pipeline.channel,
@@ -2391,7 +2476,7 @@ class DataProcessPipelineWidget(QWidget):
 
         tool_id = self._canonical_tool_id(block.tool_id)
         editor = tool_registry.create_pipeline_editor(
-            tool_id, preview_channel, dialog, params=self._editor_params(block),
+            tool_id, preview_channel, dialog, params=editor_params,
         )
         if editor is None:
             dialog.deleteLater()
@@ -2401,6 +2486,12 @@ class DataProcessPipelineWidget(QWidget):
         source_snapshot = input_snapshot
 
         def _on_editor_result(_channel, result):
+            current = self._find_block(block_id)
+            if (is_suffix_effect_tool(tool_id) and current is not None
+                    and (current[2].start, current[2].end) != selected_range):
+                QMessageBox.warning(self, "Block 已改变", "Block 范围已改变，请重新打开工具并预览。")
+                dialog.close()
+                return
             ok = self._on_interactive_result(
                 block_id, source_snapshot, range_start, range_end, result,
             )
@@ -2415,6 +2506,10 @@ class DataProcessPipelineWidget(QWidget):
         params_applied = getattr(editor, "params_applied", None)
         if params_applied is not None:
             def _on_params_applied(values, _broadcast):
+                current = self._find_block(block_id)
+                if (is_suffix_effect_tool(tool_id) and current is not None
+                        and (current[2].start, current[2].end) != selected_range):
+                    return
                 detached = self._on_plugin_params_applied(
                     block_id,
                     values,
@@ -2613,7 +2708,7 @@ class DataProcessPipelineWidget(QWidget):
         if source.empty or target.empty:
             return None
 
-        if is_global_time_tool(source_block.tool_id):
+        if requires_full_channel(source_block.tool_id):
             full_target = self._channel_series(
                 target_pipeline.data_id,
                 target_pipeline.channel,
@@ -2624,7 +2719,8 @@ class DataProcessPipelineWidget(QWidget):
                 or not full_target.index.equals(target.index)
             ):
                 return None
-            return 0, len(target)
+            if is_global_time_tool(source_block.tool_id):
+                return 0, len(target)
 
         source_start = max(0, min(source_block.start, len(source)))
         source_end = max(source_start, min(source_block.end, len(source)))
@@ -2840,6 +2936,10 @@ class DataProcessPipelineWidget(QWidget):
         base_series = self._channel_slice(pipeline.data_id, pipeline.channel)
         start = max(0, min(current_block.start, len(base_series)))
         end = max(start, min(current_block.end, len(base_series)))
+        params = dict(block.params)
+        if is_suffix_effect_tool(block.tool_id):
+            params.update({"region": [start, max(start, end - 1)], "operations": [], "effect_to_end": True})
+            start, end = 0, len(base_series)
         values = np.asarray(current_input, dtype=np.float64).copy()
         if values.size != end - start:
             return
@@ -2886,7 +2986,7 @@ class DataProcessPipelineWidget(QWidget):
             run_plugin_process,
             plugin,
             channel_block,
-            dict(block.params),
+            params,
             on_done=bridge.relay_done,
             on_error=bridge.relay_failed,
             owner=bridge,
@@ -2996,9 +3096,24 @@ class DataProcessPipelineWidget(QWidget):
     ) -> np.ndarray:
         """把单个 block 的缓存修改叠加到当前快照上。"""
         tool_kind = TOOL_META.get(block.tool_id, {}).get("kind")
+        if (self._canonical_tool_id(block.tool_id) == "remove_secular_variation"
+                and (block.start != 0 or block.end != current_snapshot.size)):
+            if update_status:
+                self._invalidate_block_cache(block, LEGACY_SV_RANGE_ERROR)
+                block.status = "error"
+            return current_snapshot
+        if is_suffix_effect_tool(block.tool_id) and not block.params.get("effect_to_end"):
+            if update_status:
+                block.input_slice = None
+                block.output_slice = None
+                block.status = "empty"
+                block.last_summary = "请打开工具并确认全通道阶跃校正"
+            return current_snapshot
         n = current_snapshot.size
         start = max(0, min(block.start, n))
         end = max(start, min(block.end, n))
+        if is_suffix_effect_tool(block.tool_id):
+            start, end = 0, n
         region_len = end - start
 
         has_cache = block.input_slice is not None and block.output_slice is not None

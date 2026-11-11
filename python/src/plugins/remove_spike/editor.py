@@ -403,6 +403,18 @@ class RemoveSpike(QtWidgets.QWidget):
     result_signal = QtCore.Signal(str, object)
     channel_sync_requested = QtCore.Signal(int, str, object)
 
+    def apply_plugin_params(self, params: dict) -> None:
+        plot = self.plot_widget
+        if plot is None or plot.y_data is None:
+            return
+        indices = np.asarray(params.get("indices", []), dtype=int)
+        indices = indices[(indices >= 0) & (indices < plot.y_data.size)]
+        indices = np.unique(indices[np.isfinite(plot.y_data[indices])])
+        if indices.size:
+            plot.y_data[indices] = np.nan
+            plot.undo_stack.append(indices)
+            plot._refresh_display_data()
+
     def __init__(
         self,
         source: int | pd.Series,

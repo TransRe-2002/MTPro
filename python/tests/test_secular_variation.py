@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from base.plugin_runtime import run_plugin_process
 from core.algorithms.secular_variation import remove_secular_variation_series
@@ -58,6 +59,20 @@ def test_remove_secular_variation_does_not_change_data_without_two_valid_anchors
     assert result.status == "insufficient_anchor_estimates"
     np.testing.assert_allclose(result.cleaned.to_numpy(), values, equal_nan=True)
     assert result.estimated_baseline.isna().all()
+
+
+def test_separate_single_anchor_segments_do_not_count_as_applied():
+    values = np.r_[2.0, np.full(20, np.nan), 3.0]
+    result = remove_secular_variation_series(
+        _series(values), smoothing_window_points=3, anchor_spacing_points=10,
+    )
+    assert result.valid_anchor_count == 2
+    assert result.status == "insufficient_anchor_estimates"
+    assert result.processed_segments == 0
+    assert result.skipped_segments == 2
+    np.testing.assert_allclose(result.cleaned.to_numpy(), values, equal_nan=True)
+    with pytest.raises(ValueError, match="没有可处理的有效数据段"):
+        run_plugin_process(SecularVariationPlugin(), ChannelBlock("Hx", _series(values)), {})
 
 
 def test_secular_variation_plugin_uses_json_diagnostics_and_preserves_index():

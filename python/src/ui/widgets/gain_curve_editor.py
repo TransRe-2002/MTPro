@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import numpy as np
 import pyqtgraph as pg
+from scipy.interpolate import PchipInterpolator
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
@@ -34,8 +35,10 @@ class GainCurveEditor(QWidget):
         self.plot_item.setLabel("left", "增益")
         self.plot_item.setLabel("bottom", "低频  ←  频带  →  高频")
         self.plot_item.showGrid(x=True, y=True, alpha=0.25)
-        self.plot_item.setYRange(self.minimum, self.maximum, padding=0.02)
+        self.plot_item.setYRange(self.minimum, self.maximum, padding=0)
         self.plot_item.getViewBox().setMouseEnabled(x=False, y=False)
+        self.plot_item.hideButtons()
+        self.plot_item.setMenuEnabled(False)
         self.reference_line = pg.InfiniteLine(
             pos=1.0,
             angle=0,
@@ -85,7 +88,7 @@ class GainCurveEditor(QWidget):
             )
             target = pg.TargetItem(
                 pos=(float(display_index), self._clamp(gain)),
-                size=12,
+                size=12 if count <= 12 else 7,
                 symbol="o",
                 pen=pg.mkPen(35, 95, 185, width=2),
                 hoverPen=pg.mkPen(255, 180, 45, width=2),
@@ -103,16 +106,33 @@ class GainCurveEditor(QWidget):
                 lambda _item=target: self.editing_finished.emit()
             )
             self._targets.append(target)
+            target.setToolTip(name.replace("\n", " "))
             self.plot_item.addItem(target)
 
         self._update_curve()
-        tick_step = max(1, int(np.ceil(max(1, count) / 12.0)))
+        self._update_ticks()
+        self.plot_item.setXRange(-0.65, max(0.65, count - 0.35), padding=0.0)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_ticks()
+
+    def _update_ticks(self) -> None:
+        count = len(self._band_names)
+        if not count:
+            return
+        metrics = self.plot_widget.fontMetrics()
+        label_width = max(
+            metrics.horizontalAdvance(line)
+            for name in self._band_names for line in name.split("\n")
+        ) + 16
+        max_labels = max(1, min(12, (self.plot_widget.width() - 60) // max(1, label_width)))
+        tick_step = max(1, int(np.ceil(count / max_labels)))
         ticks = [
             (float(index), self._band_names[index])
             for index in range(0, count, tick_step)
         ]
         self.plot_item.getAxis("bottom").setTicks([ticks])
-        self.plot_item.setXRange(-0.35, max(0.35, count - 0.65), padding=0.0)
 
     def set_gain(self, logical_index: int, value: float) -> None:
         try:
@@ -154,7 +174,12 @@ class GainCurveEditor(QWidget):
             [target.pos().y() for target in self._targets],
             dtype=np.float64,
         )
-        self.curve.setData(x_values, y_values)
+        if len(x_values) > 1:
+            smooth_x = np.linspace(0, len(x_values) - 1, (len(x_values) - 1) * 24 + 1)
+            smooth_y = PchipInterpolator(x_values, y_values)(smooth_x)
+            self.curve.setData(smooth_x, smooth_y)
+        else:
+            self.curve.setData(x_values, y_values)
 
     def _clamp(self, value: float) -> float:
         return min(self.maximum, max(self.minimum, float(value)))

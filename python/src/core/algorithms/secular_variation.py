@@ -32,6 +32,8 @@ class SecularVariationResult:
     anchor_count: int
     valid_anchor_count: int
     status: str
+    processed_segments: int = 0
+    skipped_segments: int = 0
 
 
 def remove_secular_variation_series(
@@ -65,6 +67,8 @@ def remove_secular_variation_series(
         anchor_values: list[pd.Series] = []
         anchor_count = 0
         valid_anchor_count = 0
+        processed_segments = 0
+        skipped_segments = 0
         for start, stop in dense_segments:
             segment = series.iloc[start:stop].copy()
             segment.iloc[:] = dense[start:stop]
@@ -79,6 +83,8 @@ def remove_secular_variation_series(
             anchor_values.append(result.anchor_estimates)
             anchor_count += result.anchor_count
             valid_anchor_count += result.valid_anchor_count
+            processed_segments += result.processed_segments
+            skipped_segments += result.skipped_segments
         cleaned = restore_nonfinite(cleaned, values, original_finite)
         anchors = (
             pd.concat(anchor_values)
@@ -91,7 +97,9 @@ def remove_secular_variation_series(
             anchor_estimates=anchors,
             anchor_count=anchor_count,
             valid_anchor_count=valid_anchor_count,
-            status="applied" if valid_anchor_count >= 2 else "insufficient_anchor_estimates",
+            status="applied" if processed_segments else "insufficient_anchor_estimates",
+            processed_segments=processed_segments,
+            skipped_segments=skipped_segments,
         )
     finite_indices = np.flatnonzero(original_finite)
     if finite_indices.size == 0:
@@ -103,6 +111,7 @@ def remove_secular_variation_series(
             anchor_count=0,
             valid_anchor_count=0,
             status="insufficient_anchor_estimates",
+            skipped_segments=1,
         )
     first = int(finite_indices[0])
     stop = int(finite_indices[-1]) + 1
@@ -149,6 +158,8 @@ def remove_secular_variation_series(
         anchor_count=int(anchor_positions.size),
         valid_anchor_count=int(valid.sum()),
         status=status,
+        processed_segments=int(status == "applied"),
+        skipped_segments=int(status != "applied"),
     )
 
 

@@ -67,6 +67,13 @@ class RegionManagementMixin:
     def _add_region(self):
         self._set_region_bounds(*self._region_bounds_around())
 
+    def _restore_region_indices(self, region) -> None:
+        if not isinstance(region, (list, tuple)) or len(region) != 2 or self.x_data.size < 2:
+            return
+        left, right = (max(0, min(int(value), self.x_data.size - 1)) for value in region)
+        if left < right:
+            self._set_region_bounds(float(self.x_data[left]), float(self.x_data[right]))
+
     def _add_or_move_region_from_x(self, center_x: float):
         self._set_region_bounds(*self._region_bounds_around(center_x))
 

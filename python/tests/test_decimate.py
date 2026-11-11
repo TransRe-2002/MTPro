@@ -86,6 +86,26 @@ def test_minmax_decimate_passthrough_for_small_data():
     np.testing.assert_array_equal(dy, y)
 
 
+def test_vectorized_fallback_matches_bucket_reference(monkeypatch):
+    monkeypatch.setattr(dec, "_HAS_RUST", False)
+    rng = np.random.default_rng(12)
+    for n, bins in ((101, 17), (1000, 33), (2001, 500)):
+        x = np.arange(n, dtype=float)
+        y = rng.integers(-4, 5, n).astype(float)
+        y[rng.random(n) < 0.2] = np.nan
+        y[: n // bins] = np.nan
+        expected = []
+        for indexes in np.array_split(np.arange(n), bins):
+            values = y[indexes]
+            if np.isnan(values).all():
+                expected.append(indexes[0])
+            else:
+                expected.extend(sorted({indexes[np.nanargmin(values)], indexes[np.nanargmax(values)]}))
+        actual_x, actual_y = minmax_decimate(x, y, bins)
+        np.testing.assert_array_equal(actual_x, x[expected])
+        np.testing.assert_array_equal(actual_y, y[expected])
+
+
 def test_lod_pyramid_zoomed_in_returns_exact_raw_slice():
     x, y = _spiky_series()
     pyramid = LODPyramid(x, y)

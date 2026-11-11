@@ -570,7 +570,7 @@ def test_wavelet_local_depulse_reduces_pulse_tail():
     assert np.max(np.abs(outside_after - outside_before)) < 0.5
 
 
-def test_remove_pulse_wavelet_widget_uses_region_selection_and_two_plots(qtbot):
+def test_wavelet_widget_uses_full_channel_and_two_plots(qtbot):
     data = PulseDemoData()
     widget = RemoveWaveletDenoise(data, "Ex1")
     qtbot.addWidget(widget)
@@ -587,39 +587,31 @@ def test_remove_pulse_wavelet_widget_uses_region_selection_and_two_plots(qtbot):
     assert widget.analysis_tabs.currentWidget() is widget.eq_panel
     assert widget.dynamic_gain_widget.isHidden()
     assert widget.region_item is None
+    assert widget.region_frame.isHidden()
+    assert widget.scope_combo.count() == 1
+    assert widget.scope_combo.currentText() == "全通道"
+    assert widget.signal_plot_widget.double_click_callback is None
+    assert widget.signal_plot_widget.right_click_callback is None
 
 
-def test_remove_pulse_wavelet_region_uses_current_view_width_limit(qtbot):
+def test_wavelet_processing_range_is_independent_of_plot_view(qtbot):
     data = PulseDemoData()
     widget = RemoveWaveletDenoise(data, "Ex1")
     qtbot.addWidget(widget)
 
     widget.signal_plot_item.vb.setXRange(widget.x_data[100], widget.x_data[300], padding=0)
-    view_min, view_max = widget.signal_plot_item.vb.viewRange()[0]
-    visible_width = view_max - view_min
-    widget._add_or_move_region_from_x((view_min + view_max) * 0.5)
-
-    assert widget.region_item is not None
-    left, right = widget.region_item.getRegion()
-    assert left >= view_min
-    assert right <= view_max
-    assert (right - left) <= visible_width * 0.2 + 1e-9
+    assert widget._read_region() == (0, widget.y_data.size - 1)
 
 
-def test_remove_wavelet_denoise_right_click_handler_removes_region(qtbot):
+def test_wavelet_old_local_preset_does_not_enable_region_selection(qtbot):
     data = PulseDemoData()
     widget = RemoveWaveletDenoise(data, "Ex1")
     qtbot.addWidget(widget)
 
-    widget._add_region()
-    assert widget.region_item is not None
-    left, right = widget.region_item.getRegion()
-
-    removed = widget._handle_plot_right_click((left + right) * 0.5, 0.0)
-
-    assert removed is True
+    widget._apply_preset_dict({"scope": "局部选区"})
+    assert widget.scope_combo.currentText() == "全通道"
+    assert widget._read_region() == (0, widget.y_data.size - 1)
     assert widget.region_item is None
-    assert widget.selected_indices == []
 
 
 def test_remove_step_baseline_logs_to_memory_buffer(qtbot):
@@ -697,7 +689,7 @@ def test_remove_wavelet_denoise_full_scope_allows_processing_without_region(qtbo
     assert "全通道" in widget.selection_status_label.text()
 
 
-def test_remove_wavelet_denoise_level_limit_tracks_selected_window(qtbot):
+def test_wavelet_level_limit_uses_full_channel_not_viewport(qtbot):
     pytest.importorskip("pywt")
 
     data = PulseDemoData()
@@ -706,11 +698,8 @@ def test_remove_wavelet_denoise_level_limit_tracks_selected_window(qtbot):
 
     initial_max = widget.level_spin.maximum()
     widget.signal_plot_item.vb.setXRange(widget.x_data[1800], widget.x_data[1820], padding=0)
-    widget._add_or_move_region_from_x(float(widget.x_data[1810]))
-    reduced_max = widget.level_spin.maximum()
-
-    assert reduced_max <= initial_max
-    assert reduced_max >= 1
+    widget._update_level_limit()
+    assert widget.level_spin.maximum() == initial_max
 
 
 def test_remove_wavelet_denoise_preset_updates_controls(qtbot):
@@ -751,17 +740,15 @@ def test_remove_wavelet_denoise_preview_updates_energy_plot(qtbot):
     data = PulseDemoData()
     widget = RemoveWaveletDenoise(data, "Ex1")
     qtbot.addWidget(widget)
-    widget._add_region()
-
     widget._preview_fit()
     # 重计算在 compute 池后台执行，等结果回到主线程
     qtbot.waitUntil(lambda: widget.last_result is not None, timeout=10000)
 
     assert widget.last_result is not None
     assert widget.last_result.detail_energy_before.size >= 1
-    qtbot.waitUntil(lambda: widget.local_left_line.isVisible(), timeout=5000)
-    assert widget.local_left_line.isVisible()
-    assert widget.local_right_line.isVisible()
+    assert widget.last_result.region == (0, widget.y_data.size - 1)
+    assert not widget.local_left_line.isVisible()
+    assert not widget.local_right_line.isVisible()
 
 
 def test_remove_wavelet_denoise_scale_gains_sets_all_levels(qtbot):
@@ -972,6 +959,26 @@ def test_remove_wavelet_denoise_eq_curve_tracks_frequency_order_and_spins(qtbot)
 
     assert widget.gain_spins[0].value() == pytest.approx(0.37)
     assert widget.mode_combo.currentText() == "manual"
+
+
+def test_wavelet_eq_limits_all_gain_controls_to_view_range(qtbot):
+    data = PulseDemoData()
+    widget = RemoveWaveletDenoise(data, "Ex1")
+    qtbot.addWidget(widget)
+    widget.apply_plugin_params({"detail_gains": [2.5, 1.0]})
+    assert widget.gain_spins[0].value() == pytest.approx(2.0)
+    assert widget.gain_curve_editor.gains()[0] == pytest.approx(2.0)
+    assert widget._state_to_preset_dict()["detail_gains"][0] == pytest.approx(2.0)
+    widget.global_gain_spin.setValue(4.0)
+    assert widget.global_gain_spin.value() == pytest.approx(2.0)
+    widget._scale_gains()
+    assert all(spin.value() == pytest.approx(2.0) for spin in widget.gain_spins)
+    widget.transform_combo.setCurrentText("Wavelet Packet")
+    for spin in (widget.wp_low_gain_spin, widget.wp_mid_gain_spin, widget.wp_high_gain_spin):
+        spin.setValue(4.0)
+        assert spin.value() == pytest.approx(2.0)
+    widget._apply_wp_groups()
+    assert all(spin.value() == pytest.approx(2.0) for spin in widget.gain_spins)
 
 
 def test_remove_wavelet_denoise_wavelet_packet_eq_runs_low_to_high(qtbot):

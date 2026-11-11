@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -28,6 +28,7 @@ from plugins.common.display import decimate_for_display
 from plugins.common.plotting import StepPlotWidget
 from base.qt_bridge import run as run_in_pool
 from utils.theme import subtle_pen, transparent_legend_brush
+from utils.series import dti_to_numpy
 
 
 class FilterPreviewEditor(QWidget):
@@ -46,6 +47,7 @@ class FilterPreviewEditor(QWidget):
         self._host = host
         self._block = block
         self._editors: dict[str, tuple[QWidget, ParamSpec]] = {}
+        self._field_labels: dict[str, QLabel] = {}
         self._preview_generation = 0
         self.preview_result = None
         self.preview_params: dict[str, Any] | None = None
@@ -57,7 +59,7 @@ class FilterPreviewEditor(QWidget):
 
         values = complete_params(host.plugin.info, params)
         self._build_ui(values)
-        QTimer.singleShot(0, self._start_preview)
+        self._preview_timer.start(0)
 
     def _build_ui(self, values: Mapping[str, Any]) -> None:
         info = self._host.plugin.info
@@ -67,20 +69,6 @@ class FilterPreviewEditor(QWidget):
             description = QLabel(info.description, self)
             description.setWordWrap(True)
             root.addWidget(description)
-
-        form = QFormLayout()
-        for spec in info.params_schema:
-            editor = self._create_field(spec, values.get(spec.name, spec.default))
-            if editor is None:
-                continue
-            form.addRow(spec.label, editor)
-            self._editors[spec.name] = (editor, spec)
-            self._connect_field(editor)
-        root.addLayout(form)
-
-        self.status_label = QLabel("正在计算初始预览…", self)
-        self.status_label.setWordWrap(True)
-        root.addWidget(self.status_label)
 
         self.comparison_plot = StepPlotWidget(self)
         self.comparison_plot.setObjectName("filterComparisonPlot")
@@ -124,6 +112,30 @@ class FilterPreviewEditor(QWidget):
         plots.setStretchFactor(1, 1)
         root.addWidget(plots, 1)
 
+        form = QGridLayout()
+        field_index = 0
+        for spec in info.params_schema:
+            editor = self._create_field(spec, values.get(spec.name, spec.default))
+            if editor is None:
+                continue
+            row, column = divmod(field_index, 3)
+            label = QLabel(spec.label, self)
+            form.addWidget(label, row, column * 2)
+            form.addWidget(editor, row, column * 2 + 1)
+            form.setColumnStretch(column * 2 + 1, 1)
+            self._editors[spec.name] = (editor, spec)
+            self._field_labels[spec.name] = label
+            self._connect_field(editor)
+            field_index += 1
+        root.addLayout(form)
+        if info.plugin_id == "iir_filter":
+            kind_editor = self._editors["filter_kind"][0]
+            kind_editor.currentTextChanged.connect(self._update_iir_fields)
+            self._update_iir_fields()
+
+        self.status_label = QLabel("正在计算初始预览…", self)
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
         self.metrics_label = QLabel("等待预览统计…", self)
         self.metrics_label.setWordWrap(True)
         root.addWidget(self.metrics_label)
@@ -156,7 +168,7 @@ class FilterPreviewEditor(QWidget):
     def _create_field(self, spec: ParamSpec, value: Any) -> QWidget | None:
         if spec.type is float:
             editor = QDoubleSpinBox(self)
-            editor.setDecimals(8)
+            editor.setDecimals(9 if spec.minimum is not None and 0 < spec.minimum < 1e-8 else 8)
             editor.setRange(
                 float(spec.minimum) if spec.minimum is not None else -1.0e100,
                 float(spec.maximum) if spec.maximum is not None else 1.0e100,
@@ -184,6 +196,19 @@ class FilterPreviewEditor(QWidget):
             editor = QLineEdit(str(value), self)
             return editor
         return None
+
+    def _update_iir_fields(self, *_args) -> None:
+        kind = self._editors["filter_kind"][0].currentText()
+        active = {
+            "low_fraction": kind in {"highpass", "bandpass", "bandstop"},
+            "high_fraction": kind in {"lowpass", "bandpass", "bandstop"},
+            "notch_fraction": kind == "notch",
+            "quality_factor": kind == "notch",
+            "order": kind != "notch",
+        }
+        for name, enabled in active.items():
+            self._editors[name][0].setEnabled(enabled)
+            self._field_labels[name].setEnabled(enabled)
 
     def _connect_field(self, editor: QWidget) -> None:
         if isinstance(editor, (QSpinBox, QDoubleSpinBox)):
@@ -216,7 +241,7 @@ class FilterPreviewEditor(QWidget):
         self.preview_params = None
         self.apply_button.setEnabled(False)
         self.status_label.setText("参数已变化，正在更新预览…")
-        self._preview_timer.start()
+        self._preview_timer.start(self.PREVIEW_DELAY_MS)
 
     def _start_preview(self) -> None:
         self._preview_timer.stop()
@@ -228,12 +253,13 @@ class FilterPreviewEditor(QWidget):
         self.preview_button.setEnabled(False)
         self.apply_button.setEnabled(False)
         self.status_label.setText("正在使用正式处理算法计算预览…")
+        plugin, block = self._host.plugin, self._block
 
         def compute():
             try:
                 result, completed = run_plugin_process(
-                    self._host.plugin,
-                    self._block,
+                    plugin,
+                    block,
                     params,
                 )
                 return generation, result, completed, None
@@ -269,7 +295,7 @@ class FilterPreviewEditor(QWidget):
         difference = source - preview
         index = self._block.series.index
         if hasattr(index, "asi8"):
-            x_values = np.asarray(index.asi8, dtype=np.float64) / 1.0e9
+            x_values = dti_to_numpy(index)
         else:
             x_values = np.arange(source.size, dtype=np.float64)
 
@@ -314,4 +340,8 @@ class FilterPreviewEditor(QWidget):
             return
         self.apply_button.setEnabled(False)
         self.status_label.setText("正在确认并写入 Pipeline…")
-        self._host.apply_params(self.preview_params)
+        accept = getattr(self._host, "accept_preview", None)
+        if callable(accept):
+            accept(self.preview_result, self.preview_params)
+        else:
+            self._host.apply_params(self.preview_params)

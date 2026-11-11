@@ -20,7 +20,12 @@ from ui.models.processing_tools import (
     create_processing_tool_model,
 )
 from ui.data_tree_view import ToolTreeView
-from ui.data_process_pipeline import DataProcessPipelineWidget, pipeline_tool_id_from_mime
+from ui.data_process_pipeline import (
+    DataProcessPipelineWidget,
+    GLOBAL_RANGE_ERROR,
+    LEGACY_WAVELET_RANGE_ERROR,
+    pipeline_tool_id_from_mime,
+)
 
 
 class _SyncData(EMData):
@@ -63,6 +68,93 @@ def test_pipeline_accepts_shared_processing_tool_drag_mime():
     pipeline_mime = QMimeData()
     pipeline_mime.setData(PIPELINE_TOOL_MIME, QByteArray(b"remove_step_diff"))
     assert pipeline_tool_id_from_mime(pipeline_mime) == "remove_step_diff"
+
+
+def test_wavelet_block_covers_and_locks_entire_channel(qtbot):
+    manager = DataManager()
+    data = _SyncData(["Ex"])
+    data_id = manager.add(data)
+    widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(widget)
+    widget.init_data(data, data_id)
+    pipeline = widget._find_pipeline(data_id, "Ex")
+    layer = pipeline.layers[0]
+    widget._add_block_with_tool(data_id, "Ex", layer.layer_id, 3, "remove_wavelet_denoise")
+    block = layer.blocks[0]
+    assert (block.start, block.end) == (0, len(data.datetime_index))
+    track = widget._lane_widgets[0]._tracks[0]
+    assert track._hit_test(0)[1] == "locked"
+
+
+def test_wavelet_block_rejects_new_channel_that_would_shorten_it(qtbot):
+    manager = DataManager()
+    full = _SyncData(["Ex"])
+    short = _SyncData(["Ey"])
+    short.data = short.data.isel(time=slice(1, 5))
+    full_id, short_id = manager.add(full), manager.add(short)
+    widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(widget)
+    widget.init_data(full, full_id)
+    layer = widget.pipelines[0].layers[0]
+    widget._add_block_with_tool(full_id, "Ex", layer.layer_id, 0, "remove_wavelet_denoise")
+    added, duplicated, failed = widget.add_channels([(short_id, "Ey")])
+    assert added == [] and duplicated == [] and failed == [(short_id, "Ey")]
+    assert widget.channel_refs() == [(full_id, "Ex")]
+    assert (layer.blocks[0].start, layer.blocks[0].end) == (0, 6)
+
+
+def test_old_local_wavelet_block_is_not_silently_expanded(qtbot):
+    manager = DataManager()
+    data = _SyncData(["Ex"])
+    data_id = manager.add(data)
+    widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(widget)
+    widget.init_data(data, data_id)
+    layer = widget.pipelines[0].layers[0]
+    block = PipelineBlock(tool_id="remove_wavelet_denoise", start=1, end=4,
+                          params={"operations": [{"delta_runs": [[0, [1.0]]]}]})
+    layer.blocks.append(block)
+    widget._normalize_pipelines_for_current_window()
+    assert layer.blocks == [block]
+    assert (block.start, block.end) == (1, 4)
+    assert block.status == "error" and block.last_summary == LEGACY_WAVELET_RANGE_ERROR
+
+
+def test_global_wavelet_does_not_process_partial_common_range(qtbot):
+    manager = DataManager()
+    full = _SyncData(["Ex"])
+    short = _SyncData(["Ey"])
+    short.data = short.data.isel(time=slice(1, 5))
+    full_id, short_id = manager.add(full), manager.add(short)
+    widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(widget)
+    widget.add_channels([(full_id, "Ex"), (short_id, "Ey")])
+    layer = widget._find_pipeline(full_id, "Ex").layers[0]
+    block = PipelineBlock(tool_id="remove_wavelet_denoise", start=0, end=6, params={"mode": "soft"})
+    layer.blocks.append(block)
+    widget._normalize_pipelines_for_current_window()
+    assert layer.blocks == [block]
+    assert block.status == "error" and block.last_summary == GLOBAL_RANGE_ERROR
+    assert (block.start, block.end) == (0, 6)
+
+
+def test_cannot_add_wavelet_when_common_range_is_partial(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    manager = DataManager()
+    full = _SyncData(["Ex"])
+    short = _SyncData(["Ey"])
+    short.data = short.data.isel(time=slice(1, 5))
+    full_id, short_id = manager.add(full), manager.add(short)
+    widget = DataProcessPipelineWidget(manager)
+    qtbot.addWidget(widget)
+    widget.add_channels([(full_id, "Ex"), (short_id, "Ey")])
+    layer = widget._find_pipeline(full_id, "Ex").layers[0]
+    messages = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: messages.append(args))
+    widget._add_block_with_tool(full_id, "Ex", layer.layer_id, 0, "remove_wavelet_denoise")
+    assert not layer.blocks
+    assert messages and "公共时间范围" in messages[0][2]
 
 
 def test_shared_processing_tool_tree_emits_pipeline_drag_mime(monkeypatch):

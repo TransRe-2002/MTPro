@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pandas as pd
 import pytest
-from PySide6.QtWidgets import QApplication, QSpinBox
+from PySide6.QtWidgets import QApplication, QGridLayout, QSpinBox, QSplitter
 
 from core.pipeline_model import PreviewChannelSlice
 from ui.widgets.filter_preview_editor import FilterPreviewEditor
@@ -108,3 +108,69 @@ def test_filter_preview_recomputes_after_debounced_parameter_change(qtbot):
     qtbot.waitUntil(lambda: bool(applied), timeout=5000)
     assert applied[-1]["window_points"] == 7
     editor.close()
+
+
+@pytest.mark.parametrize("kind,active", [
+    ("lowpass", {"high_fraction", "order"}),
+    ("highpass", {"low_fraction", "order"}),
+    ("bandpass", {"low_fraction", "high_fraction", "order"}),
+    ("bandstop", {"low_fraction", "high_fraction", "order"}),
+    ("notch", {"notch_fraction", "quality_factor"}),
+])
+def test_iir_fields_follow_filter_kind_without_losing_values(qtbot, kind, active):
+    wrapper = registry.create_pipeline_editor(
+        "iir_filter", _preview_slice(), None,
+        params={"filter_kind": kind, "low_fraction": 0.12, "high_fraction": 0.42,
+                "notch_fraction": 0.55, "quality_factor": 25.0, "order": 6},
+    )
+    qtbot.addWidget(wrapper)
+    editor = wrapper._editor
+    assert isinstance(editor.layout().itemAt(1).widget(), QSplitter)
+    assert isinstance(editor.layout().itemAt(2).layout(), QGridLayout)
+    dependent = {"low_fraction", "high_fraction", "notch_fraction", "quality_factor", "order"}
+    for name in dependent:
+        assert editor._editors[name][0].isEnabled() == (name in active)
+        assert editor._field_labels[name].isEnabled() == (name in active)
+    assert editor._editors["min_segment_points"][0].isEnabled()
+    values = editor.params()
+    assert values["low_fraction"] == pytest.approx(0.12)
+    assert values["high_fraction"] == pytest.approx(0.42)
+    assert values["notch_fraction"] == pytest.approx(0.55)
+    assert values["quality_factor"] == pytest.approx(25.0)
+    assert values["order"] == 6
+    assert editor._editors["low_fraction"][0].minimum() > 0
+
+
+def test_iir_switching_restores_values_and_applies_preview_once(qtbot, monkeypatch):
+    wrapper = registry.create_pipeline_editor(
+        "iir_filter", _preview_slice(), None,
+        params={"filter_kind": "bandpass", "low_fraction": 0.12, "high_fraction": 0.42},
+    )
+    qtbot.addWidget(wrapper)
+    editor = wrapper._editor
+    plugin = wrapper.plugin
+    original_process = plugin.process
+    calls = []
+
+    def process(*args):
+        calls.append(1)
+        return original_process(*args)
+
+    monkeypatch.setattr(plugin, "process", process)
+    qtbot.waitUntil(lambda: editor.preview_result is not None, timeout=5000)
+    kind = editor._editors["filter_kind"][0]
+    kind.setCurrentText("notch")
+    assert not editor._editors["low_fraction"][0].isEnabled()
+    assert editor._editors["notch_fraction"][0].isEnabled()
+    kind.setCurrentText("bandpass")
+    assert editor._editors["low_fraction"][0].value() == pytest.approx(0.12)
+    assert editor._editors["high_fraction"][0].value() == pytest.approx(0.42)
+    qtbot.waitUntil(lambda: editor.preview_result is not None and editor.preview_params["filter_kind"] == "bandpass", timeout=5000)
+    x, _y = editor.original_curve.getData()
+    assert x[0] == pytest.approx(_preview_slice().cts.index[0].timestamp())
+    ready = []
+    wrapper.params_applied.connect(lambda params, _broadcast: ready.append(params))
+    count = len(calls)
+    editor.apply_button.click()
+    assert ready and ready[0]["filter_kind"] == "bandpass"
+    assert len(calls) == count

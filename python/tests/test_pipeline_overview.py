@@ -5,7 +5,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea
+import pyqtgraph as pg
 
 from core.pipeline_layout import points_to_pixels, ruler_tick_multipliers
 from ui.widgets.pipeline_overview import ChannelOverviewWidget
@@ -54,3 +55,63 @@ def test_pipeline_ruler_widens_tick_and_label_spacing_at_low_zoom():
     assert points_to_pixels(grid_points * low_label, 1.0) >= 48.0
     assert low_tick > high_tick
     assert low_label > high_label
+
+
+def test_pyqtgraph_overview_tracks_visible_timeline(qtbot):
+    samples = np.sin(np.arange(10000, dtype=float) / 20)
+    scroll = QScrollArea()
+    scroll.resize(320, 100)
+    overview = ChannelOverviewWidget(samples, len(samples))
+    overview.set_zoom(1, 0.5)
+    scroll.setWidget(overview)
+    qtbot.addWidget(scroll)
+    scroll.show()
+    qtbot.waitUntil(lambda: overview.plot.isVisible())
+
+    assert isinstance(overview.curve, pg.PlotDataItem)
+    assert overview.plot.getPlotItem().buttonsHidden
+    assert overview.plot.width() <= scroll.viewport().width()
+    scroll.horizontalScrollBar().setValue(1200)
+    qtbot.waitUntil(lambda: overview.plot.x() == 1200)
+    left, right = overview.plot.getViewBox().viewRange()[0]
+    assert abs(left - 2400) < 1
+    assert abs(right - (1200 + overview.plot.width()) * 2) < 1
+    x, _ = overview.curve.getData()
+    assert x.min() >= left - 10
+    assert x.max() <= right + 10
+
+
+def test_pyqtgraph_overview_keeps_nan_gaps_and_baseline(qtbot):
+    samples = np.sin(np.arange(100, dtype=float) / 10)
+    samples[30:40] = np.nan
+    overview = ChannelOverviewWidget(samples, len(samples))
+    overview.set_zoom(1, 1)
+    overview.resize(100, 68)
+    qtbot.addWidget(overview)
+    overview.show()
+    qtbot.waitUntil(lambda: overview.curve.getData()[1] is not None)
+    assert np.isnan(overview.curve.getData()[1]).any()
+    overview.set_baseline_visible(True)
+    assert overview.baseline.isVisible()
+    overview.set_baseline_visible(False)
+    assert not overview.baseline.isVisible()
+
+
+def test_lod_retains_gap_when_bucket_also_contains_finite_values():
+    _app()
+    samples = np.sin(np.arange(100_000, dtype=float) / 10)
+    samples[50_001] = np.nan
+    overview = ChannelOverviewWidget(samples, len(samples))
+    overview.set_zoom(1, 0.002)
+    x, y = overview._visible_lod(0, 199)
+    assert np.any(np.isnan(y) & (x >= 49_500) & (x <= 50_001))
+    assert len(x) <= 5 * 200
+    overview.close()
+
+
+def test_pyqtgraph_overview_draws_isolated_finite_samples(qtbot):
+    overview = ChannelOverviewWidget(np.array([np.nan, 2.0, np.nan]), 3)
+    qtbot.addWidget(overview)
+    overview.show()
+    qtbot.waitUntil(lambda: len(overview.isolated_points.data) == 1)
+    assert overview.isolated_points.data[0]["y"] == 2.0

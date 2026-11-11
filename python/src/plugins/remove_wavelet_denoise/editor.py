@@ -1,15 +1,6 @@
 from __future__ import annotations
 
-"""小波多尺度去噪工具窗口。
-
-本工具用于：
-- 局部脉冲/尖峰去噪
-- 多尺度平滑降噪
-- 手动调节各细节层增益，像均衡器一样控制不同频段
-
-复杂的小波分解、阈值收缩和重构逻辑在 step_algorithms 中；
-本文件主要负责界面、局部区域选择、参数同步、预设导入导出和结果展示。
-"""
+"""全通道小波多尺度去噪界面，支持频带增益调整和预览。"""
 
 import argparse
 import os
@@ -28,6 +19,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -35,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QScrollArea,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -43,10 +36,11 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 from core.em_data import EMData
+from core.algorithms.wavelet import wavelet_full_channel_denoise
 from plugins.common.base_processor import BaseProcessorWidget
 from plugins.common.demo import DemoEMData, run_standalone_demo
 from plugins.common.region import RegionManagementMixin
-from plugins.common.step_algorithms import WaveletDenoiseResult, wavelet_multiscale_denoise
+from plugins.common.step_algorithms import WaveletDenoiseResult
 from plugins.common.plotting import ProcessingPlotWidget, StepPlotWidget
 from ui.widgets.gain_curve_editor import GainCurveEditor
 from utils.series import dti_to_numpy
@@ -149,6 +143,24 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
                 lines.append(f"{key} = {cls._toml_value(value)}")
         return "\n".join(lines) + "\n"
 
+    def apply_plugin_params(self, params: dict) -> None:
+        preset = dict(params.get("editor_state", {}))
+        preset.update({
+            "transform_kind": params.get("transform", "dwt"),
+            "wavelet": params.get("wavelet", "db4"),
+            "level": params.get("level", 6),
+            "level_policy": params.get("level_policy", "manual"),
+            "protect_period_seconds": params.get("protect_period_seconds", 3600.0),
+            "threshold_scale": params.get("threshold", 1.0),
+            "threshold_method": params.get("threshold_method", "universal"),
+            "padding_points": params.get("padding", 256),
+            "padding_unit": params.get("padding_unit", "points"),
+            "padding_seconds": params.get("padding_seconds", 0.0),
+            "mode": params.get("mode", "soft"),
+            "detail_gains": params.get("detail_gains", []),
+        })
+        self._apply_preset_dict(preset)
+
     def __init__(self, source, channel_name: str, parent=None):
         super().__init__(source, channel_name, parent)
 
@@ -162,7 +174,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.signal_plot_item = self.signal_plot_widget.getPlotItem()
         self.detail_plot_widget = ProcessingPlotWidget()
         self.detail_plot_item = self.detail_plot_widget.getPlotItem()
-        self.gain_curve_editor = GainCurveEditor(self)
+        self.gain_curve_editor = GainCurveEditor(self, maximum=2.0)
         self.auto_eq_preview_checkbox = QCheckBox("松手后自动预览")
         self.auto_eq_preview_checkbox.setChecked(True)
         self.analysis_tabs = QTabWidget(self)
@@ -214,6 +226,8 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.export_preset_btn = QPushButton("导出预设")
         self.import_preset_btn = QPushButton("导入预设")
         self.selection_status_label = QLabel("当前选中: 0 个采样点")
+        self.processing_status = QLabel("准备就绪；将处理整个通道。")
+        self.processing_status.setWordWrap(True)
         self.undo_btn = QPushButton("撤销")
         self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self.revert_btn = QPushButton("还原原始数据")
@@ -233,11 +247,12 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
 
     def _init_ui(self):
         instruction_label = QLabel(
-            "小波多尺度去噪: 先在主图框选局部异常区，再在局部窗口内做小波分解。\n"
-            "自动模式可做阈值收缩；频带 EQ 中可像调曲线一样拖动节点，分别调整各层增益。\n"
-            "窗口两端 NaN 会裁掉；最多插值 10 个连续 NaN，较长缺口请分段框选；运算后恢复 NaN。\n"
-            "图形操作：Ctrl+滚轮/中键拖动仅操作X轴，Shift+滚轮/中键拖动仅操作Y轴；"
-            "主图双击添加或移动局部区域，细节图双击自适应视图。"
+            "对整个通道进行小波去噪；调整参数并预览，在频带 EQ 中拖动节点可调整增益。"
+        )
+        instruction_label.setWordWrap(True)
+        instruction_label.setToolTip(
+            "连续不超过 10 点的缺失值会插值，较长缺口会自动分段；过短片段保持原样。"
+            "Ctrl 或 Shift 配合滚轮/中键拖动可分别操作 X 轴或 Y 轴。"
         )
 
         self.signal_plot_widget.getAxis("left").setStyle(tickLength=0)
@@ -259,8 +274,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.protect_period_spin.setSingleStep(60.0)
         self.protect_period_spin.setSuffix(" s")
         self.protect_period_spin.setValue(3600.0)
-        self.scope_combo.addItems(["局部选区", "全通道"])
-        self.scope_combo.setCurrentText("局部选区")
+        self.scope_combo.addItem("全通道")
         self.preset_combo.addItems(list(self.AUTO_PRESETS.keys()))
         self.preset_combo.setCurrentText("自定义")
         preset_notes = {
@@ -286,6 +300,10 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
                 self.preset_combo.setItemData(index, preset_notes[preset_name], Qt.ItemDataRole.ToolTipRole)
         self.mode_combo.addItems(["soft", "hard", "zero", "manual"])
         self.mode_combo.setCurrentText("soft")
+        for combo in (self.wavelet_combo, self.transform_combo, self.scope_combo,
+                      self.preset_combo, self.mode_combo):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
         self.threshold_method_combo.addItem("SureShrink（逐层自适应）", "sure")
         self.threshold_method_combo.addItem("通用阈值（兼容）", "universal")
         self.threshold_method_combo.setCurrentIndex(1)
@@ -304,77 +322,65 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.padding_seconds_spin.setSingleStep(10.0)
         self.padding_seconds_spin.setSuffix(" s")
         self.padding_seconds_spin.setValue(120.0)
-        self.global_gain_spin.setRange(0.0, 4.0)
+        self.global_gain_spin.setRange(0.0, 2.0)
         self.global_gain_spin.setDecimals(2)
         self.global_gain_spin.setSingleStep(0.1)
         self.global_gain_spin.setValue(1.0)
         for spin in (self.wp_low_gain_spin, self.wp_mid_gain_spin, self.wp_high_gain_spin):
-            spin.setRange(0.0, 4.0)
+            spin.setRange(0.0, 2.0)
             spin.setDecimals(2)
             spin.setSingleStep(0.1)
             spin.setValue(1.0)
 
         self.param_frame = QFrame(self)
         self.param_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        param_layout = QHBoxLayout(self.param_frame)
+        param_layout = QFormLayout(self.param_frame)
         param_layout.setContentsMargins(8, 6, 8, 6)
-        param_layout.addWidget(QLabel("小波多尺度去噪"))
-        param_layout.addSpacing(8)
-        param_layout.addWidget(QLabel("小波基："))
-        param_layout.addWidget(self.wavelet_combo)
-        param_layout.addWidget(QLabel("变换："))
-        param_layout.addWidget(self.transform_combo)
-        param_layout.addWidget(QLabel("分解层数："))
-        param_layout.addWidget(self.level_spin)
-        param_layout.addWidget(QLabel("处理范围："))
-        param_layout.addWidget(self.scope_combo)
-        param_layout.addWidget(QLabel("自动预设："))
-        param_layout.addWidget(self.preset_combo)
-        param_layout.addWidget(QLabel("模式："))
-        param_layout.addWidget(self.mode_combo)
-        param_layout.addWidget(self.preview_btn)
-        param_layout.addWidget(self.apply_btn)
+        param_layout.addRow(QLabel("<b>小波参数</b>"))
+        param_layout.addRow("小波基", self.wavelet_combo)
+        param_layout.addRow("变换", self.transform_combo)
+        param_layout.addRow("分解层数", self.level_spin)
+        param_layout.addRow("处理范围", QLabel("全通道"))
+        param_layout.addRow("自动预设", self.preset_combo)
+        param_layout.addRow("模式", self.mode_combo)
 
         self.strategy_frame = QFrame(self)
         self.strategy_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        strategy_layout = QHBoxLayout(self.strategy_frame)
+        strategy_layout = QFormLayout(self.strategy_frame)
         strategy_layout.setContentsMargins(8, 6, 8, 6)
-        strategy_layout.addWidget(QLabel("去噪策略"))
-        strategy_layout.addSpacing(8)
-        strategy_layout.addWidget(QLabel("阈值："))
-        strategy_layout.addWidget(self.threshold_method_combo)
-        strategy_layout.addWidget(QLabel("倍数："))
-        strategy_layout.addWidget(self.threshold_scale_spin)
-        strategy_layout.addWidget(QLabel("层数策略："))
-        strategy_layout.addWidget(self.level_policy_combo)
-        strategy_layout.addWidget(QLabel("保护周期(s)："))
-        strategy_layout.addWidget(self.protect_period_spin)
-        strategy_layout.addWidget(QLabel("边界扩展："))
-        strategy_layout.addWidget(self.padding_unit_combo)
-        strategy_layout.addWidget(self.padding_spin)
-        strategy_layout.addWidget(self.padding_seconds_spin)
-        strategy_layout.addStretch(1)
+        for combo in (self.threshold_method_combo, self.level_policy_combo, self.padding_unit_combo):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+        strategy_layout.addRow(QLabel("<b>去噪策略</b>"))
+        strategy_layout.addRow("阈值", self.threshold_method_combo)
+        strategy_layout.addRow("阈值倍数", self.threshold_scale_spin)
+        strategy_layout.addRow("层数策略", self.level_policy_combo)
+        strategy_layout.addRow("保护周期", self.protect_period_spin)
+        strategy_layout.addRow("扩展单位", self.padding_unit_combo)
+        strategy_layout.addRow("扩展采样点", self.padding_spin)
+        strategy_layout.addRow("扩展时间", self.padding_seconds_spin)
 
         self.gain_frame = QFrame(self)
         self.gain_frame.setFrameShape(QFrame.Shape.NoFrame)
-        self.gain_layout = QHBoxLayout(self.gain_frame)
+        self.gain_layout = QVBoxLayout(self.gain_frame)
         self.gain_layout.setContentsMargins(8, 6, 8, 6)
-        self.gain_layout.addWidget(QLabel("EQ 操作"))
-        self.gain_layout.addSpacing(8)
-        self.gain_layout.addWidget(QLabel("统一系数"))
-        self.gain_layout.addWidget(self.global_gain_spin)
-        self.gain_layout.addWidget(self.scale_gains_btn)
-        self.gain_layout.addWidget(self.propagate_gains_btn)
-        self.gain_layout.addWidget(self.wp_low_label)
-        self.gain_layout.addWidget(self.wp_low_gain_spin)
-        self.gain_layout.addWidget(self.wp_mid_label)
-        self.gain_layout.addWidget(self.wp_mid_gain_spin)
-        self.gain_layout.addWidget(self.wp_high_label)
-        self.gain_layout.addWidget(self.wp_high_gain_spin)
-        self.gain_layout.addWidget(self.apply_wp_groups_btn)
-        self.gain_layout.addWidget(self.reset_gains_btn)
-        self.gain_layout.addWidget(self.export_preset_btn)
-        self.gain_layout.addWidget(self.import_preset_btn)
+        eq_actions = QHBoxLayout()
+        eq_actions.addWidget(QLabel("统一系数"))
+        eq_actions.addWidget(self.global_gain_spin)
+        eq_actions.addWidget(self.scale_gains_btn)
+        eq_actions.addWidget(self.propagate_gains_btn)
+        eq_actions.addWidget(self.reset_gains_btn)
+        eq_actions.addWidget(self.export_preset_btn)
+        eq_actions.addWidget(self.import_preset_btn)
+        eq_actions.addStretch(1)
+        self.gain_layout.addLayout(eq_actions)
+        wp_actions = QHBoxLayout()
+        for control in (self.wp_low_label, self.wp_low_gain_spin, self.wp_mid_label,
+                        self.wp_mid_gain_spin, self.wp_high_label, self.wp_high_gain_spin,
+                        self.apply_wp_groups_btn):
+            wp_actions.addWidget(control)
+        wp_actions.addStretch(1)
+        self.gain_layout.addLayout(wp_actions)
         self.dynamic_gain_widget = QWidget(self.gain_frame)
         self.dynamic_gain_layout = QHBoxLayout(self.dynamic_gain_widget)
         self.dynamic_gain_layout.setContentsMargins(0, 0, 0, 0)
@@ -384,36 +390,37 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         # editor.  Keeping the widgets internal avoids changing the existing
         # detail_gains serialization contract.
         self.dynamic_gain_widget.hide()
-        self.gain_layout.addStretch(1)
 
         self.region_frame = QFrame(self)
+        self.region_frame.hide()
         self.region_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        region_layout = QHBoxLayout(self.region_frame)
+        region_layout = QGridLayout(self.region_frame)
         region_layout.setContentsMargins(8, 6, 8, 6)
-        region_layout.addWidget(QLabel("区域选择"))
-        region_layout.addSpacing(8)
-        region_layout.addWidget(self.add_region_btn)
-        region_layout.addWidget(self.remove_region_btn)
-        region_layout.addWidget(self.clear_region_btn)
-        region_layout.addWidget(self.selection_status_label)
-        region_layout.addStretch(1)
+        region_layout.addWidget(QLabel("<b>区域选择</b>"), 0, 0, 1, 2)
+        region_layout.addWidget(self.selection_status_label, 1, 0, 1, 2)
+        region_layout.addWidget(self.add_region_btn, 2, 0)
+        region_layout.addWidget(self.remove_region_btn, 2, 1)
+        region_layout.addWidget(self.clear_region_btn, 3, 0, 1, 2)
 
         self.action_frame = QFrame(self)
         self.action_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        action_layout = QHBoxLayout(self.action_frame)
+        action_layout = QVBoxLayout(self.action_frame)
         action_layout.setContentsMargins(8, 6, 8, 6)
-        action_layout.addWidget(QLabel("操作"))
-        action_layout.addSpacing(8)
-        action_layout.addWidget(self.undo_btn)
-        action_layout.addWidget(self.revert_btn)
+        preview_actions = QHBoxLayout()
+        preview_actions.addWidget(self.preview_btn)
+        preview_actions.addWidget(self.apply_btn)
+        action_layout.addLayout(preview_actions)
+        undo_actions = QHBoxLayout()
+        undo_actions.addWidget(self.undo_btn)
+        undo_actions.addWidget(self.revert_btn)
+        action_layout.addLayout(undo_actions)
         action_layout.addWidget(self.confirm_btn)
-        action_layout.addStretch(1)
 
         eq_layout = QVBoxLayout(self.eq_panel)
         eq_layout.setContentsMargins(6, 4, 6, 4)
         eq_header_layout = QHBoxLayout()
         eq_header_layout.setContentsMargins(0, 0, 0, 0)
-        eq_hint = QLabel("从低频到高频拖动节点；1.00 为原始幅度，0 表示移除该频带。")
+        eq_hint = QLabel("拖动节点调整各频带增益；曲线用于展示节点之间的变化。")
         eq_hint.setWordWrap(True)
         self.auto_eq_preview_checkbox.setToolTip(
             "拖动结束后自动按当前增益重新计算预览；数据较大时可取消勾选。"
@@ -437,16 +444,31 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.plot_splitter.setStretchFactor(1, 2)
         self.plot_splitter.setSizes([620, 260])
 
-        control_layout = QVBoxLayout()
+        controls = QWidget(self)
+        control_layout = QVBoxLayout(controls)
+        control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.addWidget(self.param_frame)
         control_layout.addWidget(self.strategy_frame)
-        control_layout.addWidget(self.region_frame)
-        control_layout.addWidget(self.action_frame)
+        control_layout.addStretch(1)
+        control_scroll = QScrollArea(self)
+        control_scroll.setWidgetResizable(True)
+        control_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        control_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        control_scroll.setWidget(controls)
+        sidebar = QWidget(self)
+        sidebar.setMinimumWidth(300)
+        sidebar.setMaximumWidth(380)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.addWidget(control_scroll, 1)
+        sidebar_layout.addWidget(self.processing_status)
+        sidebar_layout.addWidget(self.action_frame)
 
         layout = QGridLayout(self)
         layout.addWidget(instruction_label, 0, 0, 1, 2)
-        layout.addWidget(self.plot_splitter, 1, 0, 1, 2)
-        layout.addLayout(control_layout, 2, 0, 1, 2)
+        layout.addWidget(self.plot_splitter, 1, 0)
+        layout.addWidget(sidebar, 1, 1)
+        layout.setColumnStretch(0, 1)
 
     def _connect_signal(self):
         self.preview_btn.clicked.connect(self._preview_fit)
@@ -479,8 +501,6 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.gain_curve_editor.gain_changed.connect(self._on_eq_gain_changed)
         self.gain_curve_editor.editing_finished.connect(self._schedule_eq_preview)
         self.eq_preview_timer.timeout.connect(self._preview_fit)
-        self.signal_plot_widget.double_click_callback = self._add_or_move_region_from_x
-        self.signal_plot_widget.right_click_callback = self._handle_plot_right_click
 
     def _transform_kind(self) -> str:
         current = self.transform_combo.currentText()
@@ -549,7 +569,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
             label_prefix = "B" if self.transform_combo.currentText() == "Wavelet Packet" else "D"
             label = QLabel(f"{label_prefix}{level}")
             spin = QDoubleSpinBox()
-            spin.setRange(0.0, 4.0)
+            spin.setRange(0.0, 2.0)
             spin.setDecimals(2)
             spin.setSingleStep(0.1)
             spin.setValue(previous_values[level - 1] if level - 1 < len(previous_values) else 1.0)
@@ -940,12 +960,9 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self._log(f"已导入小波去噪预设: {filename}")
 
     def _processing_region(self) -> tuple[int, int] | None:
-        if self.scope_combo.currentText() == "全通道":
-            return 0, self.y_data.size - 1
-        if not self.selected_indices:
-            self._log("请先在上方主图中添加并调整连续局部区域")
+        if self.y_data is None or self.y_data.size < 2:
             return None
-        return int(min(self.selected_indices)), int(max(self.selected_indices))
+        return 0, self.y_data.size - 1
 
     def _sample_rate_hz(self) -> float:
         try:
@@ -1107,11 +1124,8 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
 
         preview_centered = self.last_result.corrected - reference_level
         self.preview_line.setData(self.x_data, preview_centered)
-        local_start, local_stop = self.last_result.local_window
-        self.local_left_line.setPos(float(self.x_data[local_start]))
-        self.local_right_line.setPos(float(self.x_data[local_stop]))
-        self.local_left_line.show()
-        self.local_right_line.show()
+        self.local_left_line.hide()
+        self.local_right_line.hide()
         self._update_detail_energy_plot(self.last_result)
 
     def _update_detail_energy_plot(self, result: WaveletDenoiseResult | None) -> None:
@@ -1192,19 +1206,20 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
     def _denoise_compute(args: dict) -> WaveletDenoiseResult:
         """纯计算：在 compute 池里执行，不碰任何 Qt 对象。"""
         y = args["y"]
-        region = args["region"]
         kwargs = {k: v for k, v in args.items() if k not in ("y", "region")}
-        return wavelet_multiscale_denoise(y, region, **kwargs)
+        return wavelet_full_channel_denoise(y, **kwargs)
 
     def _log_preview_summary(self, result: WaveletDenoiseResult):
         left, right = result.region
         local_start, local_stop = result.local_window
         local_before = self.y_data[local_start:local_stop + 1]
         local_after = result.corrected[local_start:local_stop + 1]
-        rms_before = float(np.sqrt(np.mean((local_before - np.mean(local_before)) ** 2)))
-        rms_after = float(np.sqrt(np.mean((local_after - np.mean(local_after)) ** 2)))
-        std_before = float(np.std(local_before))
-        std_after = float(np.std(local_after))
+        finite_before = local_before[np.isfinite(local_before)]
+        finite_after = local_after[np.isfinite(local_after)]
+        rms_before = float(np.std(finite_before)) if finite_before.size else float("nan")
+        rms_after = float(np.std(finite_after)) if finite_after.size else float("nan")
+        std_before = rms_before
+        std_after = rms_after
         jump_text = ""
         if left > 0 and right + 1 < self.y_data.size:
             before_left = np.nanmean(self.y_data[max(0, left - 40):left])
@@ -1258,6 +1273,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         if result is None:
             return
         self.last_result = result
+        self.processing_status.setText(f"预览完成：{result.message}")
         self._update_plot()
         self._log_preview_summary(result)
 
@@ -1277,10 +1293,15 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self._save_history()
         self.y_data = result.corrected.copy()
         self.last_result = result
+        self.processing_status.setText(f"已应用：{result.message}")
         self._update_plot()
         self._log_preview_summary(result)
         self._log("已将小波多尺度去噪结果应用到当前通道")
         self._log("")
+
+    def _on_heavy_failed(self, exc) -> None:
+        super()._on_heavy_failed(exc)
+        self.processing_status.setText(f"处理失败：{exc}")
 
 
 # ------------------------------------------------------------------

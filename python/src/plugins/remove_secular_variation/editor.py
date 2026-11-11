@@ -7,9 +7,11 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
+from base.qt_bridge import run as run_in_pool
 from core.algorithms.secular_variation import SecularVariationResult, remove_secular_variation_series
 from plugin_api import complete_params
 from plugins.common.plotting import StepPlotWidget
+from utils.series import dti_to_numpy
 from utils.theme import subtle_pen, transparent_legend_brush
 
 
@@ -51,7 +53,7 @@ class SecularVariationEditor(QtWidgets.QWidget):
         note = QtWidgets.QLabel(
             "去除缓慢背景变化（SV）：在固定间隔的锚点处计算局部均值，使用原 TS.m 的 7 点"
             "平滑核后以三次样条连成背景曲线。上图显示原始序列与背景，下图显示相减预览。"
-            "窗口和间隔均以采样点计；该操作适用于长时间序列，不是 Hankel-SVD。",
+            "对整个通道进行处理，窗口和间隔均以采样点计；该操作适用于长时间序列，不是 Hankel-SVD。",
             self,
         )
         note.setWordWrap(True)
@@ -121,26 +123,36 @@ class SecularVariationEditor(QtWidgets.QWidget):
         self.apply_button.setEnabled(False)
         self.baseline_curve.setData([], [])
         self.cleaned_curve.setData([], [])
+        self.status_label.setText("参数已变化，请重新预览。")
 
     def _start_preview(self) -> None:
         params = self._params()
         self._preview_generation += 1
         generation = self._preview_generation
+        source = self._source
         self.preview_button.setEnabled(False)
         self.apply_button.setEnabled(False)
         self.status_label.setText("正在估计平滑背景…")
 
         def compute():
-            return remove_secular_variation_series(self._source, **params)
+            return remove_secular_variation_series(source, **params)
 
         def complete(result) -> None:
-            if generation != self._preview_generation:
-                return
             self.preview_button.setEnabled(True)
+            if generation != self._preview_generation:
+                self.status_label.setText("参数已变化，请重新预览。")
+                return
             self._preview = result
             self._show_preview(result)
 
-        self._host.run_heavy(compute, complete, "预览缓慢背景变化")
+        def failed(exc) -> None:
+            self.preview_button.setEnabled(True)
+            if generation != self._preview_generation:
+                self.status_label.setText("参数已变化，请重新预览。")
+            else:
+                self.status_label.setText(f"预览失败：{exc}")
+
+        run_in_pool("compute", compute, on_done=complete, on_error=failed, owner=self)
 
     def _show_preview(self, result: SecularVariationResult) -> None:
         self.baseline_curve.setData(
@@ -153,9 +165,13 @@ class SecularVariationEditor(QtWidgets.QWidget):
         )
         self.apply_button.setEnabled(result.status == "applied")
         if result.status == "applied":
+            skipped = (
+                f"；{result.skipped_segments} 个有效数据段的锚点不足，保持原样"
+                if result.skipped_segments else ""
+            )
             self.status_label.setText(
                 f"预览完成：{result.valid_anchor_count}/{result.anchor_count} 个锚点有效；"
-                "原始 NaN 已保留。"
+                f"处理 {result.processed_segments} 个有效数据段{skipped}；原始 NaN 已保留。"
             )
         else:
             self.status_label.setText(
@@ -172,5 +188,5 @@ class SecularVariationEditor(QtWidgets.QWidget):
 
 def _time_values(index) -> np.ndarray:
     if hasattr(index, "asi8"):
-        return np.asarray(index.asi8, dtype=np.float64) / 1.0e9
+        return dti_to_numpy(index)
     return np.arange(len(index), dtype=np.float64)

@@ -49,6 +49,16 @@ class RemoveStepByWindow(BaseProcessorWidget):
     DEFAULT_AVG_WINDOW = DEFAULT_AVG_WINDOW
     DEFAULT_MAX_STEPS = DEFAULT_MAX_STEPS
 
+    def apply_plugin_params(self, params: dict) -> None:
+        controls = (
+            ("threshold", self.de_step_threshold),
+            ("window", self.avg_window_edit),
+            ("max_steps", self.max_steps_edit),
+        )
+        for name, control in controls:
+            if name in params:
+                control.setText(str(params[name]))
+
     def __init__(self, source, channel_name: str, parent=None):
         super().__init__(source, channel_name, parent)
 

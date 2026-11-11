@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from plugins.common.edit_codec import apply_operations, encode_edit
-from core.algorithms.wavelet import wavelet_multiscale_denoise
+from core.algorithms.wavelet import wavelet_full_channel_denoise, wavelet_multiscale_denoise
 from plugin_api import ParamSpec, PluginInfo, TransformResult
 
 
@@ -39,9 +39,11 @@ class WaveletDenoisePlugin:
             diagnostics = {"mode": "replay"}
         else:
             region = params["region"] or [0, max(0, source.size - 1)]
-            result = wavelet_multiscale_denoise(
-                source,
-                tuple(region),
+            full_channel = list(region) == [0, max(0, source.size - 1)]
+            denoise = wavelet_full_channel_denoise if full_channel else wavelet_multiscale_denoise
+            positional = (source,) if full_channel else (source, tuple(region))
+            result = denoise(
+                *positional,
                 transform_kind=str(params["transform"]),
                 wavelet_name=str(params["wavelet"]),
                 level=int(params["level"]),
@@ -62,7 +64,7 @@ class WaveletDenoisePlugin:
                 detail_gains=params["detail_gains"] or None,
             )
             corrected = result.corrected
-            diagnostics = {"mode": "auto", "changed_coefficients": result.changed_coefficients}
+            diagnostics = {"mode": "auto", "changed_coefficients": result.changed_coefficients, "message": result.message}
         return TransformResult(pd.Series(corrected, index=block.series.index, name=block.series.name), diagnostics)
 
     def create_editor(self, host, block, params):
@@ -88,6 +90,7 @@ class WaveletDenoisePlugin:
                 ),
                 "mode": editor.mode_combo.currentText(),
                 "detail_gains": editor._current_detail_gains(),
+                "editor_state": editor._state_to_preset_dict(),
                 "operations": [encode_edit(source_block.series.to_numpy(dtype=np.float64), result)],
             }
 

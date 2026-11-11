@@ -69,6 +69,33 @@ class BatchRunner:
                 if len(selection_index) == 0:
                     skipped.append(f"step {position} ({step.plugin}): empty time range")
                     continue
+                if (step.plugin == "remove_secular_variation" and step.time_range is not None
+                        and len(selection_index) != len(index)):
+                    raise ValueError("旧版局部缓慢背景处理会在边界产生阶跃；请重新导出全通道处理配方")
+                if step.plugin == "remove_step_baseline" and step.params.get("effect_to_end"):
+                    if not index.is_monotonic_increasing:
+                        raise ValueError("鲁棒基线去阶跃要求时间顺序递增")
+                    if step.time_range is not None:
+                        lower, upper = sorted(pd.Timestamp(value) for value in step.time_range)
+                        if index.tz is not None:
+                            lower = lower.tz_localize(index.tz) if lower.tzinfo is None else lower.tz_convert(index.tz)
+                            upper = upper.tz_localize(index.tz) if upper.tzinfo is None else upper.tz_convert(index.tz)
+                        if index[0] > lower or index[-1] < upper:
+                            skipped.append(f"step {position} ({step.plugin}): incomplete step time range")
+                            continue
+                    if isinstance(selection, slice):
+                        start, end = selection.start, selection.stop
+                    else:
+                        start, end = int(selection[0]), int(selection[-1]) + 1
+                    params = dict(step.params)
+                    params.update({"region": [start, end - 1], "operations": []})
+                    channel = pd.Series(current_values.copy(), index=index, name=name)
+                    result, _params = run_plugin_process(
+                        plugin, ChannelBlock(target.channel, channel, target.meta), params,
+                    )
+                    current_values[:] = result.series.to_numpy(dtype=np.float64, copy=False)
+                    diagnostics.append(dict(result.diagnostics))
+                    continue
                 # Plugins receive an isolated region copy so an implementation
                 # cannot mutate the batch working buffer through pandas.  The
                 # full channel itself is allocated only once per target.

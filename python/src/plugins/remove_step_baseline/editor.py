@@ -46,10 +46,43 @@ from utils.theme import subtle_pen, transparent_legend_brush
 class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
     """基于鲁棒基线拟合的去阶跃窗口。"""
 
+    def apply_plugin_params(self, params: dict) -> None:
+        controls = (
+            ("baseline_degree", self.base_degree_spin),
+            ("transition_degree", self.transition_degree_spin),
+            ("context_points", self.context_spin),
+        )
+        for name, control in controls:
+            if name in params:
+                control.setValue(int(params[name]))
+        if "loss" in params:
+            self.loss_combo.setCurrentText(str(params["loss"]))
+        pipeline_region = params.get("_pipeline_step_range")
+        if isinstance(pipeline_region, (list, tuple)) and len(pipeline_region) == 2:
+            self.pipeline_region = (int(pipeline_region[0]), int(pipeline_region[1]))
+            self.region_frame.hide()
+            self.signal_plot_widget.double_click_callback = None
+            self.signal_plot_widget.right_click_callback = None
+            self.instruction_label.setText(
+                "使用 Pipeline 中的 Block 作为阶跃过渡范围；校正会延续到通道末尾。"
+            )
+            left, right = self.pipeline_region
+            if self.x_data is not None and 0 <= left < right < self.x_data.size:
+                self.region_item = pg.LinearRegionItem(
+                    values=(float(self.x_data[left]), float(self.x_data[right])),
+                    movable=False,
+                    brush=pg.mkBrush(135, 206, 250, 55),
+                )
+                self.signal_plot_item.addItem(self.region_item)
+        else:
+            self._restore_region_indices(params.get("region"))
+
     def __init__(self, source, channel_name: str, parent=None):
         super().__init__(source, channel_name, parent)
 
         self.last_result: RobustBaselineStepResult | None = None
+        self.pipeline_region: tuple[int, int] | None = None
+        self._pipeline_applied = False
         self.selected_indices: list[int] = []
         self.log_messages: list[str] = []
 
@@ -79,6 +112,8 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self.revert_btn = QPushButton("还原原始数据")
         self.confirm_btn = QPushButton("确认")
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
 
         self._init_ui()
         self._connect_signal()
@@ -90,7 +125,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
 
     def _init_ui(self):
         """构建说明文字、参数区、区域选择区和双图布局。"""
-        instruction_label = QLabel(
+        self.instruction_label = QLabel(
             "鲁棒基线去阶跃: 先框选连续阶跃过渡区，再用基线多项式 + 饱和过渡项做 robust 拟合，"
             "最后只减去阶跃校正项。\n"
             "适合经过多个采样点连续上升/下降、但整体趋势仍然单调的阶跃。"
@@ -167,9 +202,10 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         control_layout.addWidget(self.action_frame)
 
         layout = QGridLayout(self)
-        layout.addWidget(instruction_label, 0, 0, 1, 2)
+        layout.addWidget(self.instruction_label, 0, 0, 1, 2)
         layout.addWidget(self.plot_splitter, 1, 0, 1, 2)
         layout.addLayout(control_layout, 2, 0, 1, 2)
+        layout.addWidget(self.status_label, 3, 0, 1, 2)
 
     def _connect_signal(self):
         """连接预览、应用、区域选择和撤销等交互行为。"""
@@ -184,6 +220,9 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         self.confirm_btn.clicked.connect(self._confirm_and_close)
         self.signal_plot_widget.double_click_callback = self._add_or_move_region_from_x
         self.signal_plot_widget.right_click_callback = self._handle_plot_right_click
+        for control in (self.base_degree_spin, self.transition_degree_spin, self.context_spin):
+            control.valueChanged.connect(self._invalidate_pipeline_result)
+        self.loss_combo.currentTextChanged.connect(self._invalidate_pipeline_result)
 
     def _init_plot(self):
         """初始化主图中的原始/当前/基线/校正后曲线，以及下方校正项曲线。"""
@@ -270,6 +309,8 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
     # ------------------------------------------------------------------
 
     def _read_region(self) -> tuple[int, int] | None:
+        if self.pipeline_region is not None:
+            return self.pipeline_region
         if not self.selected_indices:
             self._log("请先在上方主图中添加并调整连续阶跃区域")
             return None
@@ -283,8 +324,14 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         region = self._read_region()
         if region is None:
             return None
+        if self.pipeline_region is not None and (region[0] < 2 or region[1] >= self.y_data.size - 1):
+            self.status_label.setText("请调整 Pipeline Block，在过渡区两侧留出有效数据后再预览。")
+            return None
         return {
-            "y": self.y_data,
+            "y": (
+                self._source.to_numpy(dtype=np.float64, copy=True)
+                if self.pipeline_region is not None else self.y_data
+            ),
             "region": region,
             "baseline_degree": int(self.base_degree_spin.value()),
             "transition_degree": int(self.transition_degree_spin.value()),
@@ -314,6 +361,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         if result is None:
             return
         self.last_result = result
+        self.status_label.setText(f"预览完成；阶跃校正量 {result.step_height:.6g} 将延续到通道末尾。")
         self._update_plot()
         self._log_preview_summary(result)
 
@@ -354,10 +402,39 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         self._save_history()
         self.y_data = result.corrected.copy()
         self.last_result = result
+        self._pipeline_applied = True
+        self.status_label.setText(f"已应用校正；阶跃校正量 {result.step_height:.6g} 延续到通道末尾。")
         self._update_plot()
         self._log_preview_summary(result)
         self._log("已将鲁棒基线去阶跃结果应用到当前通道")
         self._log("")
+
+    def _on_heavy_failed(self, exc) -> None:
+        super()._on_heavy_failed(exc)
+        self.status_label.setText(f"处理失败：{exc}。请确保 Block 两侧有足够的有效数据。")
+
+    def _invalidate_pipeline_result(self, *_args) -> None:
+        if self.pipeline_region is not None:
+            self._pipeline_applied = False
+            self.last_result = None
+            self._update_plot()
+            self.status_label.setText("参数已改变，请重新预览并应用校正。")
+
+    def _undo(self) -> None:
+        super()._undo()
+        if self.pipeline_region is not None:
+            self._pipeline_applied = False
+
+    def _revert(self) -> None:
+        super()._revert()
+        if self.pipeline_region is not None:
+            self._pipeline_applied = False
+
+    def _confirm_and_close(self) -> None:
+        if self.pipeline_region is not None and not self._pipeline_applied:
+            self.status_label.setText("请先应用校正，再确认返回 Pipeline。")
+            return
+        super()._confirm_and_close()
 
 
 # ------------------------------------------------------------------

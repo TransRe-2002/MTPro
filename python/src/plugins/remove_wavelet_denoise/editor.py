@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""全通道小波多尺度去噪界面，支持频带增益调整和预览。"""
+"""小波多尺度去噪界面，处理传入的完整数据区间。"""
 
 import argparse
 import os
@@ -226,7 +226,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.export_preset_btn = QPushButton("导出预设")
         self.import_preset_btn = QPushButton("导入预设")
         self.selection_status_label = QLabel("当前选中: 0 个采样点")
-        self.processing_status = QLabel("准备就绪；将处理整个通道。")
+        self.processing_status = QLabel("准备就绪；将处理全部输入数据。")
         self.processing_status.setWordWrap(True)
         self.undo_btn = QPushButton("撤销")
         self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
@@ -247,7 +247,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
 
     def _init_ui(self):
         instruction_label = QLabel(
-            "对整个通道进行小波去噪；调整参数并预览，在频带 EQ 中拖动节点可调整增益。"
+            "对输入数据整体进行小波去噪（Pipeline 中为当前 Block）；调整参数并预览。"
         )
         instruction_label.setWordWrap(True)
         instruction_label.setToolTip(
@@ -340,7 +340,6 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         param_layout.addRow("小波基", self.wavelet_combo)
         param_layout.addRow("变换", self.transform_combo)
         param_layout.addRow("分解层数", self.level_spin)
-        param_layout.addRow("处理范围", QLabel("全通道"))
         param_layout.addRow("自动预设", self.preset_combo)
         param_layout.addRow("模式", self.mode_combo)
 
@@ -700,7 +699,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.remove_region_btn.setEnabled(is_local)
         self.clear_region_btn.setEnabled(is_local)
         if not is_local:
-            self.selection_status_label.setText(f"当前范围: 全通道 ({self.y_data.size} 个采样点)")
+            self.selection_status_label.setText(f"当前范围: 全部输入数据 ({self.y_data.size} 个采样点)")
         elif self.region_item is None:
             self.selection_status_label.setText("当前选中: 0 个采样点")
         else:
@@ -1296,7 +1295,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.processing_status.setText(f"已应用：{result.message}")
         self._update_plot()
         self._log_preview_summary(result)
-        self._log("已将小波多尺度去噪结果应用到当前通道")
+        self._log("已将小波多尺度去噪结果应用到当前输入数据")
         self._log("")
 
     def _on_heavy_failed(self, exc) -> None:

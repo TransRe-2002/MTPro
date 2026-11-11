@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QMdiArea, QMdiSubWindow, QWidget
 
 from base.data_manager import DataManager
-from output_tools.station_data import station_data_package
+from output_tools.station_data import station_data_package, station_summaries
 from ui.tools import registry as tool_registry
+
+
+class _StationPopupRefresh(QObject):
+    def __init__(self, host, widget):
+        super().__init__(widget)
+        self.host = host
+        self.widget = widget
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Show:
+            self.host._refresh_station_choices(self.widget)
+        return False
 
 
 def _mdi_target_size(
@@ -36,6 +48,7 @@ class StationOutputHost(QWidget):
         self.mdi_area = QMdiArea(self)
 
         if self.data_manager is not None:
+            self.data_manager.data_added.connect(self._on_stations_changed)
             self.data_manager.data_changed.connect(self._on_data_changed)
             self.data_manager.data_removed.connect(self._on_data_removed)
             self.data_manager.data_restored.connect(self._on_data_restored)
@@ -91,6 +104,12 @@ class StationOutputHost(QWidget):
             data_requested.connect(self._provide_station_data)
         self.station_data_ready.connect(widget._on_data_ready)
         self._provide_station_data(data_id, "")
+        popup_refresh = _StationPopupRefresh(self, widget)
+        widget._station_popup_refresh = popup_refresh
+        for name in ("station_combo", "magnetic_station_combo", "local_station_combo", "remote_station_combo"):
+            combo = getattr(widget, name, None)
+            if combo is not None:
+                combo.view().installEventFilter(popup_refresh)
         return window
 
     def present_window(self, window: QMdiSubWindow | None) -> None:
@@ -119,7 +138,9 @@ class StationOutputHost(QWidget):
             self._provide_station_data(data_id, "")
 
     def _on_data_changed(self, data_id: int, structural: bool) -> None:
-        del structural
+        if structural:
+            for window in self.mdi_area.subWindowList():
+                self._refresh_station_choices(window.widget())
         self.invalidate_data(data_id)
 
     def _on_data_restored(self, data_id: int, channel: str | None) -> None:
@@ -131,6 +152,54 @@ class StationOutputHost(QWidget):
 
     def _on_data_removed(self, data_id: int) -> None:
         self._package_cache.pop(data_id, None)
+        self._on_stations_changed(data_id)
+
+    def _on_stations_changed(self, _data_id: int) -> None:
+        self._package_cache.clear()
+        for window in self.mdi_area.subWindowList():
+            self._refresh_station_choices(window.widget())
+
+    def _refresh_station_choices(self, widget: QWidget) -> None:
+        """Update station selectors without fetching waveform data or changing valid choices."""
+        if self.data_manager is None:
+            return
+        stations = station_summaries(self.data_manager)
+        cross_station = hasattr(widget, "magnetic_station_combo")
+        remote = hasattr(widget, "local_station_combo")
+        choices = []
+        if remote:
+            choices = [
+                (widget.local_station_combo, lambda s: s['has_electric'] and s['has_magnetic'], '_local_pkg'),
+                (widget.remote_station_combo, lambda s: s['has_magnetic'] and s['id'] != widget.local_station_combo.currentData(), '_remote_pkg'),
+            ]
+        elif cross_station:
+            choices = [
+                (widget.station_combo, lambda s: s['has_electric'], '_pkg'),
+                (widget.magnetic_station_combo, lambda s: s['has_magnetic'], '_magnetic_pkg'),
+            ]
+        elif hasattr(widget, "station_combo"):
+            choices = [(widget.station_combo, lambda s: s['has_magnetic'], '_pkg')]
+        invalidated = False
+        for combo, eligible, package_name in choices:
+            previous = combo.currentData()
+            blocked = combo.blockSignals(True)
+            combo.clear()
+            combo.setPlaceholderText("请选择台站")
+            for station in stations:
+                if eligible(station):
+                    combo.addItem(f"#{station['id']} {station['name']}", station['id'])
+            index = combo.findData(previous) if previous is not None else -1
+            combo.setCurrentIndex(index)
+            combo.blockSignals(blocked)
+            if previous is not None and index < 0:
+                setattr(widget, package_name, {})
+                if package_name in ('_pkg', '_local_pkg'):
+                    widget._data_id = 0
+                invalidated = True
+        if invalidated:
+            widget._cancel_estimation()
+            widget.save_preview_btn.setEnabled(False)
+            widget.status_label.setText("所选台站已移除或不再满足通道要求，请重新选择。")
 
     def _provide_station_data(self, data_id: int, channel: str = "") -> None:
         if self.data_manager is None:

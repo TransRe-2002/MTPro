@@ -911,6 +911,7 @@ class RemoteReferenceWidget(QWidget):
         self._mark_parameters_changed()
         new_id = self.local_station_combo.currentData()
         if new_id is not None:
+            self._data_id = new_id
             self.data_requested.emit(new_id, "")
         # UI 更新由 _on_data_ready → _apply_local_station_data 完成
 

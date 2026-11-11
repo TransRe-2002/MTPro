@@ -94,8 +94,8 @@ def test_linked_group_creates_one_independent_block_per_channel(qtbot):
     })
     source_block = PipelineBlock(
         tool_id="remove_wavelet_denoise",
-        start=0,
-        end=12,
+        start=2,
+        end=9,
         params=params,
         status="configured",
     )
@@ -116,7 +116,7 @@ def test_linked_group_creates_one_independent_block_per_channel(qtbot):
     assert "operations" not in group.shared_params
 
     for pipeline, _layer, block in members:
-        assert (block.start, block.end) == (0, 12)
+        assert (block.start, block.end) == (2, 9)
         assert block.input_slice is None
         assert block.output_slice is None
         if pipeline.channel == "Ex":
@@ -577,4 +577,66 @@ def test_unchanged_linked_params_do_not_show_detach_prompt(qtbot):
         )
 
     question.assert_not_called()
+    widget.close()
+
+
+def test_moving_linked_wavelet_blocks_discards_local_edits(qtbot):
+    widget, data_id = _linked_widget(qtbot)
+    pipeline = widget._find_pipeline(data_id, 'Ex')
+    params = widget._default_params_for_tool('remove_wavelet_denoise')
+    params.update({'wavelet': 'db6', 'region': [0, 4],
+                   'operations': [{'delta_runs': [[0, [1.0]]]}]})
+    block = PipelineBlock(tool_id='remove_wavelet_denoise', start=2, end=7,
+                          params=params, status='ready')
+    pipeline.layers[0].blocks.append(block)
+    widget._set_block_linked(block.block_id, params, linked=True)
+    members = widget._group_members(block.settings_group_id)
+    for _, _, member in members:
+        member.params['operations'] = [{'delta_runs': [[0, [2.0]]]}]
+        member.params['region'] = [0, 4]
+    block.start, block.end = 4, 9
+    widget._on_block_geometry_changed(block.block_id)
+    qtbot.wait(50)
+    for _, _, member in members:
+        assert (member.start, member.end) == (4, 9)
+        assert member.status == 'empty'
+        assert member.params['wavelet'] == 'db6'
+        assert member.params['operations'] == [] and member.params['region'] == []
+        assert member.block_id not in widget._plugin_tasks
+
+
+def test_region_editor_has_one_link_control_and_syncs_deleted_times(qtbot):
+    from ui.widgets.plugin_editor import PluginSliceEditor
+
+    widget, data_id = _linked_widget(qtbot)
+    pipeline = widget._find_pipeline(data_id, 'Ex')
+    block = PipelineBlock(tool_id='remove_region', start=1, end=10, params={'time_ranges': []}, status='empty')
+    pipeline.layers[0].blocks.append(block)
+    widget._open_interactive_editor(pipeline, pipeline.layers[0], block)
+    dialog = widget._editor_dialogs[-1]
+    wrapper = dialog.findChild(PluginSliceEditor)
+    editor = wrapper._editor.editor
+    assert editor.sync_checkbox.isHidden()
+    assert editor.all_data_checkbox.isHidden()
+    controls = [checkbox for checkbox in dialog.findChildren(QCheckBox)
+                if checkbox.text() == PIPELINE_LINK_ALL_TEXT and not checkbox.isHidden()]
+    assert len(controls) == 1
+    controls[0].setChecked(True)
+    source = editor.plot_widget.y_data.copy()
+    source[2:4] = np.nan
+    editor.result_signal.emit('Ex', source)
+    qtbot.waitUntil(lambda: len(widget._group_members(block.settings_group_id)) == 3, timeout=10000)
+    members = widget._group_members(block.settings_group_id)
+    qtbot.waitUntil(lambda: all(item.status == 'ready' for _, _, item in members), timeout=10000)
+    for pipeline, _, member in members:
+        assert member.params['time_ranges'] == block.params['time_ranges']
+        preview = widget._compose_channel_preview(data_id, pipeline.channel, update_status=False)
+        assert np.isnan(preview[3:5]).all()
+        assert np.isfinite(preview[[2, 5]]).all()
+        assert np.isfinite(widget.data_manager.get(data_id).get_channel_series(pipeline.channel)).all()
+    updated = {'time_ranges': [[widget._channel_series(data_id, 'Ex').index[6].isoformat(),
+                                widget._channel_series(data_id, 'Ex').index[7].isoformat()]]}
+    widget._set_block_linked(block.block_id, updated, linked=True)
+    for _, _, member in members:
+        assert member.params['time_ranges'] == updated['time_ranges']
     widget.close()

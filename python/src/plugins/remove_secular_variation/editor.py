@@ -8,7 +8,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
 from base.qt_bridge import run as run_in_pool
-from core.algorithms.secular_variation import SecularVariationResult, remove_secular_variation_series
+from core.algorithms.secular_variation import SecularVariationResult, remove_local_secular_variation_series, remove_secular_variation_series
 from plugin_api import complete_params
 from plugins.common.plotting import StepPlotWidget
 from utils.series import dti_to_numpy
@@ -28,6 +28,7 @@ class SecularVariationEditor(QtWidgets.QWidget):
         self._x_values = _time_values(block.series.index)
 
         values = complete_params(host.plugin.info, params)
+        self._region = values.get("_pipeline_step_range")
         self.window_spin = QtWidgets.QSpinBox(self)
         self.window_spin.setRange(1, 100_000_000)
         self.window_spin.setValue(int(values["smoothing_window_points"]))
@@ -41,6 +42,8 @@ class SecularVariationEditor(QtWidgets.QWidget):
         self.valid_fraction_spin.setValue(float(values["min_valid_fraction"]))
 
         self.preview_button = QtWidgets.QPushButton("预览平滑背景", self)
+        self.block_view_button = QtWidgets.QPushButton("查看区间", self)
+        self.full_view_button = QtWidgets.QPushButton("查看全序列", self)
         self.apply_button = QtWidgets.QPushButton("应用背景相减", self)
         self.apply_button.setEnabled(False)
         self.status_label = QtWidgets.QLabel("调整参数后预览；不会填补缺失值。", self)
@@ -53,7 +56,10 @@ class SecularVariationEditor(QtWidgets.QWidget):
         note = QtWidgets.QLabel(
             "去除缓慢背景变化（SV）：在固定间隔的锚点处计算局部均值，使用原 TS.m 的 7 点"
             "平滑核后以三次样条连成背景曲线。上图显示原始序列与背景，下图显示相减预览。"
-            "对整个通道进行处理，窗口和间隔均以采样点计；该操作适用于长时间序列，不是 Hankel-SVD。",
+            "蓝色区域为背景估计区间；区间两侧延续边界校正量。可切换查看区间或全序列。"
+            "窗口和间隔均以采样点计。" if self._region is not None else
+            "去除缓慢背景变化（SV）：在固定间隔的锚点处计算局部均值，使用原 TS.m 的 7 点"
+            "平滑核后以三次样条连成背景曲线。上图显示原始序列与背景，下图显示相减预览。",
             self,
         )
         note.setWordWrap(True)
@@ -65,6 +71,9 @@ class SecularVariationEditor(QtWidgets.QWidget):
         controls = QtWidgets.QHBoxLayout()
         controls.addLayout(form)
         controls.addStretch(1)
+        if self._region is not None:
+            controls.addWidget(self.block_view_button)
+            controls.addWidget(self.full_view_button)
         controls.addWidget(self.preview_button)
         controls.addWidget(self.apply_button)
 
@@ -78,6 +87,8 @@ class SecularVariationEditor(QtWidgets.QWidget):
     def _connect_signals(self) -> None:
         self.preview_button.clicked.connect(self._start_preview)
         self.apply_button.clicked.connect(self._apply)
+        self.block_view_button.clicked.connect(self._show_block_range)
+        self.full_view_button.clicked.connect(self._show_full_range)
         for control in (self.window_spin, self.spacing_spin, self.valid_fraction_spin):
             control.valueChanged.connect(self._invalidate_preview)
 
@@ -109,13 +120,45 @@ class SecularVariationEditor(QtWidgets.QWidget):
         self.source_plot.addItem(self.baseline_curve)
         self.cleaned_plot.addItem(self.cleaned_curve)
         self.cleaned_plot.setXLink(self.source_plot)
+        if self._region is not None:
+            start, end = map(int, self._region)
+            if 0 <= start <= end < len(self._x_values):
+                for plot in (self.source_plot, self.cleaned_plot):
+                    area = pg.LinearRegionItem(
+                        values=(self._x_values[start], self._x_values[end]),
+                        movable=False, brush=pg.mkBrush(70, 130, 220, 30),
+                        pen=pg.mkPen(70, 130, 220, 130),
+                    )
+                    area.setZValue(-10)
+                    plot.addItem(area, ignoreBounds=True)
+                    plot.getViewBox().setAutoVisible(y=True)
+                self._show_block_range()
+
+    def _show_block_range(self) -> None:
+        if self._region is None:
+            return
+        start, end = map(int, self._region)
+        if not (0 <= start <= end < len(self._x_values)):
+            return
+        left, right = float(self._x_values[start]), float(self._x_values[end])
+        if left == right:
+            left, right = left - 0.5, right + 0.5
+        self.source_plot.setXRange(left, right, padding=0.1)
+
+    def _show_full_range(self) -> None:
+        if len(self._x_values) < 2:
+            return
+        self.source_plot.setXRange(float(self._x_values[0]), float(self._x_values[-1]), padding=0.02)
 
     def _params(self) -> dict[str, int | float]:
-        return {
+        params = {
             "smoothing_window_points": int(self.window_spin.value()),
             "anchor_spacing_points": int(self.spacing_spin.value()),
             "min_valid_fraction": float(self.valid_fraction_spin.value()),
         }
+        if self._region is not None:
+            params.update({"region": list(self._region), "effect_both_sides": True})
+        return params
 
     def _invalidate_preview(self, _value=None) -> None:
         self._preview = None
@@ -135,6 +178,9 @@ class SecularVariationEditor(QtWidgets.QWidget):
         self.status_label.setText("正在估计平滑背景…")
 
         def compute():
+            if params.get("effect_both_sides"):
+                options = {key: value for key, value in params.items() if key not in ("region", "effect_both_sides")}
+                return remove_local_secular_variation_series(source, tuple(params["region"]), **options)
             return remove_secular_variation_series(source, **params)
 
         def complete(result) -> None:

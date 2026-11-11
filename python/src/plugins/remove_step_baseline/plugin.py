@@ -33,11 +33,11 @@ class StepBaselinePlugin:
         else:
             region = params["region"]
             if params["effect_to_end"] and (not isinstance(region, (list, tuple)) or len(region) != 2):
-                raise ValueError("全通道阶跃校正需要指定有效的 Block 过渡范围")
+                raise ValueError("全通道阶跃校正需要指定有效的过渡区间")
             if params["effect_to_end"]:
                 left, right = (int(value) for value in region)
                 if left < 2 or right <= left or right >= source.size - 1:
-                    raise ValueError("Block 过渡范围两侧必须留有有效数据")
+                    raise ValueError("过渡区间两侧必须留有有效数据")
             if not region:
                 finite = source[np.isfinite(source)]
                 index = int(np.argmax(np.abs(np.diff(finite)))) if finite.size > 1 else 0

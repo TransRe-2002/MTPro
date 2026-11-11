@@ -69,12 +69,13 @@ class BatchRunner:
                 if len(selection_index) == 0:
                     skipped.append(f"step {position} ({step.plugin}): empty time range")
                     continue
-                if (step.plugin == "remove_secular_variation" and step.time_range is not None
-                        and len(selection_index) != len(index)):
-                    raise ValueError("旧版局部缓慢背景处理会在边界产生阶跃；请重新导出全通道处理配方")
-                if step.plugin == "remove_step_baseline" and step.params.get("effect_to_end"):
+                if (step.plugin == "remove_secular_variation" and not step.params.get("effect_both_sides")
+                        and step.time_range is not None and len(selection_index) != len(index)):
+                    raise ValueError("旧版局部缓慢背景处理可能在边界产生阶跃；请重新确认并导出配方")
+                if ((step.plugin == "remove_step_baseline" and step.params.get("effect_to_end"))
+                        or (step.plugin == "remove_secular_variation" and step.params.get("effect_both_sides"))):
                     if not index.is_monotonic_increasing:
-                        raise ValueError("鲁棒基线去阶跃要求时间顺序递增")
+                        raise ValueError("全时序校正要求时间顺序递增")
                     if step.time_range is not None:
                         lower, upper = sorted(pd.Timestamp(value) for value in step.time_range)
                         if index.tz is not None:
@@ -88,7 +89,9 @@ class BatchRunner:
                     else:
                         start, end = int(selection[0]), int(selection[-1]) + 1
                     params = dict(step.params)
-                    params.update({"region": [start, end - 1], "operations": []})
+                    params.update({"region": [start, end - 1]})
+                    if step.plugin == "remove_step_baseline":
+                        params["operations"] = []
                     channel = pd.Series(current_values.copy(), index=index, name=name)
                     result, _params = run_plugin_process(
                         plugin, ChannelBlock(target.channel, channel, target.meta), params,

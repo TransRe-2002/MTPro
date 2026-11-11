@@ -25,7 +25,11 @@ def default_impedance_result_name(payload: dict, method: str) -> str:
     local = str(payload.get("station_name") or "STATION")
     remote = str(payload.get("remote_station_name") or "")
     station = f"{local}←{remote}" if remote else local
-    method_label = "RR" if method == "remote reference" else "Robust"
+    method_label = {"remote reference": "RR", "cross-station impedance": "跨台站"}.get(method, "Robust")
+    if method == "cross-station impedance":
+        magnetic = str(payload.get("parameters", {}).get("magnetic_station_name") or "")
+        if magnetic:
+            station = f"{local}←{magnetic}"
     start = _time_label(payload.get("range_start"))
     end = _time_label(payload.get("range_end"))
     return f"{station} {method_label}" + (f" {start}–{end}" if start and end else "")

@@ -93,11 +93,9 @@ MIN_BLOCK_SPAN = 100
 PIPELINE_BLOCK_CLIPBOARD_MIME = "application/x-mtpro-pipeline-block"
 READY_BY_DEFAULT_INTERACTIVE_TOOLS = frozenset({"remove_spike", "remove_region"})
 GLOBAL_TIME_TOOL_IDS = frozenset({
-    "demean", "detrend", "kp_selection", "remove_wavelet_denoise",
-    "remove_secular_variation",
+    "demean", "detrend", "kp_selection",
 })
 GLOBAL_RANGE_ERROR = "公共时间范围未覆盖整个通道，请将该通道放在独立的 Pipeline 中处理。"
-LEGACY_WAVELET_RANGE_ERROR = "旧小波 Block 的范围不是整个通道，请删除后重新创建。"
 LEGACY_SV_RANGE_ERROR = "旧缓慢背景 Block 的范围不是整个通道，请删除后重新创建。"
 LOCAL_SETTING_KEYS = frozenset({"indices", "operations", "region", "time_ranges"})
 TIMESTAMP_INDEX_TOOLS = frozenset({"remove_spike", "remove_step_diff"})
@@ -201,8 +199,12 @@ def is_suffix_effect_tool(tool_id: str) -> bool:
     return tool_registry.canonical_id(tool_id) == "remove_step_baseline"
 
 
+def is_both_sides_effect_tool(tool_id: str) -> bool:
+    return tool_registry.canonical_id(tool_id) == "remove_secular_variation"
+
+
 def requires_full_channel(tool_id: str) -> bool:
-    return is_global_time_tool(tool_id) or is_suffix_effect_tool(tool_id)
+    return is_global_time_tool(tool_id) or is_suffix_effect_tool(tool_id) or is_both_sides_effect_tool(tool_id)
 
 
 class PipelineTrackWidget(QWidget):
@@ -1340,7 +1342,7 @@ class DataProcessPipelineWidget(QWidget):
                 pipeline.baseline_snapshot = current_snapshot
                 for layer in pipeline.layers:
                     for block in layer.blocks:
-                        self._invalidate_block_cache(block, "time window changed; reopen editor to refresh result")
+                        self._invalidate_geometry_cache(block, "time window changed; reopen editor to refresh result")
 
             for layer in pipeline.layers:
                 normalized_blocks: list[PipelineBlock] = []
@@ -1348,7 +1350,7 @@ class DataProcessPipelineWidget(QWidget):
                     if data_len <= 0:
                         self._invalidate_block_cache(block, "channel has no samples in the common time window")
                         continue
-                    if is_suffix_effect_tool(block.tool_id):
+                    if is_suffix_effect_tool(block.tool_id) or is_both_sides_effect_tool(block.tool_id):
                         full_series = self._channel_series(pipeline.data_id, pipeline.channel)
                         current_series = self._channel_slice(pipeline.data_id, pipeline.channel)
                         if full_series is None or not current_series.index.equals(full_series.index):
@@ -1366,18 +1368,6 @@ class DataProcessPipelineWidget(QWidget):
                             block.status = "error"
                             normalized_blocks.append(block)
                             continue
-                        if (self._canonical_tool_id(block.tool_id) == "remove_wavelet_denoise"
-                                and (block.start != 0 or block.end != data_len)):
-                            self._invalidate_block_cache(block, LEGACY_WAVELET_RANGE_ERROR)
-                            block.status = "error"
-                            normalized_blocks.append(block)
-                            continue
-                        if (self._canonical_tool_id(block.tool_id) == "remove_secular_variation"
-                                and (block.start != 0 or block.end != data_len)):
-                            self._invalidate_block_cache(block, LEGACY_SV_RANGE_ERROR)
-                            block.status = "error"
-                            normalized_blocks.append(block)
-                            continue
                         if block.last_summary == GLOBAL_RANGE_ERROR:
                             self._invalidate_block_cache(block, "全通道范围已恢复，请重新确认处理结果。")
                         if block.start != 0 or block.end != data_len:
@@ -1389,8 +1379,11 @@ class DataProcessPipelineWidget(QWidget):
                             )
                         normalized_blocks.append(block)
                         continue
+                    previous_range = (block.start, block.end)
                     block.start = max(0, min(block.start, data_len))
                     block.end = max(block.start, min(block.end, data_len))
+                    if (block.start, block.end) != previous_range:
+                        self._invalidate_geometry_cache(block, "block range changed; reopen editor to refresh result")
                     if block.end <= block.start:
                         self._invalidate_block_cache(block, "block is outside the common time window")
                         continue
@@ -1878,7 +1871,8 @@ class DataProcessPipelineWidget(QWidget):
         self._plugin_tasks.pop(block.block_id, None)
         block.input_slice = None
         block.output_slice = None
-        if is_suffix_effect_tool(block.tool_id) and not block.params.get("effect_to_end"):
+        if ((is_suffix_effect_tool(block.tool_id) and not block.params.get("effect_to_end"))
+                or (is_both_sides_effect_tool(block.tool_id) and not block.params.get("effect_both_sides"))):
             block.status = "empty"
         elif tool_registry.get_plugin(block.tool_id) is not None and block.params:
             block.status = "stale"
@@ -1932,7 +1926,7 @@ class DataProcessPipelineWidget(QWidget):
             return
         pipeline, layer, block = found
         reason = "range/lane changed; reopen editor to refresh result"
-        self._invalidate_block_cache(block, reason)
+        self._invalidate_geometry_cache(block, reason)
         if block.settings_group_id:
             source_layer_index = pipeline.layers.index(layer)
             for target_pipeline, target_layer, target_block in self._group_members(
@@ -1961,7 +1955,7 @@ class DataProcessPipelineWidget(QWidget):
                     self._pending_lane_rebuild = True
                 target_block.start = start
                 target_block.end = end
-                self._invalidate_block_cache(
+                self._invalidate_geometry_cache(
                     target_block,
                     "linked range changed; awaiting preview",
                 )
@@ -1975,6 +1969,16 @@ class DataProcessPipelineWidget(QWidget):
             _pipeline, _layer, block = found
             block.last_summary = reason
         self._refresh_selection()
+
+    def _invalidate_geometry_cache(self, block: PipelineBlock, reason: str) -> None:
+        self._invalidate_block_cache(block, reason)
+        if self._canonical_tool_id(block.tool_id) == "remove_wavelet_denoise":
+            params = deepcopy(block.params)
+            params["region"] = []
+            params["operations"] = []
+            block.params = params
+            block.status = "empty"
+            block.last_summary = "Block 范围已改变，请重新预览并应用小波去噪。"
 
     def _make_preview_channel(
         self,
@@ -2158,6 +2162,8 @@ class DataProcessPipelineWidget(QWidget):
             source_pipeline,
             target_pipeline,
         ))
+        if self._canonical_tool_id(source_block.tool_id) == "remove_region":
+            values["time_ranges"] = deepcopy(source_block.params.get("time_ranges", []))
         if source_block.tool_id in TIMESTAMP_INDEX_TOOLS:
             translated = self._synced_block_params(
                 source_pipeline,
@@ -2265,6 +2271,8 @@ class DataProcessPipelineWidget(QWidget):
                 for key in LOCAL_SETTING_KEYS:
                     if key in params:
                         values[key] = deepcopy(params[key])
+            elif self._canonical_tool_id(target_block.tool_id) == "remove_region":
+                values["time_ranges"] = deepcopy(params.get("time_ranges", []))
             elif target_block.tool_id in TIMESTAMP_INDEX_TOOLS:
                 translated = self._synced_block_params(
                     source_pipeline,
@@ -2405,12 +2413,8 @@ class DataProcessPipelineWidget(QWidget):
         layer: PipelineLayer,
         block: PipelineBlock,
     ):
-        if block.last_summary in (GLOBAL_RANGE_ERROR, LEGACY_WAVELET_RANGE_ERROR, LEGACY_SV_RANGE_ERROR):
+        if block.last_summary in (GLOBAL_RANGE_ERROR, LEGACY_SV_RANGE_ERROR):
             QMessageBox.warning(self, "无法打开处理工具", block.last_summary)
-            return
-        if (self._canonical_tool_id(block.tool_id) == "remove_secular_variation"
-                and (block.start != 0 or block.end != self._pipeline_data_len(pipeline))):
-            QMessageBox.warning(self, "无法打开处理工具", LEGACY_SV_RANGE_ERROR)
             return
         existing_dialog = self._group_editor_dialogs.get(block.settings_group_id)
         if existing_dialog is not None:
@@ -2440,6 +2444,9 @@ class DataProcessPipelineWidget(QWidget):
             editor_params["region"] = editor_params["_pipeline_step_range"]
             editor_params["operations"] = []
             editor_params["effect_to_end"] = True
+            range_start, range_end = 0, input_snapshot.size
+        elif is_both_sides_effect_tool(block.tool_id):
+            editor_params["_pipeline_step_range"] = [range_start, max(range_start, range_end - 1)]
             range_start, range_end = 0, input_snapshot.size
         preview_channel = self._make_preview_channel(
             pipeline.data_id,
@@ -2487,7 +2494,7 @@ class DataProcessPipelineWidget(QWidget):
 
         def _on_editor_result(_channel, result):
             current = self._find_block(block_id)
-            if (is_suffix_effect_tool(tool_id) and current is not None
+            if ((is_suffix_effect_tool(tool_id) or is_both_sides_effect_tool(tool_id) or tool_id == "remove_wavelet_denoise") and current is not None
                     and (current[2].start, current[2].end) != selected_range):
                 QMessageBox.warning(self, "Block 已改变", "Block 范围已改变，请重新打开工具并预览。")
                 dialog.close()
@@ -2507,7 +2514,7 @@ class DataProcessPipelineWidget(QWidget):
         if params_applied is not None:
             def _on_params_applied(values, _broadcast):
                 current = self._find_block(block_id)
-                if (is_suffix_effect_tool(tool_id) and current is not None
+                if ((is_suffix_effect_tool(tool_id) or is_both_sides_effect_tool(tool_id) or tool_id == "remove_wavelet_denoise") and current is not None
                         and (current[2].start, current[2].end) != selected_range):
                     return
                 detached = self._on_plugin_params_applied(
@@ -2940,6 +2947,9 @@ class DataProcessPipelineWidget(QWidget):
         if is_suffix_effect_tool(block.tool_id):
             params.update({"region": [start, max(start, end - 1)], "operations": [], "effect_to_end": True})
             start, end = 0, len(base_series)
+        elif is_both_sides_effect_tool(block.tool_id):
+            params.update({"region": [start, max(start, end - 1)], "effect_both_sides": True})
+            start, end = 0, len(base_series)
         values = np.asarray(current_input, dtype=np.float64).copy()
         if values.size != end - start:
             return
@@ -3096,11 +3106,12 @@ class DataProcessPipelineWidget(QWidget):
     ) -> np.ndarray:
         """把单个 block 的缓存修改叠加到当前快照上。"""
         tool_kind = TOOL_META.get(block.tool_id, {}).get("kind")
-        if (self._canonical_tool_id(block.tool_id) == "remove_secular_variation"
-                and (block.start != 0 or block.end != current_snapshot.size)):
+        if is_both_sides_effect_tool(block.tool_id) and not block.params.get("effect_both_sides"):
             if update_status:
-                self._invalidate_block_cache(block, LEGACY_SV_RANGE_ERROR)
-                block.status = "error"
+                block.input_slice = None
+                block.output_slice = None
+                block.status = "empty"
+                block.last_summary = "请打开工具并确认局部背景校正"
             return current_snapshot
         if is_suffix_effect_tool(block.tool_id) and not block.params.get("effect_to_end"):
             if update_status:
@@ -3112,7 +3123,7 @@ class DataProcessPipelineWidget(QWidget):
         n = current_snapshot.size
         start = max(0, min(block.start, n))
         end = max(start, min(block.end, n))
-        if is_suffix_effect_tool(block.tool_id):
+        if is_suffix_effect_tool(block.tool_id) or is_both_sides_effect_tool(block.tool_id):
             start, end = 0, n
         region_len = end - start
 

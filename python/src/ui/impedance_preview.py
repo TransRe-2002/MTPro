@@ -156,6 +156,7 @@ class ImpedancePreviewWidget(QWidget):
         self.method_filter = QComboBox(self)
         self.method_filter.addItem("全部", "all")
         self.method_filter.addItem("Robust 估计", "robust estimate")
+        self.method_filter.addItem("跨台站阻抗估计", "cross-station impedance")
         self.method_filter.addItem("远参考法", "remote reference")
         self.method_filter.addItem("拼接结果", "stitched impedance")
         self.method_filter.currentIndexChanged.connect(self._refresh_list)

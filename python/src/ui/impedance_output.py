@@ -28,14 +28,17 @@ class ImpedanceOutputWidget(QWidget):
 
         title = QLabel("阻抗输出", self)
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        hint = QLabel("选择当前数据集后运行阻抗估计或远参考法。", self)
+        hint = QLabel("选择数据集后运行阻抗估计。", self)
         hint.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.robust_button = QToolButton(self)
         self.robust_button.setText("Robust 估计")
         self.remote_button = QToolButton(self)
         self.remote_button.setText("远参考法")
+        self.cross_station_button = QToolButton(self)
+        self.cross_station_button.setText("跨台站阻抗估计")
         self.robust_button.clicked.connect(lambda: self._open("robust estimate"))
         self.remote_button.clicked.connect(lambda: self._open("remote reference"))
+        self.cross_station_button.clicked.connect(lambda: self._open("cross_station_impedance"))
 
         toolbar = QHBoxLayout()
         toolbar.addWidget(title)
@@ -43,6 +46,7 @@ class ImpedanceOutputWidget(QWidget):
         toolbar.addStretch(1)
         toolbar.addWidget(self.robust_button)
         toolbar.addWidget(self.remote_button)
+        toolbar.addWidget(self.cross_station_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -56,6 +60,7 @@ class ImpedanceOutputWidget(QWidget):
         enabled = data is not None and data_id != 0
         self.robust_button.setEnabled(enabled)
         self.remote_button.setEnabled(enabled)
+        self.cross_station_button.setEnabled(enabled)
 
     def _open(self, tool_type: str) -> None:
         if self._data is None or self._data_id == 0:

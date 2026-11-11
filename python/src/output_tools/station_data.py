@@ -7,6 +7,24 @@ from core.station_metadata import StationMetadata
 from utils.series import dti_to_numpy
 
 
+def station_summaries(data_manager: DataManager) -> list[dict]:
+    """Describe loaded stations without copying or reading waveform arrays."""
+    stations = []
+    for station_id, station_data in data_manager.items():
+        station_channels = station_data.channel_names()
+        stations.append({
+            "id": station_id,
+            "name": station_data.name,
+            "has_magnetic": any(channel.lower().startswith(("h", "b")) for channel in station_channels),
+            "has_electric": any(channel.lower().startswith("e") for channel in station_channels),
+            "latitude": station_data.latitude,
+            "longitude": station_data.longitude,
+            "elevation": station_data.elevation,
+        })
+
+    return stations
+
+
 def station_data_package(data_manager: DataManager, data_id: int) -> dict | None:
     """Build the read-only station payload required by impedance-output tools."""
 
@@ -21,19 +39,6 @@ def station_data_package(data_manager: DataManager, data_id: int) -> dict | None
         if channel_names
         else np.array([])
     )
-    stations = []
-    for station_id, station_data in data_manager.items():
-        station_channels = station_data.channel_names()
-        stations.append({
-            "id": station_id,
-            "name": station_data.name,
-            "has_magnetic": any(channel.startswith(("H", "B")) for channel in station_channels),
-            "has_electric": any(channel.startswith("E") for channel in station_channels),
-            "latitude": station_data.latitude,
-            "longitude": station_data.longitude,
-            "elevation": station_data.elevation,
-        })
-
     return {
         "x": x_values,
         "y": np.array([]),
@@ -48,7 +53,7 @@ def station_data_package(data_manager: DataManager, data_id: int) -> dict | None
         "start_time": em_data.start_time.timestamp(),
         "dt": em_data.dt.total_seconds(),
         "kp_data": em_data.kp_data,
-        "stations": stations,
+        "stations": station_summaries(data_manager),
         "datetime_index": datetime_index,
         "name": em_data.name,
         "latitude": em_data.latitude,

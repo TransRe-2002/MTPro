@@ -7,7 +7,7 @@ baseline, and subtract it.  Missing samples stay missing in the output.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -34,6 +34,26 @@ class SecularVariationResult:
     status: str
     processed_segments: int = 0
     skipped_segments: int = 0
+
+
+def remove_local_secular_variation_series(series: pd.Series, region: tuple[int, int], **params) -> SecularVariationResult:
+    """Fit within an inclusive region and extend its endpoint corrections outwards."""
+    start, end = region
+    if start < 0 or end < start or end >= len(series):
+        raise ValueError("缓慢背景估计区间无效")
+    local = remove_secular_variation_series(series.iloc[start:end + 1], **params)
+    baseline = np.full(len(series), np.nan, dtype=np.float64)
+    local_baseline = local.estimated_baseline.to_numpy(dtype=np.float64)
+    baseline[start:end + 1] = local_baseline
+    valid = np.flatnonzero(np.isfinite(local_baseline))
+    if valid.size:
+        baseline[:start] = local_baseline[valid[0]]
+        baseline[end + 1:] = local_baseline[valid[-1]]
+    values = series.to_numpy(dtype=np.float64, copy=True)
+    mask = np.isfinite(values) & np.isfinite(baseline)
+    values[mask] -= baseline[mask]
+    return replace(local, cleaned=pd.Series(values, index=series.index, name=series.name),
+                   estimated_baseline=pd.Series(baseline, index=series.index, name=f"{series.name}_sv"))
 
 
 def remove_secular_variation_series(

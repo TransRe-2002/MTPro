@@ -3,6 +3,16 @@ from __future__ import annotations
 from ui.tools.registry import ToolSpec, register
 from output_tools.robust_estimate import RobustEstimateWidget
 from output_tools.remote_reference import RemoteReferenceWidget
+from output_tools.cross_station_impedance import CrossStationImpedanceWidget
+
+register(ToolSpec(
+    tool_id="cross_station_impedance",
+    display_name="跨台站阻抗估计",
+    category="output",
+    kind="param",
+    requires_channel=False,
+    output_factory=CrossStationImpedanceWidget,
+))
 
 register(ToolSpec(
     tool_id="robust_estimate",

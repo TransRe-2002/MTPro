@@ -686,7 +686,7 @@ def test_remove_wavelet_denoise_full_scope_allows_processing_without_region(qtbo
 
     assert region == (0, widget.y_data.size - 1)
     assert widget.add_region_btn.isEnabled() is False
-    assert "全通道" in widget.selection_status_label.text()
+    assert "全部输入数据" in widget.selection_status_label.text()
 
 
 def test_wavelet_level_limit_uses_full_channel_not_viewport(qtbot):

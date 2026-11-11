@@ -64,7 +64,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
             self.signal_plot_widget.double_click_callback = None
             self.signal_plot_widget.right_click_callback = None
             self.instruction_label.setText(
-                "使用 Pipeline 中的 Block 作为阶跃过渡范围；校正会延续到通道末尾。"
+                "使用 Pipeline 中的区间作为阶跃过渡范围；校正会延续到通道末尾。"
             )
             left, right = self.pipeline_region
             if self.x_data is not None and 0 <= left < right < self.x_data.size:
@@ -325,7 +325,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
         if region is None:
             return None
         if self.pipeline_region is not None and (region[0] < 2 or region[1] >= self.y_data.size - 1):
-            self.status_label.setText("请调整 Pipeline Block，在过渡区两侧留出有效数据后再预览。")
+            self.status_label.setText("请调整 Pipeline 中的区间，在过渡区两侧留出有效数据后再预览。")
             return None
         return {
             "y": (
@@ -411,7 +411,7 @@ class RemoveStepByBaseline(BaseProcessorWidget, RegionManagementMixin):
 
     def _on_heavy_failed(self, exc) -> None:
         super()._on_heavy_failed(exc)
-        self.status_label.setText(f"处理失败：{exc}。请确保 Block 两侧有足够的有效数据。")
+        self.status_label.setText(f"处理失败：{exc}。请确保区间两侧有足够的有效数据。")
 
     def _invalidate_pipeline_result(self, *_args) -> None:
         if self.pipeline_region is not None:

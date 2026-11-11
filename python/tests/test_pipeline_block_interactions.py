@@ -240,7 +240,7 @@ def test_context_menu_and_independent_copy_paste(qtbot):
     pasted = target.layers[0].blocks[0]
     assert pasted.block_id != source_block.block_id
     assert pasted.tool_id == source_block.tool_id
-    assert (pasted.start, pasted.end) == (0, 12)
+    assert pasted.end - pasted.start == 4
     assert pasted.settings_group_id == ""
     assert pasted.input_slice is None
     assert pasted.output_slice is None

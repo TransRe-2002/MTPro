@@ -603,6 +603,8 @@ class RemoveRegion(QtWidgets.QWidget):
             else "确定时将删除操作应用到所有已加载的数据集"
         )
         btn_layout.addWidget(self.all_data_checkbox)
+        if self._is_pipeline_editor:
+            self.all_data_checkbox.hide()
         btn_layout.addWidget(self.confirm_btn)
 
         glay = QtWidgets.QVBoxLayout()

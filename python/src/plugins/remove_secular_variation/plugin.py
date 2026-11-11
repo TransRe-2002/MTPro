@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from core.algorithms.secular_variation import remove_secular_variation_series
+from core.algorithms.secular_variation import remove_local_secular_variation_series, remove_secular_variation_series
 from plugin_api import ParamSpec, PluginInfo, TransformResult
 
 
@@ -21,6 +21,8 @@ class SecularVariationPlugin:
             ParamSpec("smoothing_window_points", "平滑窗口（点）", int, 8_760, minimum=1),
             ParamSpec("anchor_spacing_points", "锚点间隔（点）", int, 4_380, minimum=1),
             ParamSpec("min_valid_fraction", "锚点最小有效比例", float, 0.25, minimum=0.0, maximum=1.0),
+            ParamSpec("region", "背景估计范围", list, []),
+            ParamSpec("effect_both_sides", "两侧延续校正", bool, False),
         ),
     )
 
@@ -33,8 +35,10 @@ class SecularVariationPlugin:
         if ctx.is_cancelled():
             raise RuntimeError("secular-variation subtraction was cancelled before it started")
         ctx.progress(0.1, "估计缓慢背景基线")
-        result = remove_secular_variation_series(
-            block.series,
+        compute = remove_local_secular_variation_series if params["effect_both_sides"] else remove_secular_variation_series
+        positional = (block.series, tuple(params["region"])) if params["effect_both_sides"] else (block.series,)
+        result = compute(
+            *positional,
             smoothing_window_points=int(params["smoothing_window_points"]),
             anchor_spacing_points=int(params["anchor_spacing_points"]),
             min_valid_fraction=float(params["min_valid_fraction"]),

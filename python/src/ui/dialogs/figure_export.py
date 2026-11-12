@@ -92,7 +92,7 @@ class MatplotlibExportDialog(QDialog):
         self.height_spin.setRange(1, 30000)
         self.dpi_spin = QSpinBox()
         self.dpi_spin.setRange(1, 1200)
-        self.dpi_spin.setValue(300)
+        self.dpi_spin.setValue(144)
         self.width_spin.valueChanged.connect(self._on_size_edited)
         self.height_spin.valueChanged.connect(self._on_size_edited)
         self._apply_preset(1920, 1080)

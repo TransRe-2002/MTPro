@@ -948,7 +948,9 @@ def test_remove_wavelet_denoise_eq_curve_tracks_frequency_order_and_spins(qtbot)
     band_count = len(widget.gain_spins)
     assert widget.gain_curve_editor.display_indices == tuple(reversed(range(band_count)))
     assert widget.gain_curve_editor._band_names[0].startswith(f"D{band_count}")
-    assert "Hz" in widget.gain_curve_editor._band_names[0]
+    assert "Hz" not in widget.gain_curve_editor._band_names[0]
+    assert "频率" in widget.gain_curve_editor._band_tooltips[0]
+    assert "周期" in widget.gain_curve_editor._band_tooltips[0]
 
     widget.gain_spins[1].setValue(0.72)
     assert widget.gain_curve_editor.gains()[1] == pytest.approx(0.72)

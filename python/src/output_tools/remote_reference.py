@@ -28,7 +28,7 @@ configure_matplotlib_fonts()
 configure_pyqtgraph_theme()
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout, QGroupBox,
     QComboBox, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QSpinBox, QDoubleSpinBox, QLabel, QMenu, QMessageBox, QSplitter, QFrame,
     QDateTimeEdit, QApplication, QStackedWidget, QDialog,
@@ -37,6 +37,7 @@ from PySide6.QtCore import Qt, Signal, QDateTime, QTimer
 
 from ui.impedance_plot import draw_impedance_response, draw_tipper_response, draw_c_response
 from output_tools.shared.c_response import c_response_from_bands
+from output_tools.shared.result_naming import prompt_result_name
 from output_tools.shared.emtf import (
     BACKEND_EMTF_PYWRAP,
     BACKEND_EMTF_RS,
@@ -61,6 +62,7 @@ from ui.dialogs.figure_export import default_export_name, export_matplotlib_figu
 from utils.decimate import LODPyramid
 from base.qt_bridge import run as run_in_pool
 from utils.time_convert import pts_to_qdt, qdt_to_pts
+from utils.series import dti_to_numpy
 from utils.geo import station_distance
 
 logger = logging.getLogger(__name__)
@@ -262,7 +264,8 @@ class RemoteReferenceWidget(QWidget):
         self.local_plot = StepPlotWidget()
         self.local_plot.showGrid(x=True, y=True, alpha=0.3)
         self.local_plot.setLabel('left', 'E (mV/km)')
-        self.local_plot.setLabel('bottom', '时间')
+        self.local_plot.setLabel('bottom', '时间（UTC）')
+        self.local_plot.getAxis('bottom').utcOffset = 0
         self._local_legend = self.local_plot.addLegend(offset=(0, 10))
         self._local_plot_item = self.local_plot.getPlotItem()
 
@@ -289,7 +292,8 @@ class RemoteReferenceWidget(QWidget):
         self.remote_plot = StepPlotWidget()
         self.remote_plot.showGrid(x=True, y=True, alpha=0.3)
         self.remote_plot.setLabel('left', 'B (nT)')
-        self.remote_plot.setLabel('bottom', '时间')
+        self.remote_plot.setLabel('bottom', '时间（UTC）')
+        self.remote_plot.getAxis('bottom').utcOffset = 0
         self._remote_legend = self.remote_plot.addLegend(offset=(0, 10))
         self._remote_plot_item = self.remote_plot.getPlotItem()
 
@@ -483,7 +487,7 @@ class RemoteReferenceWidget(QWidget):
 
         # ── 运行按钮 ──
         self._btn_widget = QWidget()
-        btn_layout = QHBoxLayout(self._btn_widget)
+        btn_layout = QGridLayout(self._btn_widget)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         self.run_button = QPushButton("运行远参考估计")
         self.run_button.clicked.connect(self._run_estimation)
@@ -496,11 +500,12 @@ class RemoteReferenceWidget(QWidget):
         self.cancel_button = QPushButton("取消计算")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel_estimation)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.run_button)
-        btn_layout.addWidget(self.cancel_button)
-        btn_layout.addWidget(self.save_preview_btn)
-        btn_layout.addWidget(self.view_preview_btn)
+        btn_layout.addWidget(self.run_button, 0, 0)
+        btn_layout.addWidget(self.cancel_button, 0, 1)
+        btn_layout.addWidget(self.save_preview_btn, 1, 0)
+        btn_layout.addWidget(self.view_preview_btn, 1, 1)
+        btn_layout.setColumnStretch(0, 1)
+        btn_layout.setColumnStretch(1, 1)
 
         self.status_label = QLabel("")
 
@@ -615,6 +620,8 @@ class RemoteReferenceWidget(QWidget):
         # 两个波形图左右并排
         self.local_plot.setLabel('top', '本地站')
         self.remote_plot.setLabel('top', '远参考站')
+        self.local_plot.getAxis('top').setStyle(showValues=False, tickLength=0)
+        self.remote_plot.getAxis('top').setStyle(showValues=False, tickLength=0)
         plot_row = QHBoxLayout()
         plot_row.setContentsMargins(0, 0, 0, 0)
         plot_row.addWidget(self.local_plot)
@@ -942,6 +949,8 @@ class RemoteReferenceWidget(QWidget):
         self._update_station_distance()
         self._update_sample_rate_warn()
         self._refresh_plots()
+        if self._ts_array is not None and len(self._ts_array) > 1:
+            self._local_plot_item.setXRange(float(self._ts_array[0]), float(self._ts_array[-1]), padding=0.02)
 
     def _on_remote_station_changed(self, _idx: int):
         self._mark_parameters_changed()
@@ -1061,7 +1070,7 @@ class RemoteReferenceWidget(QWidget):
             return
 
         datetime_index = pd.DatetimeIndex(data.datetime_index)
-        t = datetime_index.asi8.astype(np.float64) / 1_000_000_000.0
+        t = dti_to_numpy(datetime_index)
         self._ts_array = t
         pw = max(self.local_plot.width(), 800)
 
@@ -1100,7 +1109,7 @@ class RemoteReferenceWidget(QWidget):
             return
 
         datetime_index = pd.DatetimeIndex(data.datetime_index)
-        t = datetime_index.asi8.astype(np.float64) / 1_000_000_000.0
+        t = dti_to_numpy(datetime_index)
         self._ts_remote_array = t
         pw = max(self.remote_plot.width(), 800)
 
@@ -1289,7 +1298,7 @@ class RemoteReferenceWidget(QWidget):
             return 0, 0
         t_arr = self._ts_array
         start = int(np.searchsorted(t_arr, left))
-        end = int(np.searchsorted(t_arr, right))
+        end = len(t_arr) if len(t_arr) and right >= t_arr[-1] else int(np.searchsorted(t_arr, right))
         return max(0, start), min(data.npts, end)
 
     def _set_spins(self, start: int, end: int):
@@ -1829,6 +1838,13 @@ class RemoteReferenceWidget(QWidget):
             return
         payload = dict(self._calculation_context)
         payload["bands"] = self._bands
+        name = prompt_result_name(self, payload)
+        if name is None:
+            return
+        if self._current_calculation_signature() != self._saved_calculation_signature():
+            QMessageBox.warning(self, "参数已更改", "参数、台站或通道已更改，请重新运行后再保存。")
+            return
+        payload["name"] = name
         self.snapshot_save_requested.emit(payload)
         self._saved_current = True
         self.save_preview_btn.setEnabled(False)

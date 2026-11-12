@@ -43,6 +43,7 @@ from plugins.common.region import RegionManagementMixin
 from plugins.common.step_algorithms import WaveletDenoiseResult
 from plugins.common.plotting import ProcessingPlotWidget, StepPlotWidget
 from ui.widgets.gain_curve_editor import GainCurveEditor
+from ui.widgets.band_axis import BandAxisItem, band_tooltip
 from utils.series import dti_to_numpy
 from utils.theme import configure_pyqtgraph_theme, pg_background, subtle_pen, transparent_legend_brush
 
@@ -172,7 +173,9 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         self.signal_plot_widget = StepPlotWidget()
         self.plot_widget = self.signal_plot_widget
         self.signal_plot_item = self.signal_plot_widget.getPlotItem()
-        self.detail_plot_widget = ProcessingPlotWidget()
+        self.detail_band_axis = BandAxisItem()
+        self.detail_plot_widget = ProcessingPlotWidget(axisItems={"bottom": self.detail_band_axis})
+        self.detail_band_axis.bind_plot(self.detail_plot_widget)
         self.detail_plot_item = self.detail_plot_widget.getPlotItem()
         self.gain_curve_editor = GainCurveEditor(self, maximum=2.0)
         self.auto_eq_preview_checkbox = QCheckBox("松手后自动预览")
@@ -619,20 +622,11 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
             else:
                 widget.setText(base)
 
-    @staticmethod
-    def _format_eq_frequency(value: float) -> str:
-        value = float(value)
-        if value == 0.0:
-            return "0"
-        if abs(value) >= 1000.0:
-            return f"{value / 1000.0:.4g}k"
-        return f"{value:.4g}"
-
-    def _gain_band_descriptors(self) -> tuple[list[str], list[int]]:
+    def _gain_band_descriptors(self) -> tuple[list[str], list[int], list[str]]:
         """Return display labels and gain indices ordered from low to high."""
         band_count = len(self.gain_spins)
         if band_count == 0:
-            return [], []
+            return [], [], []
         nyquist = 0.5 * self._sample_rate_hz()
         if self._transform_kind() == "wp":
             band_width = nyquist / float(band_count)
@@ -652,19 +646,14 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
                 for logical_index in logical_indices
             ]
             prefix = "D"
-        labels = [
-            (
-                f"{prefix}{logical_index + 1}\n"
-                f"{self._format_eq_frequency(low)}–{self._format_eq_frequency(high)} Hz"
-            )
-            for logical_index, (low, high) in zip(logical_indices, ranges)
-        ]
-        return labels, logical_indices
+        labels = [f"{prefix}{index + 1}" for index in logical_indices]
+        tooltips = [band_tooltip(label, low, high) for label, (low, high) in zip(labels, ranges)]
+        return labels, logical_indices, tooltips
 
     def _sync_gain_curve(self) -> None:
-        labels, logical_indices = self._gain_band_descriptors()
+        labels, logical_indices, tooltips = self._gain_band_descriptors()
         gains = [float(self.gain_spins[index].value()) for index in logical_indices]
-        self.gain_curve_editor.set_bands(labels, gains, logical_indices)
+        self.gain_curve_editor.set_bands(labels, gains, logical_indices, tooltips)
 
     def _sync_mode_controls(self):
         is_manual = self.mode_combo.currentText() == "manual"
@@ -1095,7 +1084,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         )
         self.detail_plot_item.addItem(self.energy_before_bars)
         self.detail_plot_item.addItem(self.energy_after_bars)
-        self.detail_plot_item.getAxis("bottom").setTicks([[(1.2, "D1")]])
+        self.detail_band_axis.set_band_ticks([])
 
     # ------------------------------------------------------------------
     # BaseProcessorWidget 接口
@@ -1131,7 +1120,7 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         if result is None or result.detail_energy_before.size == 0:
             self.energy_before_bars.setOpts(x=np.array([1.0]), height=np.array([0.0]), width=0.36)
             self.energy_after_bars.setOpts(x=np.array([1.4]), height=np.array([0.0]), width=0.36)
-            self.detail_plot_item.getAxis("bottom").setTicks([[(1.2, "D1")]])
+            self.detail_band_axis.set_band_ticks([])
             self.detail_plot_item.setXRange(0.5, 1.9, padding=0.0)
             return
 
@@ -1140,9 +1129,10 @@ class RemoveWaveletDenoise(BaseProcessorWidget, RegionManagementMixin):
         after_x = levels + 0.18
         self.energy_before_bars.setOpts(x=before_x, height=result.detail_energy_before, width=0.32)
         self.energy_after_bars.setOpts(x=after_x, height=result.detail_energy_after, width=0.32)
-        short_labels = [label.replace(" [", "\n[") for label in result.band_labels]
-        ticks = [[(float(level), label) for level, label in zip(levels, short_labels)]]
-        self.detail_plot_item.getAxis("bottom").setTicks(ticks)
+        short_labels = [label.split(" [", 1)[0] for label in result.band_labels]
+        ticks = [(float(level), label, band_tooltip(label, *bounds))
+                 for level, label, bounds in zip(levels, short_labels, result.band_ranges_hz)]
+        self.detail_band_axis.set_band_ticks(ticks)
         self.detail_plot_item.setXRange(0.4, float(levels[-1]) + 0.6, padding=0.0)
 
     # ------------------------------------------------------------------

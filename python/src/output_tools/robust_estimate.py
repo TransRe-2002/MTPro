@@ -23,7 +23,7 @@ configure_matplotlib_fonts()
 configure_pyqtgraph_theme()
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout, QGroupBox,
     QComboBox, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QSpinBox, QDoubleSpinBox, QLabel, QMenu, QMessageBox, QSplitter, QFrame,
     QDateTimeEdit, QApplication, QStackedWidget,
@@ -36,6 +36,7 @@ from core.em_data import EMData
 from emtf.io.zfile import emtf_phase_deg
 from ui.impedance_plot import draw_impedance_response, draw_tipper_response, draw_c_response
 from output_tools.shared.c_response import c_response_from_bands
+from output_tools.shared.result_naming import prompt_result_name
 from output_tools.shared.emtf import (
     BACKEND_EMTF_PYWRAP,
     BACKEND_EMTF_RS,
@@ -59,6 +60,7 @@ from ui.dialogs.figure_export import default_export_name, export_matplotlib_figu
 from utils.decimate import LODPyramid
 from base.qt_bridge import run as run_in_pool
 from utils.time_convert import pts_to_qdt, qdt_to_pts
+from utils.series import dti_to_numpy
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +162,8 @@ class RobustEstimateWidget(QWidget):
         self.plot_widget = StepPlotWidget()
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('left', 'E (mV/km)')
-        self.plot_widget.setLabel('bottom', '时间')
+        self.plot_widget.setLabel('bottom', '时间（UTC）')
+        self.plot_widget.getAxis('bottom').utcOffset = 0
         self._legend = self.plot_widget.addLegend(offset=(0, 10))
 
         self.plot_item = self.plot_widget.getPlotItem()
@@ -340,7 +343,7 @@ class RobustEstimateWidget(QWidget):
             control.valueChanged.connect(self._mark_parameters_changed)
 
         # ── 运行按钮 ──
-        btn_layout = QHBoxLayout()
+        btn_layout = QGridLayout()
         self.run_button = QPushButton("运行 Robust 估计")
         self.run_button.clicked.connect(self._run_estimation)
         self.save_preview_btn = QPushButton("保存到阻抗预览")
@@ -352,11 +355,12 @@ class RobustEstimateWidget(QWidget):
         self.cancel_button = QPushButton("取消计算")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel_estimation)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.run_button)
-        btn_layout.addWidget(self.cancel_button)
-        btn_layout.addWidget(self.save_preview_btn)
-        btn_layout.addWidget(self.view_preview_btn)
+        btn_layout.addWidget(self.run_button, 0, 0)
+        btn_layout.addWidget(self.cancel_button, 0, 1)
+        btn_layout.addWidget(self.save_preview_btn, 1, 0)
+        btn_layout.addWidget(self.view_preview_btn, 1, 1)
+        btn_layout.setColumnStretch(0, 1)
+        btn_layout.setColumnStretch(1, 1)
 
         self.status_label = QLabel("")
 
@@ -636,6 +640,8 @@ class RobustEstimateWidget(QWidget):
         self.end_dt.blockSignals(False)
 
         self._refresh_plot()
+        if self._ts_array is not None and len(self._ts_array) > 1:
+            self.plot_item.setXRange(float(self._ts_array[0]), float(self._ts_array[-1]), padding=0.02)
 
     def _on_channel_changed(self):
         """通道映射变更时刷新波形图。"""
@@ -750,7 +756,7 @@ class RobustEstimateWidget(QWidget):
 
         # 构建时间戳数组（同时缓存，供拖拽区域时二分查找使用）
         datetime_index = pd.DatetimeIndex(pkg['datetime_index'])
-        t = datetime_index.asi8.astype(np.float64) / 1_000_000_000.0
+        t = dti_to_numpy(datetime_index)
         self._ts_array = t
 
         channels = self._selected_channels()
@@ -923,7 +929,7 @@ class RobustEstimateWidget(QWidget):
             return 0, 0
         t_arr = self._ts_array
         start = int(np.searchsorted(t_arr, left))
-        end = int(np.searchsorted(t_arr, right))
+        end = len(t_arr) if len(t_arr) and right >= t_arr[-1] else int(np.searchsorted(t_arr, right))
         return max(0, start), min(self._pkg['npts'], end)
 
     def _set_spins(self, start: int, end: int):
@@ -1427,6 +1433,13 @@ class RobustEstimateWidget(QWidget):
             return
         payload = dict(self._calculation_context)
         payload["bands"] = self._bands
+        name = prompt_result_name(self, payload)
+        if name is None:
+            return
+        if self._current_calculation_signature() != self._saved_calculation_signature():
+            QMessageBox.warning(self, "参数已更改", "参数或通道已更改，请重新运行后再保存。")
+            return
+        payload["name"] = name
         self.snapshot_save_requested.emit(payload)
         self._saved_current = True
         self.save_preview_btn.setEnabled(False)

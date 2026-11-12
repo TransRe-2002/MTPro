@@ -200,11 +200,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path outputs/mtpro-windows-x86_64/bin/win64 | Out-Null
           Copy-Item python/src/bin/win64/dnff.exe,python/src/bin/win64/tranmt.exe outputs/mtpro-windows-x86_64/bin/win64/
 
-      - name: Verify packaged EMTF backend
+      - name: Verify both packaged Rust extensions
         run: |
           $env:PYTHONPATH = ""
           & outputs/mtpro-windows-x86_64/MTPro.exe --verify-emtf-rs
-          if ($LASTEXITCODE -ne 0) { throw 'Packaged EMTF backend validation failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Rust extension validation failed' }
 
       - name: Package artifact
         run: |

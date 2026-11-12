@@ -35,11 +35,14 @@ _configure_matplotlib_cache()
 
 if __name__ == "__main__" and "--verify-emtf-rs" in sys.argv[1:]:
     import emtf_rs
+    import rust_lib
     from output_tools.shared.emtf import native_emtf_rs_available
 
     if not native_emtf_rs_available() or not callable(getattr(emtf_rs, "estimate_emtf_bands", None)):
         raise SystemExit("emtf-rs backend is unavailable")
-    print("emtf-rs backend is available")
+    if not callable(getattr(rust_lib, "minmax_decimate_rs", None)):
+        raise SystemExit("built-in Rust extension is unavailable")
+    print("emtf-rs and built-in Rust extensions are available")
     raise SystemExit(0)
 
 from PySide6.QtWidgets import QApplication

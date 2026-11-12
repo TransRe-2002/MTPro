@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from utils.series import dti_to_numpy
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMessageBox, QWidget
 
 from emtf.time_alignment import matching_remote_slice
@@ -196,6 +197,8 @@ class CrossStationImpedanceWidget(RobustEstimateWidget):
                     self.end_spin.setValue(end)
 
         self._refresh_plot()
+        if self._ts_array is not None and len(self._ts_array) > 1:
+            self.plot_item.setXRange(float(self._ts_array[0]), float(self._ts_array[-1]), padding=0.02)
 
 
     def _refresh_plot(self):
@@ -225,7 +228,7 @@ class CrossStationImpedanceWidget(RobustEstimateWidget):
 
         # 构建时间戳数组（同时缓存，供拖拽区域时二分查找使用）
         datetime_index = pd.DatetimeIndex(pkg['datetime_index'])
-        t = datetime_index.asi8.astype(np.float64) / 1_000_000_000.0
+        t = dti_to_numpy(datetime_index)
         self._ts_array = t
 
         channels = self._selected_channels()
@@ -239,7 +242,7 @@ class CrossStationImpedanceWidget(RobustEstimateWidget):
             y = source_pkg.get('all_y', {}).get(ch_name)
             if y is None:
                 continue
-            source_times = pd.DatetimeIndex(source_pkg['datetime_index']).asi8.astype(np.float64) / 1_000_000_000.0
+            source_times = dti_to_numpy(pd.DatetimeIndex(source_pkg['datetime_index']))
             entries.append((tag, ch_name, tag in ("Ex", "Ey"), source_times, y))
 
         self._plot_generation += 1

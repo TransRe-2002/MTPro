@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from utils.theme import configure_pyqtgraph_theme, pg_background
+from ui.widgets.band_axis import BandAxisItem
 
 
 class GainCurveEditor(QWidget):
@@ -26,9 +27,12 @@ class GainCurveEditor(QWidget):
         self._targets: list[pg.TargetItem] = []
         self._logical_indices: list[int] = []
         self._band_names: list[str] = []
+        self._band_tooltips: list[str] = []
         self._updating = False
 
-        self.plot_widget = pg.PlotWidget(self)
+        self.band_axis = BandAxisItem()
+        self.plot_widget = pg.PlotWidget(self, axisItems={"bottom": self.band_axis})
+        self.band_axis.bind_plot(self.plot_widget)
         configure_pyqtgraph_theme(self.plot_widget)
         self.plot_widget.setBackground(pg_background(self.plot_widget))
         self.plot_item = self.plot_widget.getPlotItem()
@@ -67,6 +71,7 @@ class GainCurveEditor(QWidget):
         labels: Sequence[str],
         gains: Sequence[float],
         logical_indices: Sequence[int] | None = None,
+        tooltips: Sequence[str] | None = None,
     ) -> None:
         for target in self._targets:
             self.plot_item.removeItem(target)
@@ -77,6 +82,8 @@ class GainCurveEditor(QWidget):
             logical_indices = list(range(count))
         self._logical_indices = [int(value) for value in logical_indices[:count]]
         self._band_names = [str(value) for value in labels[:count]]
+        self._band_tooltips = [str(tooltips[index]) if tooltips is not None and index < len(tooltips)
+                               else self._band_names[index] for index in range(count)]
         show_target_labels = count <= 12
 
         for display_index, (name, gain) in enumerate(
@@ -106,7 +113,7 @@ class GainCurveEditor(QWidget):
                 lambda _item=target: self.editing_finished.emit()
             )
             self._targets.append(target)
-            target.setToolTip(name.replace("\n", " "))
+            target.setToolTip(self._band_tooltips[display_index])
             self.plot_item.addItem(target)
 
         self._update_curve()
@@ -129,10 +136,10 @@ class GainCurveEditor(QWidget):
         max_labels = max(1, min(12, (self.plot_widget.width() - 60) // max(1, label_width)))
         tick_step = max(1, int(np.ceil(count / max_labels)))
         ticks = [
-            (float(index), self._band_names[index])
+            (float(index), self._band_names[index], self._band_tooltips[index])
             for index in range(0, count, tick_step)
         ]
-        self.plot_item.getAxis("bottom").setTicks([ticks])
+        self.band_axis.set_band_ticks(ticks)
 
     def set_gain(self, logical_index: int, value: float) -> None:
         try:

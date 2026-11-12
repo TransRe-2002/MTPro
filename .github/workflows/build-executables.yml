@@ -98,6 +98,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Fetch Windows EMTF native extension
+        uses: actions/checkout@v6
+        with:
+          ref: 66abc9be2d65ab5bbdbb196c858273fd200c48dd
+          path: .ci-emtf
+
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -124,6 +130,32 @@ jobs:
           pip install -r python/requirements.txt
           pip install nuitka ordered-set maturin
 
+      - name: Install and verify EMTF native extension
+        run: |
+          $site = python -c "import site; print(site.getsitepackages()[0])"
+          Copy-Item -Recurse .ci-emtf/ci-deps/emtf_rs "$site/emtf_rs"
+          $env:PYTHONPATH = "${{ github.workspace }}/python/src"
+          @'
+          import numpy as np
+          import emtf_rs
+          from base.emtf_native import estimate_native_emtf
+          from emtf.estimate import decimation_with_fft_window
+          from emtf.types import FrequencyBand
+          assert callable(emtf_rs.estimate_emtf_bands)
+          assert callable(emtf_rs.emtf_spectra)
+          rng = np.random.default_rng(42)
+          hx, hy = rng.normal(size=(2, 32768))
+          ex, ey = .3 * hx + .8 * hy, -.7 * hx + .2 * hy
+          result = estimate_native_emtf(
+              ex, ey, hx, hy, sample_rate_hz=.2,
+              decimation_levels=decimation_with_fft_window(.2, 128)[:4],
+              bands=[FrequencyBand(1, 18, 25)], station_name='TEST', hz=None,
+          )
+          assert len(result.frequencies_hz) == 1
+          print('Windows EMTF native calculation verified')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'EMTF native validation failed' }
+
       - name: Build and install Rust extension (Windows)
         working-directory: rust_lib
         run: |
@@ -149,6 +181,7 @@ jobs:
             --include-package=builtin_plugins `
             --include-package=plugins `
             --include-package=output_tools `
+            --include-package=emtf_rs `
             --include-module=rust_lib `
             --include-module=plugin_api `
             --include-module=pydoc `
@@ -166,6 +199,12 @@ jobs:
           Rename-Item outputs/mtpro-windows-x86_64/main.exe MTPro.exe
           New-Item -ItemType Directory -Force -Path outputs/mtpro-windows-x86_64/bin/win64 | Out-Null
           Copy-Item python/src/bin/win64/dnff.exe,python/src/bin/win64/tranmt.exe outputs/mtpro-windows-x86_64/bin/win64/
+
+      - name: Verify packaged EMTF backend
+        run: |
+          $env:PYTHONPATH = ""
+          & outputs/mtpro-windows-x86_64/MTPro.exe --verify-emtf-rs
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged EMTF backend validation failed' }
 
       - name: Package artifact
         run: |

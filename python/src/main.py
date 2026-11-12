@@ -33,6 +33,15 @@ def _configure_matplotlib_cache() -> None:
 
 _configure_matplotlib_cache()
 
+if __name__ == "__main__" and "--verify-emtf-rs" in sys.argv[1:]:
+    import emtf_rs
+    from output_tools.shared.emtf import native_emtf_rs_available
+
+    if not native_emtf_rs_available() or not callable(getattr(emtf_rs, "estimate_emtf_bands", None)):
+        raise SystemExit("emtf-rs backend is unavailable")
+    print("emtf-rs backend is available")
+    raise SystemExit(0)
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QObject
 
